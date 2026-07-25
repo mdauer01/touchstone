@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantix"
+version = "0.1.0"
+description = "Semantic verification engine: extracts the de facto semantics of a data estate from compiled SQL and reconciles them against the declared ontology."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "sqlglot>=25",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# Receipt signing (Ed25519). Absent → receipts issue unsigned with a note.
+sign = ["cryptography>=42"]
+# Execution slice: measure contradiction divergence against seed data.
+execute = ["duckdb>=1"]
+dev = ["pytest>=8", "ruff>=0.5", "cryptography>=42", "duckdb>=1"]
+
+[project.scripts]
+semantix = "semantix.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.setuptools.package-data]
+semantix = ["benchmark/*.yaml"]

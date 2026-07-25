@@ -1,0 +1,108 @@
+"""Write-back certification into Agents Schema (spec §7 Phase 2, landed early).
+
+Agents Schema is where agents already look for what a metric means; this
+module puts *whether that meaning is true* in the same place. After a scan,
+every concept's signed receipt is published into `AGENTS.ROOT` under the
+`semantix` provider:
+
+    (semantix, receipt/<concept>, <signed receipt JSON>)
+
+plus a `skill/verify-metric` row teaching any SQL-capable agent the check
+(per the schema's skill convention: Markdown with YAML frontmatter), and a
+documentation row under the unprefixed key `receipt` (per the schema's
+doc-row convention).
+
+Replacement semantics follow the standard's own model — provider rows are
+regenerated wholesale on each publish. That is safe here because ROOT is a
+*projection*: the append-only semantix store keeps every receipt and the
+full observation history; the warehouse rows are just the current answer.
+
+Target is a DuckDB file (zero-infra). A Snowflake target is the same three
+statements behind a different connector.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from semantix.store import Store
+
+PROVIDER = "semantix"
+
+SKILL_KEY = "skill/verify-metric"
+SKILL_CONTENT = """\
+---
+uses:
+  schemas: [AGENTS]
+---
+# Verify a metric before quoting it
+
+Before answering a business-metric question with a number, check whether the
+metric's definition is certified:
+
+```sql
+SELECT content FROM agents.root
+WHERE provider = 'semantix' AND key = 'receipt/<metric_name>';
+```
+
+The row is a signed semantic receipt. `status` is the verdict on the
+definition itself: CERTIFIED means every computed definition matches the
+declared one; CONTRADICTION means competing definitions disagree — read
+`known_divergences` before answering, and say which definition you used.
+`definition_version` pins the exact content-addressed definitions that were
+live. Verify the receipt offline with `semantix verify-receipt` against the
+publisher's pinned public key. Quote the `receipt_id` alongside the number.
+"""
+
+DOC_KEY = "receipt"
+DOC_CONTENT = (
+    "Rows under receipt/<concept> are signed semantic receipts issued by "
+    "semantix: the certification status of a metric's definition (CERTIFIED / "
+    "CONTRADICTION / ...), the content-addressed definition versions live at "
+    "issue time, physical lineage, and known divergences. Signatures are "
+    "Ed25519 over the canonical payload; see skill/verify-metric."
+)
+
+
+def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
+    """Publish signed receipts for every concept in the latest scan into the
+    warehouse's AGENTS.ROOT. Returns a summary of what was written."""
+    try:
+        import duckdb
+    except ImportError as e:
+        raise ValueError("publishing needs `pip install duckdb`") from e
+
+    scan = store.latest_scan()
+    if scan is None:
+        raise ValueError("no scans in this store — run `semantix scan` first")
+
+    labels = sorted({v["concept_label"] for v in store.verdicts_for_scan(scan["scan_id"])})
+    rows: list[tuple[str, str, str]] = []
+    for label in labels:
+        receipt = store.issue_receipt(label)
+        if receipt is not None:
+            rows.append((PROVIDER, f"receipt/{label}", json.dumps(receipt.as_dict())))
+    rows.append((PROVIDER, SKILL_KEY, SKILL_CONTENT))
+    rows.append((PROVIDER, DOC_KEY, DOC_CONTENT))
+
+    con = duckdb.connect(warehouse_path)
+    # Fully qualify with the catalog: a warehouse file named agents.duckdb —
+    # the natural name — makes bare `agents.root` ambiguous in DuckDB.
+    catalog = con.execute("SELECT current_database()").fetchone()[0]
+    root = f'"{catalog}".agents.root'
+    con.execute(f'CREATE SCHEMA IF NOT EXISTS "{catalog}".agents')
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS {root} "
+        "(provider VARCHAR, key VARCHAR, content VARCHAR)"
+    )
+    con.execute(f"DELETE FROM {root} WHERE provider = ?", (PROVIDER,))
+    con.executemany(f"INSERT INTO {root} VALUES (?, ?, ?)", rows)
+    con.close()
+
+    return {
+        "warehouse": warehouse_path,
+        "scan_id": scan["scan_id"],
+        "receipts": len(rows) - 2,
+        "keys": [key for _, key, _ in rows],
+    }

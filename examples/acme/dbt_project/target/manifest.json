@@ -1,0 +1,79 @@
+{
+  "metadata": {
+    "project_name": "acme",
+    "dbt_version": "1.8.0",
+    "generated_at": "2026-07-01T00:00:00Z"
+  },
+  "nodes": {
+    "model.acme.stg_orders": {
+      "resource_type": "model",
+      "name": "stg_orders",
+      "alias": "stg_orders",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/staging/stg_orders.sql",
+      "compiled_path": "target/compiled/acme/models/staging/stg_orders.sql",
+      "depends_on": { "nodes": [] }
+    },
+    "model.acme.fct_orders": {
+      "resource_type": "model",
+      "name": "fct_orders",
+      "alias": "fct_orders",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/marts/fct_orders.sql",
+      "compiled_path": "target/compiled/acme/models/marts/fct_orders.sql",
+      "depends_on": { "nodes": ["model.acme.stg_orders"] }
+    },
+    "model.acme.finance_net_revenue": {
+      "resource_type": "model",
+      "name": "finance_net_revenue",
+      "alias": "finance_net_revenue",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/finance/finance_net_revenue.sql",
+      "compiled_path": "target/compiled/acme/models/finance/finance_net_revenue.sql",
+      "depends_on": { "nodes": ["model.acme.fct_orders"] }
+    },
+    "model.acme.growth_net_revenue": {
+      "resource_type": "model",
+      "name": "growth_net_revenue",
+      "alias": "growth_net_revenue",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/growth/growth_net_revenue.sql",
+      "compiled_path": "target/compiled/acme/models/growth/growth_net_revenue.sql",
+      "depends_on": { "nodes": ["model.acme.stg_orders"] }
+    },
+    "model.acme.total_gmv": {
+      "resource_type": "model",
+      "name": "total_gmv",
+      "alias": "total_gmv",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/marts/total_gmv.sql",
+      "compiled_path": "target/compiled/acme/models/marts/total_gmv.sql",
+      "depends_on": { "nodes": ["model.acme.fct_orders"] }
+    },
+    "model.acme.gross_merchandise_value": {
+      "resource_type": "model",
+      "name": "gross_merchandise_value",
+      "alias": "gross_merchandise_value",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/reporting/gross_merchandise_value.sql",
+      "compiled_path": "target/compiled/acme/models/reporting/gross_merchandise_value.sql",
+      "depends_on": { "nodes": ["model.acme.fct_orders"] }
+    },
+    "model.acme.ops_refund_rate": {
+      "resource_type": "model",
+      "name": "ops_refund_rate",
+      "alias": "ops_refund_rate",
+      "schema": "analytics",
+      "database": null,
+      "original_file_path": "models/ops/ops_refund_rate.sql",
+      "compiled_path": "target/compiled/acme/models/ops/ops_refund_rate.sql",
+      "depends_on": { "nodes": ["model.acme.fct_orders"] }
+    }
+  }
+}

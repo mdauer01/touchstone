@@ -1,0 +1,38 @@
+{
+  "_comment": "Example Agents Schema export (AGENTS.* tables as JSON, lowercase table names). OSI declares net_revenue without filters and LookML declares gmv without grain — both underspecifications the scan surfaces as cross-provider contradictions.",
+  "osi_dataset": [
+    {
+      "name": "orders",
+      "source_table": "analytics.fct_orders",
+      "description": "Completed and pending orders, one row per order.",
+      "ai_context": "Primary commerce dataset."
+    }
+  ],
+  "osi_metric": [
+    {
+      "name": "net_revenue",
+      "dataset_name": "orders",
+      "description": "Revenue net of refunds.",
+      "ai_context": "Finance-reviewed metric.",
+      "expression": "sum(amount - refund_amount)"
+    }
+  ],
+  "lookml_view": [
+    {
+      "name": "orders_view",
+      "sql_table_name": "analytics.fct_orders",
+      "label": "Orders",
+      "description": "BI surface over fct_orders."
+    }
+  ],
+  "lookml_measure": [
+    {
+      "view_name": "orders_view",
+      "measure_name": "gmv",
+      "type": "sum",
+      "sql": "${TABLE}.amount",
+      "filters": "[channel: \"-internal\", status: \"-cancelled\"]",
+      "description": "Gross merchandise value."
+    }
+  ]
+}

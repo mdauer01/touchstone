@@ -1,0 +1,33 @@
+# Declared ontology — what the organization *says* its metrics mean.
+version: 1
+metrics:
+  - name: net_revenue
+    label: Net Revenue
+    owner: finance
+    description: Revenue from completed orders, net of refunds.
+    model: analytics.fct_orders
+    expr: "sum(amount - refund_amount)"
+    filters:
+      - "status = 'completed'"
+    group_by:
+      - "date_trunc('month', order_date)"
+
+  - name: gmv
+    label: Gross Merchandise Value
+    owner: finance
+    description: Total order value, excluding internal test traffic and cancellations.
+    model: analytics.fct_orders
+    expr: "sum(amount)"
+    filters:
+      - "channel <> 'internal'"
+      - "status <> 'cancelled'"
+    group_by:
+      - "date_trunc('month', order_date)"
+
+  - name: customer_ltv
+    label: Customer Lifetime Value
+    owner: growth
+    description: Average lifetime value per customer.
+    model: analytics.customer_ltv
+    expr: "avg(ltv)"
+    group_by: []

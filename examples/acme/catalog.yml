@@ -1,0 +1,38 @@
+# Physical catalog of the raw layer — the lineage terminals.
+raw:
+  orders:
+    order_id: bigint
+    customer_id: bigint
+    order_date: date
+    status: varchar
+    amount: "decimal(18,2)"
+    refund_amount: "decimal(18,2)"
+    channel: varchar
+  payments:
+    payment_id: bigint
+    order_id: bigint
+    method: varchar
+    fee: "decimal(18,2)"
+    captured_at: timestamp
+  customers:
+    customer_id: bigint
+    signup_date: date
+    segment: varchar
+  channels:
+    channel_code: varchar
+    channel_name: varchar
+
+# Declared keys and relationships — the ERD as the organization states it.
+# Unenforced in every cloud warehouse, so these are claims, not facts:
+# `semantix verify-relationships` is what upgrades them.
+primary_keys:
+  raw.orders: [order_id]
+  raw.customers: [customer_id]
+  raw.payments: [payment_id]
+  raw.channels: [channel_code]
+
+relationships:
+  - from: analytics.fct_orders.customer_id
+    to: raw.customers.customer_id
+  - from: raw.orders.channel        # documented lookup no dashboard joins
+    to: raw.channels.channel_code
