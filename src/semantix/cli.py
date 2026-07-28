@@ -57,7 +57,16 @@ def main(argv: list[str] | None = None) -> int:
     p_scan.add_argument(
         "--fail-on",
         choices=["contradiction", "any"],
-        help="non-zero exit if such verdicts exist (CI wedge)",
+        help="non-zero exit if such verdicts exist (CI wedge). Also fails when "
+             "the scan read no SQL at all or produced no measure, since a gate "
+             "that passes on an unread estate is not a gate",
+    )
+    p_scan.add_argument(
+        "--min-coverage",
+        type=float,
+        metavar="PCT",
+        help="non-zero exit if proof-grade canonicalization coverage is below "
+             "PCT — the estate was read but mostly not understood",
     )
     p_scan.add_argument(
         "--execute",
@@ -258,6 +267,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     # never mistaken for completeness.
     for s in result.skipped:
         print(f"  ! SKIPPED {s['system']}:{s['object_id']} — {s['reason']}")
+    if result.unparseable:
+        print(f"  ! {len(result.unparseable)} artifact(s) COULD NOT BE PARSED: "
+              f"{', '.join(result.unparseable[:5])}"
+              + (" …" if len(result.unparseable) > 5 else ""))
     if result.unmeasured:
         print(f"  ! {len(result.unmeasured)} artifact(s) yielded no measure: "
               f"{', '.join(result.unmeasured[:5])}"
@@ -297,7 +310,31 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         out.write_text(report_json(result.verdicts, scan_meta))
         print(f"json   → {out}")
 
+    # A GATE THAT PASSES ON AN UNREAD ESTATE IS NOT A GATE. `--fail-on` looked
+    # only at verdicts, so an empty project, a project whose every model failed
+    # to parse, and a manifest with no compiled SQL all exited 0 — a wrong
+    # `--dbt` path or a forgotten `dbt compile` turned CI green. Nothing was
+    # verified, so nothing objected.
+    if args.min_coverage is not None and stats["coverage_pct"] < args.min_coverage:
+        print(f"\nFAILED: proof-grade coverage {stats['coverage_pct']}% is below the "
+              f"required {args.min_coverage}% — most of this estate could not be "
+              f"canonicalized, so its verdicts do not describe it", file=sys.stderr)
+        return 1
     if args.fail_on:
+        if not result.artifacts:
+            print("\nFAILED: the scan found no computed SQL at all — check the "
+                  "--dbt / --sql-dir / --views path", file=sys.stderr)
+            return 1
+        if not result.fingerprints:
+            print(f"\nFAILED: {result.artifacts} artifact(s) were read and NONE "
+                  "yielded a measure — nothing in this estate was verified",
+                  file=sys.stderr)
+            return 1
+        unread = len(result.skipped)
+        if unread and args.fail_on == "any":
+            print(f"\nFAILED: {unread} artifact(s) could not be read, so this scan "
+                  "cannot speak for the whole estate", file=sys.stderr)
+            return 1
         bad = {VerdictType.CONTRADICTION}
         if args.fail_on == "any":
             bad |= {VerdictType.ORPHAN_CLAIM, VerdictType.SHADOW_METRIC, VerdictType.UNRESOLVED}

@@ -59,7 +59,10 @@ def test_simple_metrics_are_read_from_the_manifest(acme, tmp_path):
     project = with_semantic_layer(acme, tmp_path)
     specs = {s.name: s for s in load_dbt_metrics(project)}
 
-    assert specs["net_revenue"].expr == "sum(amount - refund_amount)"
+    # Rendered from MetricFlow's `agg` vocabulary rather than emitted verbatim,
+    # so `count_distinct` and `average` become real SQL. Case is canonicalized
+    # downstream and is not part of the claim.
+    assert specs["net_revenue"].expr.lower() == "sum(amount - refund_amount)"
     assert specs["net_revenue"].model == "analytics.fct_orders"
     assert specs["net_revenue"].system == "dbt_metrics"
     assert not specs["net_revenue"].untranslatable

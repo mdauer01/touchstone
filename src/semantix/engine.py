@@ -55,6 +55,11 @@ class ScanResult:
     skipped: list[dict] = field(default_factory=list)
     unmeasured: list[str] = field(default_factory=list)
     duplicate_relations: dict[str, list[str]] = field(default_factory=dict)
+    # Artifacts whose SQL would not PARSE. Computed since the completeness gate
+    # landed but never exposed, so an operator saw only "yielded no measure" —
+    # which reads as "this model defines no metric" and actively misled them
+    # about which models the engine could not read at all.
+    unparseable: list[str] = field(default_factory=list)
 
     @property
     def coverage(self) -> float:
@@ -234,6 +239,7 @@ def run_scan(
         skipped=skipped,
         unmeasured=unmeasured,
         duplicate_relations=dupes,
+        unparseable=unparseable,
     )
     store.finish_scan(scan_id, result.stats())
     return result, store

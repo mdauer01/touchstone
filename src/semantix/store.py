@@ -500,19 +500,53 @@ class Store:
         return out
 
     def scan_coverage(self) -> list[tuple[str, str, set[str]]]:
-        """[(scan_id, started_at, systems this scan actually read)], oldest
-        first. A scan that read a system is entitled to assert ABSENCE within
-        it; a scan that never looked at dbt says nothing about dbt."""
+        """[(scan_id, started_at, OBJECT KEYS this scan actually read)], oldest
+        first.
+
+        Absence is only concludable for an artifact the scan ENUMERATED. This
+        used to answer "which SYSTEMS did it touch", which is not evidence
+        about an individual artifact: pointing a second scan at an unrelated
+        dbt project — or at a subdirectory, or running per-team CI jobs against
+        one store — retired every definition the other project had, because
+        both are `system == "dbt"`. The models were still on disk. Re-scanning
+        then produced a second interval, so the store permanently recorded a
+        fictitious death-and-rebirth cycle.
+        """
         covered: dict[str, set[str]] = {}
         for r in self._conn.execute(
-            """SELECT sa.scan_id, a.system FROM scan_artifacts sa
+            """SELECT sa.scan_id, a.system, a.object_id FROM scan_artifacts sa
                JOIN artifacts a ON a.artifact_id = sa.artifact_id"""
         ):
-            covered.setdefault(r["scan_id"], set()).add(r["system"])
+            covered.setdefault(r["scan_id"], set()).add(
+                f"{r['system']}:{r['object_id']}")
+        # started_at, not rowid: intervals are stamped from observed_at, so a
+        # walk in insertion order produced intervals that do not contain the
+        # instants the definition was observed when a clock moved backwards.
         return [
             (r["scan_id"], r["started_at"], covered.get(r["scan_id"], set()))
-            for r in self._conn.execute("SELECT scan_id, started_at FROM scans ORDER BY rowid")
+            for r in self._conn.execute(
+                "SELECT scan_id, started_at FROM scans ORDER BY started_at, rowid")
         ]
+
+    def _relation_for(self, scan_id: str, object_key: str) -> str | None:
+        """The relation the ARTIFACT at this definition site reported.
+
+        `fingerprints.relation` is on a content-addressed row shared by every
+        site computing the same thing (record_fingerprint is INSERT OR IGNORE),
+        so the first site to be recorded won and history, asof, the HTML report
+        and the signed receipt all attributed the other sites' definitions to
+        its table — two teams' models rendering as one duplicated row.
+        """
+        system, _, rest = object_key.partition(":")
+        object_id = rest.rsplit(":", 1)[0] if ":" in rest else rest
+        row = self._conn.execute(
+            """SELECT a.relation FROM scan_artifacts sa
+               JOIN artifacts a ON a.artifact_id = sa.artifact_id
+               WHERE sa.scan_id = ? AND a.system = ? AND a.object_id = ?
+               LIMIT 1""",
+            (scan_id, system, object_id),
+        ).fetchone()
+        return row["relation"] if row else None
 
     def concept_members(self, concept_label: str) -> tuple[set[str], set[str]]:
         """(fingerprint ids, claim ids) ever clustered under this concept.
@@ -611,28 +645,54 @@ class Store:
             seen.setdefault(r["object_key"], {})[r["scan_id"]] = r
 
         coverage = self.scan_coverage()
+        covered_by = {scan_id: keys for scan_id, _, keys in coverage}
         states = self.artifact_states()
         intervals: list[ValidInterval] = []
         for object_key, by_scan in seen.items():
             system, _, rest = object_key.partition(":")
             artifact_key = f"{system}:{rest.rsplit(':', 1)[0]}" if ":" in rest else object_key
             runs: list[ValidInterval] = []
-            for scan_id, started_at, systems in coverage:
+            last_seen_scan: str | None = None
+            for scan_id, started_at, enumerated in coverage:
                 observed = by_scan.get(scan_id)
                 if observed is None:
-                    # Absence is only evidence when the scan (a) enumerated
-                    # this system and (b) either found the artifact gone, or
-                    # read it and found this measure gone. An artifact the
-                    # scan LISTED but could not read — an uncompiled dbt model
-                    # after `--select`, an unparseable file — says nothing at
-                    # all, and must not fabricate a retirement date.
-                    if not (system in systems and runs and runs[-1].valid_to is None):
+                    # Absence is only evidence when the scan (a) covered the
+                    # SAME ESTATE and (b) either found the artifact gone, or
+                    # read it and found this measure gone. An artifact the scan
+                    # LISTED but could not read — an uncompiled dbt model after
+                    # `--select`, an unparseable file — says nothing at all,
+                    # and must not fabricate a retirement date.
+                    #
+                    # "Same estate" cannot be "same system": pointing a second
+                    # scan at an unrelated dbt project retired every definition
+                    # of the first, because both are system == "dbt", while the
+                    # models sat untouched on disk. A deleted model and a model
+                    # in some other project look identical in isolation — both
+                    # are simply absent — so the discriminator is OVERLAP: this
+                    # scan is speaking about the same estate only if it re-read
+                    # something the scan that last saw this definition also
+                    # read.
+                    #
+                    # Scoped to the artifact's OWN system: a rescan that read
+                    # only the metrics YAML overlaps on the claims side while
+                    # having examined no dbt model at all, which is precisely
+                    # the `dbt --select` case that must say nothing.
+                    prefix = f"{system}:"
+                    def _same_system(keys, _p=prefix):
+                        return {k for k in keys if k.startswith(_p)}
+                    covers_same_estate = bool(
+                        last_seen_scan
+                        and (_same_system(enumerated)
+                             & _same_system(covered_by.get(last_seen_scan, set())))
+                    )
+                    if not (covers_same_estate and runs and runs[-1].valid_to is None):
                         continue
                     known = states.get(scan_id, {})
                     if known and artifact_key in known and not known[artifact_key]:
                         continue  # listed but unreadable -> no information
                     runs[-1].valid_to = started_at
                     continue
+                last_seen_scan = scan_id
                 if runs and runs[-1].valid_to is None and runs[-1].ref_id == observed["ref_id"]:
                     continue  # unchanged, still live
                 runs.append(
@@ -643,7 +703,14 @@ class Store:
                         semantic_hash=observed["semantic_hash"],
                         valid_from=observed["observed_at"],
                         valid_to=None,
-                        relation=observed["relation"],
+                        # The relation the ARTIFACT reported, not whatever the
+                        # content-addressed fingerprints row happens to hold:
+                        # two sites computing the same thing share one
+                        # fingerprint_id (INSERT OR IGNORE), so the first
+                        # site's relation won and a signed receipt attributed
+                        # one team's definition to the other team's table.
+                        relation=self._relation_for(observed["scan_id"], object_key)
+                        or observed["relation"],
                     )
                 )
             for i, run in enumerate(runs[:-1]):

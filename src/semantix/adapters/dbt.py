@@ -49,19 +49,27 @@ def load_dbt_detailed(
     # its logic vanish from lineage while appearing nowhere in coverage.
     for uid, node in all_nodes.items():
         kind = node.get("resource_type")
-        if kind == "model" and node.get("config", {}).get("materialized") != "ephemeral":
+        # `config` can be present and null in a real manifest, which made
+        # `.get("config", {}).get(...)` raise and take the whole scan down.
+        config = node.get("config") or {}
+        if kind == "model" and config.get("materialized") != "ephemeral":
             continue
-        if kind in ("test", "analysis", "operation", "sql_operation"):
+        if kind in ("test", "analysis", "operation", "sql_operation", "unit_test"):
             continue
         if kind == "model":
             continue  # ephemeral models are handled with the rest below
-        if kind in ("snapshot", "seed"):
-            skipped.append({
-                "object_id": uid,
-                "relation": _relation(node),
-                "path": node.get("original_file_path"),
-                "reason": f"{kind}s are not read by this adapter",
-            })
+        # Every OTHER resource_type is disclosed, not dropped. The chain of
+        # `if kind == ...` fell through for anything unrecognized — a missing
+        # resource_type, `function`, and whatever dbt adds next — so the
+        # docstring's "DISCLOSED rather than dropped" failed open exactly as
+        # dbt's node vocabulary grows.
+        skipped.append({
+            "object_id": uid,
+            "relation": _relation(node),
+            "path": node.get("original_file_path"),
+            "reason": (f"{kind}s are not read by this adapter" if kind
+                       else "node has no resource_type and was not read"),
+        })
     for uid, node in nodes.items():
         sql, path = _compiled_sql(root, node)
         if sql is None:
@@ -112,7 +120,16 @@ def load_dbt_metrics(project_dir: str | Path) -> list[DeclaredSpec]:
     for sm in semantic_models.values():
         sm_name = str(sm.get("name") or "")
         node_relation = sm.get("node_relation") or {}
-        relation = node_relation.get("relation_name") or node_relation.get("alias")
+        # A bare `alias` is not a relation. Falling back to it while
+        # `schema_name` and `database` sat right beside it produced a
+        # proof-grade claim over a relation that does not exist, whose lineage
+        # terminals could never match the computed model — a false
+        # ORPHAN_CLAIM or CONTRADICTION every time.
+        relation = node_relation.get("relation_name") or ".".join(
+            str(p) for p in (node_relation.get("database"),
+                             node_relation.get("schema_name"),
+                             node_relation.get("alias")) if p
+        )
         if sm_name and relation:
             model_relation[sm_name] = str(relation).replace('"', "").replace("`", "")
         for measure in sm.get("measures") or []:
@@ -122,6 +139,7 @@ def load_dbt_metrics(project_dir: str | Path) -> list[DeclaredSpec]:
                     str(measure.get("agg") or "").lower(),
                     measure.get("expr"),
                     sm_name,
+                    measure,
                 )
 
     specs: list[DeclaredSpec] = []
@@ -177,14 +195,78 @@ def _metric_expression(metric: dict, model_relation: dict[str, str],
         untranslatable += [f"measure filter not translatable: {w}"
                            for w in _where_filters(measure_ref)]
 
-    agg, expr, owning_model = measures.get(str(measure_name), ("", None, ""))
+    agg, expr, owning_model, measure = measures.get(
+        str(measure_name), ("", None, "", {}))
     model = model_relation.get(owning_model)
     if not agg:
         untranslatable.append(
             f"measure {measure_name} could not be resolved to an aggregation"
         )
         return None, model, untranslatable
-    return f"{agg}({expr or measure_name})", model, untranslatable
+
+    # Qualifiers that change what the measure MEANS. Dropping them produced a
+    # proof-grade `SUM(x)` claim for a measure that is explicitly not additive
+    # — the same failure `_where_filters` exists to prevent: a claim missing a
+    # semantic qualifier is a different claim, not a weaker one.
+    for field, note in (
+        ("non_additive_dimension", "semi-additive measure"),
+        ("agg_time_dimension", None),
+    ):
+        if field == "agg_time_dimension":
+            continue  # names a time column; does not change the aggregation
+        if measure.get(field):
+            untranslatable.append(
+                f"measure {measure_name} declares {field} ({note}): "
+                f"{measure[field]}")
+            return None, model, untranslatable
+    if isinstance(measure_ref, dict) and measure_ref.get("fill_nulls_with") is not None:
+        untranslatable.append(
+            f"metric declares fill_nulls_with={measure_ref['fill_nulls_with']}, "
+            f"which changes the measure's value for missing periods")
+        return None, model, untranslatable
+    if isinstance(type_params, dict) and type_params.get("join_to_timespine"):
+        untranslatable.append(
+            "metric declares join_to_timespine, which changes the row universe")
+        return None, model, untranslatable
+
+    rendered = _render_agg(agg, expr or measure_name, measure)
+    if rendered is None:
+        untranslatable.append(
+            f"measure {measure_name} uses agg `{agg}`, which this adapter does "
+            f"not know how to render as SQL")
+        return None, model, untranslatable
+    return rendered, model, untranslatable
+
+
+# MetricFlow's `agg` vocabulary. Emitting the raw value as `agg(expr)` made
+# `count_distinct(x)` and `average(x)` — MetricFlow's spellings — unparseable,
+# so every distinct-count and average metric in a dbt Semantic Layer project
+# was unverifiable, AND `spec.untranslatable` stayed empty so the honest-
+# refusal channel was bypassed: the failure surfaced as a canonicalization
+# error blaming the declaration's shape.
+_AGG_SQL = {
+    "sum": "SUM({expr})",
+    "min": "MIN({expr})",
+    "max": "MAX({expr})",
+    "count": "COUNT({expr})",
+    "average": "AVG({expr})",
+    "avg": "AVG({expr})",
+    "count_distinct": "COUNT(DISTINCT {expr})",
+    "sum_boolean": "SUM(CASE WHEN {expr} THEN 1 ELSE 0 END)",
+}
+
+
+def _render_agg(agg: str, expr: str, measure: dict) -> str | None:
+    """SQL for a MetricFlow aggregation, or None if we do not model it.
+
+    `percentile` is deliberately absent: its value lives in
+    `agg_params.percentile` with a `use_discrete_percentile` flag, and the
+    SQL differs per warehouse. Refusing is honest; guessing is not.
+    """
+    template = _AGG_SQL.get(agg)
+    if template is None:
+        return None
+    return template.format(expr=expr)
 
 
 def _find_manifest(root: Path) -> Path:
@@ -212,6 +294,17 @@ def _relation(node: dict) -> str:
 
 
 def _compiled_sql(root: Path, node: dict) -> tuple[str | None, str | None]:
+    """The SQL this model actually runs, and where we read it from.
+
+    `compiled_code` in the manifest OUTRANKS `target/compiled/*.sql` on disk.
+    The other order verified the PREVIOUS run's SQL whenever a CI-artifact
+    manifest landed in a tree with a leftover `target/` — producing a
+    CONTRADICTION against code that matches its declaration exactly, with
+    nothing in `skipped` to reveal it.
+    """
+    compiled_code = node.get("compiled_code")
+    if compiled_code:
+        return compiled_code, node.get("original_file_path")
     compiled_path = node.get("compiled_path")
     if compiled_path:
         # `compiled_path` comes from a third-party manifest, so it is
@@ -220,15 +313,14 @@ def _compiled_sql(root: Path, node: dict) -> tuple[str | None, str | None]:
         base = root.resolve()
         p = (root / compiled_path).resolve()
         if p.is_file() and p.is_relative_to(base):
-            # Estate files are not guaranteed UTF-8; a single mis-encoded
-            # byte used to abort the entire scan with a traceback.
             try:
-                return p.read_text(encoding="utf-8", errors="replace"), str(p)
-            except OSError:
+                # utf-8-sig, strict: a BOM killed whole models, and
+                # errors="replace" silently turned a latin-1 byte inside a
+                # predicate into U+FFFD — fingerprinting a DIFFERENT filter
+                # than the warehouse runs, at proof grade.
+                return p.read_text(encoding="utf-8-sig", errors="strict"), str(p)
+            except (OSError, UnicodeDecodeError):
                 pass
-    compiled_code = node.get("compiled_code")
-    if compiled_code:
-        return compiled_code, node.get("original_file_path")
     raw_code = node.get("raw_code")
     if raw_code and "{{" not in raw_code:
         return raw_code, node.get("original_file_path")
