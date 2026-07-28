@@ -129,7 +129,7 @@ def test_identical_logic_under_different_cte_names_still_matches():
         ("unnest", "select sum(u) as m from raw.orders, unnest([1, 2]) as t(u)",
          "duckdb", "UNNEST source"),
         ("with-totals", "select status, sum(amount) as m from raw.orders "
-                        "group by status with totals", "clickhouse", "GROUP BY WITH TOTALS"),
+                        "group by status with totals", "clickhouse", "WITH TOTALS"),
     ],
 )
 def test_unmodeled_construct_drops_below_proof_grade(name, sql, dialect, gap):
@@ -138,7 +138,10 @@ def test_unmodeled_construct_drops_below_proof_grade(name, sql, dialect, gap):
     f = fp(sql, dialect)
     assert f is not None, name
     assert f.canon_level == CanonLevel.INCOMPLETE.value, name
-    assert gap in f.gaps, name
+    # Substring, not equality: gaps are labelled by the clause they came
+    # from ("GROUP BY: WITH TOTALS"), and the test cares that the
+    # construct is NAMED, not how the label is punctuated.
+    assert any(gap in g for g in f.gaps), f"{name}: {f.gaps}"
     assert f.canon_level not in PROOF_LEVELS, name
 
 

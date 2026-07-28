@@ -314,6 +314,19 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
     claim.expressible = True
     claim.core = fps[0].core
     claim.canonical_sql = fps[0].canonical_sql
+    # The COMPLETENESS GATE applies to declarations too. `claim.canon_level`
+    # was set from canonicalize_sql, which only ever returns optimized /
+    # qualified / parsed / failed — the INCOMPLETE downgrade happens inside
+    # extract_fingerprints and was never copied back. So a declared definition
+    # using a construct the core cannot model was labelled proof-grade, and
+    # reconcile's `proof_grade` check — which reads exactly this field — fed it
+    # straight into the CERTIFIED gate. Two declarations over different arrays
+    # were provably indistinguishable at proof grade.
+    claim.canon_level = fps[0].canon_level
+    claim.gaps = fps[0].gaps
+    if fps[0].gaps:
+        claim.error = ("declaration uses constructs the semantic core cannot "
+                       "represent: " + "; ".join(fps[0].gaps))
     return claim
 
 

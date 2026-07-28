@@ -36,10 +36,51 @@ class CanonResult:
     ast: exp.Expression | None
     level: CanonLevel
     error: str | None = None
+    # Constructs visible in the SOURCE that the optimizer then destroys, so the
+    # completeness gate can never see them in the optimized AST. Merged into
+    # the fingerprint's gaps by extract_fingerprints.
+    gaps: tuple[str, ...] = ()
 
     @property
     def usable(self) -> bool:
         return self.ast is not None
+
+
+# Aggregates whose result depends on the order of the rows they consume. If
+# one of these is present, an ORDER BY in an inner scope is NOT decoration.
+_ORDER_SENSITIVE = (
+    "FIRST", "LAST", "ANY_VALUE", "ARG_MAX", "ARG_MIN", "ARBITRARY",
+    "ARRAY_AGG", "STRING_AGG", "LISTAGG", "GROUP_CONCAT", "COLLECT_LIST",
+)
+
+
+def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, ...]:
+    """Gaps that only exist BEFORE the optimizer runs.
+
+    sqlglot's subquery merge folds a CTE into its parent and discards the
+    CTE's ORDER BY. That ordering is load-bearing whenever the scope above
+    consumes it with an order-sensitive aggregate — `first(amount)` over a
+    CTE ordered ASC and the same CTE ordered DESC compute different numbers
+    — and by the time the gate looks at the optimized AST there is nothing
+    left to see. We cannot preserve it, so we refuse to certify through it.
+
+    Only when an order-sensitive consumer is actually present: an ORDER BY in
+    a staging model is otherwise genuinely neutral, and gating every one of
+    them would make ordinary dbt SQL uncertifiable.
+    """
+    outermost = unwrap_select(parsed)
+    inner_ordered = any(
+        select is not outermost and select.args.get("order") is not None
+        for select in parsed.find_all(exp.Select)
+    )
+    if not inner_ordered:
+        return ()
+    has_window = parsed.find(exp.Window) is not None
+    consumers = {type(node).__name__.upper() for node in parsed.find_all(exp.AggFunc)}
+    consumers |= {str(node.this).upper() for node in parsed.find_all(exp.Anonymous)}
+    if has_window or consumers & set(_ORDER_SENSITIVE):
+        return ("inner ORDER BY consumed by an order-sensitive aggregate",)
+    return ()
 
 
 def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
@@ -50,6 +91,9 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
         parsed = sqlglot.parse_one(sql, read=dialect)
     except Exception as e:  # noqa: BLE001 — adapter input is arbitrary SQL
         return CanonResult(None, CanonLevel.FAILED, f"parse: {e}")
+
+    # Read what the optimizer is about to destroy, before it runs.
+    pre_gaps = _pre_optimization_gaps(parsed, dialect)
 
     _strip_neutral(parsed)
     _resolve_group_ordinals(parsed)
@@ -64,17 +108,23 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
             ast = qualify(parsed.copy(), schema=schema, dialect=dialect)
             level = CanonLevel.QUALIFIED
         except Exception as e2:  # noqa: BLE001
-            return CanonResult(parsed, CanonLevel.PARSED, f"{error}; qualify: {e2}")
+            return CanonResult(parsed, CanonLevel.PARSED,
+                               f"{error}; qualify: {e2}", pre_gaps)
 
     try:
         ast = _canonical_table_aliases(ast)
         ast = _normalize_symmetric(ast, dialect)
     except Exception as e3:  # noqa: BLE001
         # Normalization is best-effort; a partially normalized AST is still
-        # usable, it just weakens equality to a hypothesis.
+        # usable, it just weakens equality to a hypothesis — and THAT is what
+        # the level must say. It previously stayed at a PROOF level, so a
+        # certificate could be issued from an AST the engine had already
+        # recorded that it failed to canonicalize. Neither step is atomic, so
+        # a throw mid-loop leaves partially renamed tables behind.
         error = f"{error + '; ' if error else ''}normalize: {e3}"
+        level = CanonLevel.PARSED
 
-    return CanonResult(ast, level, error)
+    return CanonResult(ast, level, error, pre_gaps)
 
 
 def _strip_neutral(ast: exp.Expression) -> None:
@@ -87,7 +137,16 @@ def _strip_neutral(ast: exp.Expression) -> None:
     stripped: they are semantic, and the completeness gate needs to see
     them. (Window-internal ordering lives on exp.Window, untouched here.)
     """
+    # Only the OUTERMOST select's ordering is neutral. Inside a CTE or derived
+    # table, ORDER BY is load-bearing for order-sensitive aggregates in the
+    # scope above — FIRST, LAST, ANY_VALUE, ARG_MAX, ARRAY_AGG — so stripping
+    # it made a staging CTE ordered ASC hash identically to the same CTE
+    # ordered DESC, which computes different numbers. Stripping happens before
+    # CTE bodies are digested, so the digest could not recover it either.
+    outermost = unwrap_select(ast)
     for select in ast.find_all(exp.Select):
+        if select is not outermost:
+            continue
         bounded = select.args.get("limit") is not None or select.args.get("offset") is not None
         if not bounded:
             select.set("order", None)
@@ -100,8 +159,20 @@ def _resolve_group_ordinals(ast: exp.Expression) -> None:
         group = select.args.get("group")
         if group is None:
             continue
-        for item in list(group.expressions):
-            if isinstance(item, exp.Literal) and item.is_int:
+        # Ordinals inside ROLLUP(...) / CUBE(...) / GROUPING SETS(...) live in
+        # their OWN args, not in group.expressions. Iterating only the latter
+        # left `GROUP BY ROLLUP(1, 2)` unresolved, so the grain was
+        # non-empty but content-free — `rollup(1,2)` over (status, channel)
+        # hashed identically to `rollup(1,2)` over (channel, status), which
+        # are different breakdowns with different subtotal rows.
+        containers: list[exp.Expression] = [group]
+        for construct in ("rollup", "cube", "grouping_sets"):
+            containers += [n for n in (group.args.get(construct) or [])
+                           if isinstance(n, exp.Expression)]
+        for container in containers:
+            for item in list(container.find_all(exp.Literal)):
+                if not item.is_int:
+                    continue
                 idx = int(item.this) - 1
                 if 0 <= idx < len(select.expressions):
                     target = select.expressions[idx]
@@ -163,7 +234,16 @@ def _canonical_table_aliases(ast: exp.Expression) -> exp.Expression:
     for table, new in assignments:
         if table.alias_or_name in ambiguous:
             continue
-        table.set("alias", exp.TableAlias(this=exp.to_identifier(new)))
+        # Replacing the whole TableAlias node discarded its COLUMN RENAME list.
+        # `raw.refunds t(a, b, c)` and `raw.refunds t(b, a, c)` then became the
+        # same relation, so `sum(a)` meant refund_id in one and order_id in the
+        # other — and both reported source_columns=('raw.refunds.a',), a
+        # physical lineage naming a column that does not exist. Receipts cite
+        # that field as lineage, so this was fabrication, not omission.
+        existing = table.args.get("alias")
+        columns = existing.args.get("columns") if isinstance(existing, exp.TableAlias) else None
+        table.set("alias", exp.TableAlias(this=exp.to_identifier(new),
+                                          **({"columns": columns} if columns else {})))
 
     for column in ast.find_all(exp.Column):
         old = column.table

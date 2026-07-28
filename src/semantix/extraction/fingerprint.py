@@ -55,8 +55,16 @@ def extract_fingerprints(
     qualify = select.args.get("qualify")
     filter_list += [f"QUALIFY {render(p, dialect)}" for p in flatten_conjuncts(qualify.this if qualify else None)]
 
-    if select.args.get("distinct") is not None:
-        filter_list.append("SELECT DISTINCT")
+    distinct = select.args.get("distinct")
+    if distinct is not None:
+        # DISTINCT ON (k) keeps one row per k; plain DISTINCT de-duplicates
+        # whole rows. Collapsing both to the bare tag made a keyed dedup
+        # certify equal to an unkeyed one, and to a differently-keyed one.
+        on = distinct.args.get("on") if isinstance(distinct, exp.Expression) else None
+        if on is not None:
+            filter_list.append(f"SELECT DISTINCT ON ({render(on, dialect)})")
+        else:
+            filter_list.append("SELECT DISTINCT")
 
     # A bounded measure is a different measure, and its ordering is what
     # decides *which* rows survive — so both travel together.
@@ -66,7 +74,7 @@ def extract_fingerprints(
 
     filters = tuple(sorted(filter_list))
 
-    grain = tuple(sorted(_grain_terms(select.args.get("group"), dialect)))
+    grain = tuple(sorted(_grain_terms(select, select.args.get("group"), dialect)))
 
     join_nodes = tuple(sorted(set(amap.values())))
     join_edges = tuple(sorted(_join_terms(select, amap, dialect)))
@@ -76,7 +84,9 @@ def extract_fingerprints(
     # Completeness gate: if this select uses anything the core cannot
     # represent, the fingerprint must not be treated as proof-grade — the
     # unread construct would otherwise read as "identical" to its absence.
-    gaps = detect_gaps(select)
+    # Gaps the OPTIMIZER destroyed travel on the CanonResult: by the time we
+    # see the optimized AST, a merged CTE's ORDER BY is simply gone.
+    gaps = tuple(sorted({*detect_gaps(select), *canon.gaps}))
     if set_op:
         gaps = tuple(sorted({*gaps, "set operation"}))
     level = canon.level.value
@@ -165,40 +175,82 @@ def _body_digests(bodies: dict[str, exp.Expression], dialect: str) -> dict[str, 
     staging CTE, four or five layers deep), where extraction stopped
     responding rather than failing visibly.
     """
-    memo: dict[str, str] = {}
+    # Which CTEs sit on a cycle (a recursive CTE). Only their presence on the
+    # walk stack can change a digest, so only they belong in the memo key.
+    # Keying on "was ANY cycle involved" disabled memoization for the whole
+    # graph, restoring the exponential blowup this function was rewritten to
+    # remove: one `WITH RECURSIVE` date spine — routine — took a 32-CTE model
+    # from 0.06s to 58s, and two more layers took it to four minutes.
+    cyclic = _cyclic_names(bodies)
+    memo: dict[tuple[str, frozenset[str]], str] = {}
     stack: list[str] = []
 
     def digest(name: str) -> tuple[str, bool]:
-        """(hash, whether a cycle was involved) — a body reached through a
-        recursive reference is not memoized, because its value depends on
-        where the walk started."""
-        if name in memo:
-            return memo[name], False
+        """(hash, whether a cycle was involved)."""
+        key = (name, frozenset(n for n in stack if n in cyclic))
+        if key in memo:
+            return memo[key], False
         body = bodies[name]
+        stack.append(name)
+        nested: list[str] = []
+        saw_cycle = False
+        sub_digests: dict[str, str] = {}
+        for ref in sorted({t.name for t in body.find_all(exp.Table)} & set(bodies)):
+            if ref in stack:  # recursive CTE — do not fold it into itself
+                saw_cycle = True
+                continue
+            sub, sub_cycle = digest(ref)
+            saw_cycle = saw_cycle or sub_cycle
+            sub_digests[ref] = sub
+            # The DIGEST only — `f"{ref}={sub}"` put the referenced CTE's NAME
+            # back into the payload, so renaming an intermediate CTE still
+            # changed every downstream hash even after the body text stopped
+            # naming it. Sorted below, so order is stable without the key.
+            nested.append(sub)
+        stack.pop()
+
         # Normalize the body the same way the outer scope is normalized before
         # hashing it — the optimizer qualifies CTE bodies but leaves the
         # author's aliases, so raw text made `from raw.orders as cust` differ
         # from `from raw.orders`, fabricating a contradiction from a rename.
-        text = render(normalize_scope(body.copy(), dialect), dialect)
-        stack.append(name)
-        nested: list[str] = []
-        cyclic = False
-        for ref in sorted({t.name for t in body.find_all(exp.Table)} & set(bodies)):
-            if ref in stack:  # recursive CTE — do not fold it into itself
-                cyclic = True
-                continue
-            sub, sub_cyclic = digest(ref)
-            cyclic = cyclic or sub_cyclic
-            nested.append(f"{ref}={sub}")
-        stack.pop()
+        # References to OTHER CTEs are then replaced by their digests, because
+        # the rendered text otherwise carries their NAMES: renaming an
+        # intermediate CTE changed every downstream fingerprint, so a pure
+        # refactor of a layered dbt project reported a CONTRADICTION on every
+        # metric it fed — contradicting this module's own stated invariant
+        # that a body is keyed on its content, never its name.
+        normalized = normalize_scope(body.copy(), dialect)
+        for table in normalized.find_all(exp.Table):
+            digest_of = sub_digests.get(table.name)
+            if digest_of is not None and not table.args.get("db"):
+                table.set("this", exp.to_identifier(f"cte_{digest_of}"))
+        text = render(normalized, dialect)
+
         value = hashlib.sha256(
-            (text + "|" + "|".join(nested)).encode()
+            (text + "|" + "|".join(sorted(nested))).encode()
         ).hexdigest()[:16]
-        if not cyclic:
-            memo[name] = value
-        return value, cyclic
+        memo[key] = value
+        return value, saw_cycle
 
     return {name: digest(name)[0] for name in bodies}
+
+
+def _cyclic_names(bodies: dict[str, exp.Expression]) -> set[str]:
+    """CTE names that participate in a cycle (i.e. recursive CTEs)."""
+    edges = {name: {t.name for t in body.find_all(exp.Table)} & set(bodies)
+             for name, body in bodies.items()}
+    cyclic: set[str] = set()
+    for start in bodies:
+        seen, queue = set(), list(edges[start])
+        while queue:
+            node = queue.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            queue.extend(edges.get(node, ()))
+        if start in seen:
+            cyclic.add(start)
+    return cyclic
 
 
 def _resolve_cte_sources(amap: dict[str, str], select: exp.Select,
@@ -233,12 +285,26 @@ def _render_bound(select: exp.Select, dialect: str) -> str | None:
     return "BOUND " + " ".join(parts)
 
 
-def _grain_terms(group: exp.Expression | None, dialect: str) -> list[str]:
+def _grain_terms(select: exp.Select, group: exp.Expression | None,
+                 dialect: str) -> list[str]:
     """Grouping keys, including the multi-level constructs that do NOT live in
     group.expressions. ROLLUP(a, b) is a different grain from a flat (a, b) —
     it emits subtotal rows — and both differ from no grouping at all."""
     if group is None:
         return []
+    # GROUP BY ALL groups by every non-aggregate projection. It lives in its
+    # own arg, so the grain read as EMPTY and a full breakdown hashed as a
+    # grand total — the same hole ROLLUP had, reopened by the idiom that is
+    # now the default in DuckDB and Databricks SQL. Resolve it to the keys it
+    # actually means, so it also compares equal to the explicit spelling.
+    if group.args.get("all"):
+        return [
+            render(proj.this if isinstance(proj, exp.Alias) else proj, dialect)
+            for proj in select.expressions
+            if not any(a.find_ancestor(exp.Window) is None
+                       for a in (proj.this if isinstance(proj, exp.Alias) else proj)
+                       .find_all(exp.AggFunc))
+        ]
     terms = [render(g, dialect) for g in group.expressions]
     for construct in ("rollup", "cube", "grouping_sets"):
         for node in group.args.get(construct) or []:
@@ -254,17 +320,40 @@ def _join_terms(select: exp.Select, amap: dict[str, str], dialect: str) -> list[
     for join in select.args.get("joins") or []:
         side = (join.args.get("side") or "").upper()
         kind = (join.args.get("kind") or "").upper()
-        label = " ".join(p for p in (side, kind or "INNER") if p) + " JOIN"
+        # `kind or "INNER"` rendered every outer join as "LEFT INNER JOIN".
+        # Harmless for hashing (it was consistent) but the string is quoted
+        # verbatim in blame and receipts, so it stated a self-contradiction.
+        label = " ".join(p for p in (side, kind) if p) or "INNER"
+        # ASOF keeps one nearest match per probe row; a plain join keeps all of
+        # them. Dropping `method` made a 3x row-multiplication difference
+        # invisible, and MATCH_CONDITION is what an ASOF join actually joins on.
+        method = (join.args.get("method") or "").upper()
+        if method:
+            label = f"{method} {label}"
+        match_condition = join.args.get("match_condition")
+        if match_condition is not None:
+            label = f"{label} MATCH_CONDITION({render(match_condition, dialect)})"
+        label += " JOIN"
+
+        # WHICH relation is being joined is part of the edge. Without it, and
+        # with the ON predicate's operands sorted by normalization, `A LEFT
+        # JOIN B` and `B LEFT JOIN A` produced byte-identical edges — two
+        # ordinary models with opposite row-preservation semantics certifying
+        # as identical. This needs no exotic syntax and was the worst
+        # false-certification path in the engine.
+        target_node = join.this
+        target = target_node.alias_or_name if isinstance(target_node, exp.Table) else None
+        target_relation = amap.get(target, target) if target else render(target_node, dialect)
+
         on = join.args.get("on")
         using = join.args.get("using")
         if on is not None:
-            terms.append(f"{label} ON {render(on, dialect)}")
+            terms.append(f"{label} {target_relation} ON {render(on, dialect)}")
         elif using:
             cols = ", ".join(render(u, dialect) for u in using)
-            terms.append(f"{label} USING ({cols})")
+            terms.append(f"{label} {target_relation} USING ({cols})")
         else:
-            target = join.this.alias_or_name if isinstance(join.this, exp.Table) else "?"
-            terms.append(f"{label} {amap.get(target, target)}")
+            terms.append(f"{label} {target_relation}")
     return terms
 
 

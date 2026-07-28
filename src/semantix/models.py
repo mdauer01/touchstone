@@ -163,6 +163,10 @@ class Claim:
     canon_level: str = CanonLevel.FAILED.value
     canonical_sql: str | None = None
     error: str | None = None
+    # Constructs the declaration uses that the SemanticCore cannot represent.
+    # Mirrors Fingerprint.gaps: a claim carrying gaps is below proof grade and
+    # can be reported and diffed but never certified equal to anything.
+    gaps: tuple[str, ...] = ()
 
     @staticmethod
     def make_id(name: str, provenance: Provenance, expr_raw: str | None) -> str:
