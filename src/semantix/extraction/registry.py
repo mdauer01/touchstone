@@ -32,7 +32,7 @@ class SchemaRegistry:
             self._types[rel] = dict(cols)
             self._terminals[rel] = {c: (f"{rel}.{c}",) for c in cols}
 
-    def sqlglot_schema(self, dialect: str | None = None) -> MappingSchema:
+    def sqlglot_schema(self, dialect: str) -> MappingSchema:
         """Schema object for sqlglot — only relations we know the columns of.
 
         Three constraints, each learned the hard way:
@@ -65,7 +65,10 @@ class SchemaRegistry:
         whole superlinearity at 2,000 models. It must be built with the SAME
         dialect the query is optimized under, or normalization disagrees and
         nothing resolves: Snowflake folds unquoted identifiers to upper case
-        and most other dialects fold to lower.
+        and most other dialects fold to lower. `dialect` is REQUIRED rather
+        than defaulted for exactly that reason — omitting it silently builds a
+        schema that matches nothing, which reads as "this estate has no
+        catalog" rather than as a bug.
         """
         if dialect not in self._schema_cache:
             try:

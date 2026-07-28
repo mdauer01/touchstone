@@ -25,7 +25,7 @@ CATALOG = {
 
 def fp(sql: str, dialect: str = "duckdb"):
     registry = SchemaRegistry(CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(), dialect)
+    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
     fps = extract_fingerprints(canon, "analytics.m", Provenance("t", "t"), dialect, registry)
     return fps[0] if fps else None
 

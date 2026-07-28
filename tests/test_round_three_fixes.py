@@ -20,7 +20,7 @@ CATALOG = {"raw.orders": {"order_id": "bigint", "status": "varchar",
 
 def fps_for(sql, dialect="duckdb"):
     registry = SchemaRegistry(CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(), dialect)
+    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
     return extract_fingerprints(canon, "analytics.m", Provenance("t", "t"), dialect, registry)
 
 

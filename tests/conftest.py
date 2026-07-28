@@ -37,7 +37,7 @@ def registry() -> SchemaRegistry:
 
 @pytest.fixture
 def schema(registry) -> dict:
-    return registry.sqlglot_schema()
+    return registry.sqlglot_schema("duckdb")
 
 
 @pytest.fixture
