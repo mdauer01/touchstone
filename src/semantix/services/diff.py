@@ -32,11 +32,32 @@ def diff_verdicts(store: Store, scan_id: str | None = None,
     Defaults to the two most recent scans. Returns None when there is no
     baseline to compare against (first scan of an estate)."""
     if scan_id is None or baseline_scan_id is None:
-        recent = store.recent_scans(2)
+        # Only completed scans, and skip back over any that observed the SAME
+        # estate: re-running a job (a CI retry, a flaky rerun) otherwise makes
+        # the baseline the PR's own previous scan, so the regression appears
+        # in both, `new` is empty, and the gate goes green on a real problem.
+        completed = store.completed_scans()
         if scan_id is None:
-            scan_id = recent[0]["scan_id"] if recent else None
+            scan_id = completed[0]["scan_id"] if completed else None
+        if scan_id is None:
+            return None
         if baseline_scan_id is None:
-            baseline_scan_id = recent[1]["scan_id"] if len(recent) > 1 else None
+            current_digest = store.snapshot_digest(scan_id)
+            same_estate = None
+            for candidate in completed:
+                if candidate["scan_id"] == scan_id:
+                    continue
+                if current_digest and store.snapshot_digest(
+                    candidate["scan_id"]
+                ) == current_digest:
+                    same_estate = same_estate or candidate["scan_id"]
+                    continue  # same estate — a re-run, not a baseline
+                baseline_scan_id = candidate["scan_id"]
+                break
+            # Every earlier scan saw the same estate: nothing can have been
+            # introduced, so diff against one of them and report cleanly
+            # rather than claiming there is nothing to compare.
+            baseline_scan_id = baseline_scan_id or same_estate
     if scan_id is None or baseline_scan_id is None:
         return None
 

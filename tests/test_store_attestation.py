@@ -40,7 +40,13 @@ def test_normalize_ts_canonicalizes_offsets():
     assert normalize_ts("2026-03-01T00:00:00+00:00") == "2026-03-01T00:00:00Z"
     assert normalize_ts("2026-03-01T05:00:00+05:00") == "2026-03-01T00:00:00Z"
     assert normalize_ts("2026-03-01T00:00:00Z") == "2026-03-01T00:00:00Z"
-    assert normalize_ts("not a timestamp") == "not a timestamp"  # never raises
+    # Unparseable input RAISES. Passing it through does not fail — text
+    # comparison against '03/01/2026' silently answers with the wrong
+    # definition and then signs it, which is worse than an error.
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        normalize_ts("not a timestamp")
 
 
 def test_as_of_accepts_offset_timestamps(acme, tmp_path, monkeypatch):

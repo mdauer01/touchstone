@@ -370,7 +370,11 @@ def _cmd_history(args: argparse.Namespace) -> int:
 
 def _cmd_asof(args: argparse.Namespace) -> int:
     store = Store(args.db)
-    live = store.as_of(args.concept, args.at)
+    try:
+        live = store.as_of(args.concept, args.at)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if not live:
         print(f"'{args.concept}' had no live definition at {args.at}", file=sys.stderr)
         return 2
@@ -390,7 +394,11 @@ def _cmd_attest(args: argparse.Namespace) -> int:
         from semantix.services.freshness import check_freshness
 
         freshness = check_freshness(store, **estate)
-    receipt = store.issue_receipt(args.concept, args.as_of, freshness=freshness)
+    try:
+        receipt = store.issue_receipt(args.concept, args.as_of, freshness=freshness)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if receipt is None:
         print(f"cannot attest '{args.concept}': no verdicts recorded", file=sys.stderr)
         return 2

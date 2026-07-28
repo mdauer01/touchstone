@@ -96,8 +96,32 @@ def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
         f"CREATE TABLE IF NOT EXISTS {root} "
         "(provider VARCHAR, key VARCHAR, content VARCHAR)"
     )
+    # Name the columns. A positional INSERT writes into whatever the first
+    # three columns happen to be, and this table belongs to the CUSTOMER: if
+    # theirs carries an id, a timestamp, or a different column order, every
+    # value lands in the wrong field and their existing rows are corrupted by
+    # a tool whose entire pitch is not corrupting things.
+    existing = {
+        r[0].lower()
+        for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE lower(table_schema) = 'agents' AND lower(table_name) = 'root'"
+        ).fetchall()
+    }
+    required = {"provider", "key", "content"}
+    missing = sorted(required - existing)
+    if existing and missing:
+        con.close()
+        raise ValueError(
+            f"{warehouse_path}: agents.root exists but is missing column(s) "
+            f"{', '.join(missing)} — refusing to write into a table whose shape "
+            "does not match the Agents Schema convention"
+        )
+
     con.execute(f"DELETE FROM {root} WHERE provider = ?", (PROVIDER,))
-    con.executemany(f"INSERT INTO {root} VALUES (?, ?, ?)", rows)
+    con.executemany(
+        f"INSERT INTO {root} (provider, key, content) VALUES (?, ?, ?)", rows
+    )
     con.close()
 
     return {

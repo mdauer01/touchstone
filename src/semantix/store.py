@@ -272,6 +272,25 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
+    def snapshot_digest(self, scan_id: str) -> str:
+        """Content fingerprint of the estate a scan observed. Two scans of an
+        unchanged estate share a digest, which is what lets `diff` tell a
+        re-run apart from a genuine change."""
+        shas = sorted(
+            f"{r['system']}:{r['object_id']}:{r['raw_sha']}"
+            for r in self.scan_snapshot(scan_id)
+        )
+        return hashlib.sha256("|".join(shas).encode()).hexdigest() if shas else ""
+
+    def completed_scans(self, limit: int = 50) -> list[dict]:
+        """Scans that finished, newest first. A scan that died partway wrote
+        no stats and describes nothing, so it must never serve as a baseline."""
+        rows = self._conn.execute(
+            "SELECT * FROM scans WHERE stats_json IS NOT NULL ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def recent_scans(self, limit: int = 2) -> list[dict]:
         """Most recent scans in insertion order (newest first). rowid breaks
         started_at ties, which matter in CI where two scans share a second."""
@@ -895,13 +914,20 @@ def normalize_ts(ts: str) -> str:
     only correct when every timestamp shares one representation. An RFC-3339
     offset like '2026-03-01T00:00:00+00:00' sorts before the 'Z' form of the
     same instant, so an as-of query would silently return the previous,
-    superseded definition. Unparseable input is passed through unchanged
-    rather than raising — a bad filter must not take down an attestation.
+    superseded definition.
+
+    Unparseable input RAISES. Passing it through was the wrong call: text
+    comparison against a value like '03/01/2026' does not fail, it silently
+    answers with the wrong definition — and then signs it. An error the
+    caller must handle is strictly better than a confident wrong answer.
     """
     try:
         parsed = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return ts
+    except (ValueError, AttributeError) as e:
+        raise ValueError(
+            f"unparseable timestamp {ts!r}: expected an ISO-8601 instant such as "
+            "2026-03-01T00:00:00Z"
+        ) from e
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc)
     return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")

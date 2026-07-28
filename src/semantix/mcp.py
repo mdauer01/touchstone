@@ -180,12 +180,32 @@ class McpServer:
 
     def _verify_receipt(self, args: dict) -> Any:
         ok, message = verify_receipt_dict(args["receipt"], args.get("public_key"))
-        return {"valid": ok, "detail": message}
+        # A receipt that does not verify is an ERROR result, not a successful
+        # call that happens to say False. An agent checking only the
+        # transport-level flag would otherwise treat a forged receipt as good.
+        result = {"valid": ok, "detail": message}
+        if not ok:
+            result["error"] = f"receipt did not verify: {message}"
+        return result
 
     # ---------------------------------------------------------------- rpc core
 
-    def handle(self, message: dict) -> dict | None:
-        """One JSON-RPC message → response dict (None for notifications)."""
+    def handle(self, message: Any) -> Any:
+        """One JSON-RPC message → response (None for notifications).
+
+        Accepts anything the transport can deliver. A batch is a JSON array
+        and a malformed client can send a bare scalar; assuming an object
+        raised out of the loop and killed attestation for the whole session,
+        which is a poor answer to a bad request.
+        """
+        if isinstance(message, list):
+            if not message:
+                return self._error(None, -32600, "empty batch")
+            replies = [r for r in (self.handle(m) for m in message) if r is not None]
+            return replies or None
+        if not isinstance(message, dict):
+            return self._error(None, -32600, "request must be a JSON object or array")
+
         method = message.get("method", "")
         msg_id = message.get("id")
         if msg_id is None:  # notification — nothing to say back
