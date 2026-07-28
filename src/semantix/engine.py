@@ -29,6 +29,7 @@ from semantix.models import (
     Fingerprint,
     Provenance,
     Verdict,
+    VerdictType,
 )
 from semantix.services.reconcile import reconcile
 from semantix.services.resolution import resolve_concepts
@@ -113,6 +114,11 @@ def run_scan(
     # must still register upstream-first.
     artifacts = topo_sort(artifacts)
     dupes = duplicate_relations(artifacts)
+    # Models the adapter enumerated but could not hand us SQL for. Recording
+    # them as known-but-unreadable is what stops a routine partial compile
+    # from looking like a deletion.
+    for s in skipped:
+        store.record_artifact_state(scan_id, s["system"], s["object_id"], readable=False)
     fingerprints: list[Fingerprint] = []
     unmeasured: list[str] = []
     canon_levels: Counter = Counter()
@@ -134,6 +140,12 @@ def run_scan(
         )
         provenance = Provenance(
             system=artifact.system, object_id=artifact.object_id, path=artifact.path
+        )
+        # Readable iff we actually got an AST to extract from. A failed parse
+        # means we cannot speak to what this artifact defines.
+        store.record_artifact_state(
+            scan_id, artifact.system, artifact.object_id,
+            readable=canon.level != CanonLevel.FAILED,
         )
         found = extract_fingerprints(canon, artifact.relation, provenance, dialect, registry)
         if not found:
@@ -171,6 +183,7 @@ def run_scan(
 
     concepts = resolve_concepts(fingerprints, claims)
     verdicts = reconcile(concepts)
+    _qualify_for_unreadable(store, verdicts, skipped)
 
     execution: dict | None = None
     if execute_seed:
@@ -201,6 +214,39 @@ def run_scan(
     )
     store.finish_scan(scan_id, result.stats())
     return result, store
+
+
+def _qualify_for_unreadable(store: Store, verdicts: list[Verdict],
+                            skipped: list[dict]) -> None:
+    """Downgrade certification for concepts with a KNOWN unread definition.
+
+    An artifact the scan enumerated but could not read might contain a
+    competing definition. Where the store already knows it once defined a
+    concept — the routine `dbt build --select` case, where a contradicting
+    model simply was not compiled — certifying that concept asserts agreement
+    among definitions we did not see. The verdict is qualified in place so the
+    report and the CI gate say so too, not only the receipt.
+    """
+    if not skipped:
+        return
+    affected: dict[str, list[str]] = {}
+    for s in skipped:
+        for label in store.concepts_touching_artifact(s["system"], s["object_id"]):
+            affected.setdefault(label, []).append(f"{s['system']}:{s['object_id']}")
+    if not affected:
+        return
+    for verdict in verdicts:
+        sites = affected.get(verdict.concept_label)
+        if not sites:
+            continue
+        if verdict.verdict_type in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+            verdict.verdict_type = VerdictType.UNRESOLVED
+            verdict.severity = max(verdict.severity, 45)
+            verdict.summary = (
+                f"Cannot verify: this concept is also defined in {', '.join(sorted(set(sites)))}, "
+                f"which this scan could not read. {verdict.summary}"
+            )
+            verdict.evidence = {**verdict.evidence, "unreadable_sites": sorted(set(sites))}
 
 
 def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> Claim:

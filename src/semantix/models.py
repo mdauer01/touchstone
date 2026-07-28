@@ -219,6 +219,14 @@ class Receipt:
     as_of: str | None
     issued_at: str
     scan_id: str | None
+    # EVERY verdict for this concept, not just the primary. A concept can be
+    # CERTIFIED and ALIASING at once; reporting only the reassuring one hides
+    # a real finding from whoever trusts the receipt.
+    verdicts: list[dict] = field(default_factory=list)
+    # Scope limitation, in the auditor's sense: what the issuing scan could
+    # not read. A clean opinion over an incomplete estate is not a clean
+    # opinion, so this travels with every receipt and inside the signature.
+    scope: dict | None = None
     # When the verdicts behind this receipt were actually established (the
     # scan's start time). status is a statement about the estate at THIS
     # moment, not at issued_at — verification decays honestly.
@@ -242,6 +250,8 @@ class Receipt:
             "as_of": self.as_of,
             "issued_at": self.issued_at,
             "scan_id": self.scan_id,
+            "verdicts": self.verdicts,
+            "scope": self.scope,
             "verified_as_of": self.verified_as_of,
             "freshness": self.freshness,
             "signature": self.signature,

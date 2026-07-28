@@ -143,6 +143,18 @@ CREATE TABLE IF NOT EXISTS scan_artifacts (
     PRIMARY KEY (scan_id, artifact_id)
 );
 
+-- Per-scan fate of every artifact the scan KNEW ABOUT, which is what makes
+-- absence interpretable. A site may only be retired when a scan enumerated
+-- its source and the artifact was genuinely gone; an artifact that was listed
+-- but unreadable (uncompiled, unparseable) carries NO information about
+-- whether its definitions still exist.
+CREATE TABLE IF NOT EXISTS scan_artifact_state (
+    scan_id      TEXT NOT NULL,
+    artifact_key TEXT NOT NULL,       -- "<system>:<object_id>"
+    readable     INTEGER NOT NULL,    -- 1 = extracted from, 0 = known but unreadable
+    PRIMARY KEY (scan_id, artifact_key)
+);
+
 CREATE TABLE IF NOT EXISTS receipts (
     receipt_id   TEXT PRIMARY KEY,
     concept      TEXT NOT NULL,
@@ -420,6 +432,42 @@ class Store:
 
     # ------------------------------------------------------------ valid time
 
+    def concepts_touching_artifact(self, system: str, object_id: str) -> set[str]:
+        """Concept labels this artifact has previously contributed a definition
+        to. Used to decide whether an unreadable artifact is a RELEVANT gap:
+        if it once defined `net_revenue`, a scan that cannot read it must not
+        certify `net_revenue`."""
+        refs = {
+            r["ref_id"]
+            for r in self._conn.execute(
+                "SELECT ref_id FROM observations WHERE kind = 'fingerprint' "
+                "AND object_key LIKE ?",
+                (f"{system}:{object_id}:%",),
+            )
+        }
+        if not refs:
+            return set()
+        labels = set()
+        for r in self._conn.execute("SELECT label, members_json FROM concepts"):
+            members = json.loads(r["members_json"] or "{}")
+            if refs & set(members.get("fingerprints", [])):
+                labels.add(r["label"])
+        return labels
+
+    def record_artifact_state(self, scan_id: str, system: str, object_id: str,
+                              readable: bool) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO scan_artifact_state VALUES (?, ?, ?)",
+            (scan_id, f"{system}:{object_id}", 1 if readable else 0),
+        )
+
+    def artifact_states(self) -> dict[str, dict[str, bool]]:
+        """scan_id -> {artifact_key: readable}."""
+        out: dict[str, dict[str, bool]] = {}
+        for r in self._conn.execute("SELECT * FROM scan_artifact_state"):
+            out.setdefault(r["scan_id"], {})[r["artifact_key"]] = bool(r["readable"])
+        return out
+
     def scan_coverage(self) -> list[tuple[str, str, set[str]]]:
         """[(scan_id, started_at, systems this scan actually read)], oldest
         first. A scan that read a system is entitled to assert ABSENCE within
@@ -435,6 +483,53 @@ class Store:
             for r in self._conn.execute("SELECT scan_id, started_at FROM scans ORDER BY rowid")
         ]
 
+    def concept_members(self, concept_label: str) -> tuple[set[str], set[str]]:
+        """(fingerprint ids, claim ids) ever clustered under this concept.
+
+        Concept resolution runs at scan time and records its clustering in
+        `concepts.members_json`. Re-deriving membership by matching the
+        concept LABEL against member names throws that work away and fails on
+        exactly the case clustering exists for: an aliased concept whose
+        members are all spelled differently from the label (`gmv` clustering
+        `total_gmv` and `gross_merchandise_value`). A label also resolves via
+        any of its members, so asking about a name you saw in a report finds
+        the whole concept rather than a fragment.
+        """
+        target = normalize_name(concept_label)
+        fingerprints: set[str] = set()
+        claims: set[str] = set()
+        rows = self._conn.execute("SELECT label, members_json FROM concepts").fetchall()
+
+        matched_labels = {
+            r["label"] for r in rows if normalize_name(r["label"]) == target
+        }
+        if not matched_labels:
+            # Fall back to membership: the caller may have named a member.
+            for r in rows:
+                members = json.loads(r["members_json"] or "{}")
+                names = self._names_for(members.get("fingerprints", []))
+                if any(normalize_name(n) == target for n in names):
+                    matched_labels.add(r["label"])
+
+        for r in rows:
+            if r["label"] in matched_labels:
+                members = json.loads(r["members_json"] or "{}")
+                fingerprints.update(members.get("fingerprints", []))
+                claims.update(members.get("claims", []))
+        return fingerprints, claims
+
+    def _names_for(self, fingerprint_ids: list[str]) -> list[str]:
+        if not fingerprint_ids:
+            return []
+        marks = ",".join("?" * len(fingerprint_ids))
+        return [
+            r["concept_candidate"]
+            for r in self._conn.execute(
+                f"SELECT concept_candidate FROM fingerprints WHERE fingerprint_id IN ({marks})",
+                fingerprint_ids,
+            )
+        ]
+
     def history(self, concept_label: str) -> list[ValidInterval]:
         """Derived valid-time intervals for every definition site whose
         measure name matches the concept label.
@@ -446,6 +541,7 @@ class Store:
         coverage (rather than a mutable end-date column) keeps the store
         append-only: the observation log remains the only temporal truth.
         """
+        member_ids, _ = self.concept_members(concept_label)
         target = normalize_name(concept_label)
         rows = self._conn.execute(
             """SELECT o.scan_id, o.object_key, o.observed_at, o.ref_id,
@@ -458,23 +554,37 @@ class Store:
 
         seen: dict[str, dict[str, sqlite3.Row]] = {}
         for r in rows:
-            if normalize_name(r["concept_candidate"]) != target:
+            # Membership recorded at scan time is authoritative. The name
+            # match is only a fallback for stores written before concepts
+            # were persisted.
+            belongs = (r["ref_id"] in member_ids if member_ids
+                       else normalize_name(r["concept_candidate"]) == target)
+            if not belongs:
                 continue
             seen.setdefault(r["object_key"], {})[r["scan_id"]] = r
 
         coverage = self.scan_coverage()
+        states = self.artifact_states()
         intervals: list[ValidInterval] = []
         for object_key, by_scan in seen.items():
-            system = object_key.split(":", 1)[0]
+            system, _, rest = object_key.partition(":")
+            artifact_key = f"{system}:{rest.rsplit(':', 1)[0]}" if ":" in rest else object_key
             runs: list[ValidInterval] = []
             for scan_id, started_at, systems in coverage:
                 observed = by_scan.get(scan_id)
                 if observed is None:
-                    # Only a scan that READ this system can assert absence.
-                    # Legacy scans recorded no coverage, so they stay silent
-                    # and behave exactly as before.
-                    if system in systems and runs and runs[-1].valid_to is None:
-                        runs[-1].valid_to = started_at
+                    # Absence is only evidence when the scan (a) enumerated
+                    # this system and (b) either found the artifact gone, or
+                    # read it and found this measure gone. An artifact the
+                    # scan LISTED but could not read — an uncompiled dbt model
+                    # after `--select`, an unparseable file — says nothing at
+                    # all, and must not fabricate a retirement date.
+                    if not (system in systems and runs and runs[-1].valid_to is None):
+                        continue
+                    known = states.get(scan_id, {})
+                    if known and artifact_key in known and not known[artifact_key]:
+                        continue  # listed but unreadable -> no information
+                    runs[-1].valid_to = started_at
                     continue
                 if runs and runs[-1].valid_to is None and runs[-1].ref_id == observed["ref_id"]:
                     continue  # unchanged, still live
@@ -637,6 +747,15 @@ class Store:
         if not verdicts:
             return None
 
+        # The status answers "can I trust this number", so precedence — not
+        # raw severity — is the right order: CONTRADICTION always wins, then
+        # the verification result. Reconciliation makes ORPHAN_CLAIM (claims
+        # and no fingerprints) and SHADOW_METRIC (fingerprints and no claims)
+        # mutually exclusive with CERTIFIED, so the only real co-occurrence is
+        # CERTIFIED+ALIASING — where CERTIFIED is genuinely the headline and
+        # aliasing is housekeeping. The defect was never the choice of primary;
+        # it was that every OTHER verdict was silently dropped. They are all
+        # carried in `verdicts` below.
         primary = min(
             verdicts,
             key=lambda v: VERDICT_PRECEDENCE.index(VerdictType(v["verdict"])),
@@ -678,13 +797,62 @@ class Store:
             if v["verdict"] in (VerdictType.CONTRADICTION.value, VerdictType.UNRESOLVED.value)
         ]
 
+        # Scope limitation. A scan that could not read part of the estate
+        # cannot issue a clean opinion over it. Two levels, deliberately:
+        # every receipt discloses what the scan could not read, and a receipt
+        # is DOWNGRADED only when an unreadable artifact is one this very
+        # concept has previously been defined in — there the gap is known to
+        # be relevant, rather than merely possible.
+        unreadable = sorted(
+            key for key, ok in self.artifact_states().get(scan["scan_id"], {}).items()
+            if not ok
+        )
+        concept_sites = {_artifact_key(iv.object_key) for iv in self.history(concept_label)}
+        blocking = sorted(concept_sites & set(unreadable))
+        scope = {
+            "complete": not unreadable,
+            "unreadable": unreadable,
+            "unreadable_for_this_concept": blocking,
+        }
+
+        # A receipt asserting verification must name what it verified. If the
+        # evidence is empty, the assertion is unsupported no matter why —
+        # degrade rather than sign it. Statuses that legitimately have no
+        # computed definition (ORPHAN_CLAIM: declared, never computed) are
+        # unaffected; the incoherent combination is "certified, but of what?"
+        status = primary["verdict"]
+        if blocking and status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                "cannot certify: this concept is also defined in "
+                + ", ".join(blocking)
+                + ", which this scan could not read (uncompiled or unparseable)"
+            ]
+        evidence_required = status in (
+            VerdictType.CERTIFIED.value,
+            VerdictType.ALIASING.value,
+            VerdictType.CONTRADICTION.value,
+        )
+        if evidence_required and not definition_version:
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                f"cannot substantiate {primary['verdict']}: no definition was live "
+                f"at {ts} for this concept — refusing to certify without evidence"
+            ]
+
         receipt = Receipt(
             receipt_id="rcpt_" + uuid.uuid4().hex[:12],
             concept=concept_label,
-            status=primary["verdict"],
+            status=status,
             definition_version=definition_version,
             lineage=sorted(lineage),
             known_divergences=divergences,
+            scope=scope,
+            verdicts=[
+                {"verdict": v["verdict"], "severity": v["severity"],
+                 "summary": v["summary"]}
+                for v in sorted(verdicts, key=lambda v: -v["severity"])
+            ],
             as_of=as_of,
             issued_at=utcnow(),
             scan_id=scan["scan_id"],
@@ -712,6 +880,12 @@ class Store:
         )
         self._conn.commit()
         return receipt
+
+
+def _artifact_key(object_key: str) -> str:
+    """`<system>:<object_id>:<measure>` -> `<system>:<object_id>`."""
+    parts = object_key.split(":")
+    return ":".join(parts[:-1]) if len(parts) > 2 else object_key
 
 
 def normalize_ts(ts: str) -> str:
