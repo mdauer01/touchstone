@@ -20,7 +20,9 @@ def test_shipped_corpus_holds_the_gates():
     assert det["rate"] == 1.0
     assert det["missed"] == []
     assert result["false_certifications"] == []  # the survival condition
-    assert result["known_gaps"]["confirmed"] == ["in-list-order"]
+    assert result["known_gaps"]["confirmed"] == [
+        "distinct-over-a-projected-key-is-neutral", "in-list-order",
+    ]
     assert result["known_gaps"]["closed"] == []
 
 
@@ -100,7 +102,7 @@ def test_cli_bench_reports_and_writes_json(tmp_path, capsys):
     assert main(["bench", "--json", str(out)]) == 0
     stdout = capsys.readouterr().out
     assert "false certifications: 0" in stdout
-    assert "known gaps: 1 confirmed" in stdout
+    assert "known gaps: 2 confirmed" in stdout
     assert "dialects: duckdb, databricks, snowflake, bigquery" in stdout
     assert out.exists()
 

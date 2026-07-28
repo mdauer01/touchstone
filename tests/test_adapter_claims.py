@@ -42,8 +42,22 @@ def test_negation_preserves_lookers_null_inclusion():
     assert not spec.untranslatable
 
 
-@pytest.mark.parametrize("value", [">100", "<=5", "1 to 10", "%partial%",
-                                   "NOT NULL", "NULL", "a,b,c", "after 2024-01-01"])
+@pytest.mark.parametrize("value", [
+    # comparisons and lists
+    ">100", "<=5", "!=3", "not 5", "a,b,c", "[1,10]", "(1,10)", "^%literal",
+    # ranges
+    "1 to 10", "to 100", "2024-01-01 to 2024-02-01",
+    # null / empty tests
+    "NOT NULL", "NULL", "EMPTY", "blank",
+    # wildcards: `%` is many characters, `_` is exactly one — neither is an
+    # equality, and `_` was silently translated as one.
+    "%partial%", "partial%", "_UF", "paid_search",
+    # relative and absolute dates, including the plural and bare forms the
+    # first version of this rule missed entirely
+    "after 2024-01-01", "before 2024-01-01", "today", "yesterday", "tomorrow",
+    "now", "this month", "last 3 days", "next quarter", "3 days ago",
+    "12 months", "2 fiscal_quarters ago", "FY2024", "2024",
+])
 def test_filter_expression_dsl_is_never_fabricated_into_equality(value):
     """LookML filter values are a small language. `>100` is a range, not the
     literal string '>100'. Every one of these was previously turned into
@@ -51,6 +65,32 @@ def test_filter_expression_dsl_is_never_fabricated_into_equality(value):
     spec = lookml(filters=f'[amount: "{value}"]')
     assert spec.filters == [], f"fabricated a predicate from {value!r}"
     assert spec.untranslatable, f"{value!r} must be reported, not silently dropped"
+
+
+@pytest.mark.parametrize("value", [
+    "completed", "direct to consumer", "Tokyo to Osaka", "Nullify",
+    "month end close", "day one", "after hours support", "EMEA",
+])
+def test_ordinary_string_values_are_still_translated(value):
+    """The other direction, and the one a bare keyword list gets wrong: these
+    are literals. Matching `to`, `month` or `day` as bare words made every one
+    of them inexpressible, which blocks certification for a concept where
+    nothing is actually ambiguous. Refusing is safe; refusing EVERYTHING is
+    just an adapter that does not work."""
+    spec = lookml(filters=f'[channel: "{value}"]')
+    assert spec.filters == [f"channel = '{value}'"], \
+        f"{value!r} is an ordinary literal, not filter syntax"
+    assert not spec.untranslatable
+
+
+def test_untranslatable_filters_say_why():
+    """"Not translatable" with no reason leaves a reader unable to tell a
+    wildcard from a date range from a parser limitation."""
+    spec = lookml(filters='[amount: ">100", channel: "paid_search", d: "last 3 days"]')
+    reasons = " | ".join(spec.untranslatable)
+    assert "comparison, list or range" in reasons
+    assert "wildcard" in reasons
+    assert "date expression" in reasons
 
 
 def test_unparseable_filter_blob_is_not_passed_through_as_sql():

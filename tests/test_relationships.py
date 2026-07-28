@@ -281,8 +281,10 @@ def test_empty_table_is_not_certified_as_a_key(store, registry, tmp_path):
     try:
         record_declared(store, [("raw.orders.customer_id", "raw.customers.customer_id")], "c.yml")
         row = verify_edges(store, empty)[0]
-        assert row["status"] == "failed"
+        assert row["status"] == "unverified"   # no evidence is not evidence of a fault
         evidence = row["check"]["evidence"]
+        assert evidence["passed"] is False
+        assert evidence["inconclusive"] is True
         assert "nothing was demonstrated" in evidence["reason"]
         assert evidence["matched_rows"] == 0
     finally:
@@ -303,7 +305,8 @@ def test_all_null_join_column_is_not_certified(store, registry, tmp_path):
     try:
         record_declared(store, [("raw.orders.customer_id", "raw.customers.customer_id")], "c.yml")
         row = verify_edges(store, populated)[0]
-        assert row["status"] == "failed"
+        assert row["status"] == "unverified"
+        assert row["check"]["evidence"]["passed"] is False
         assert "no non-null values" in row["check"]["evidence"]["reason"]
     finally:
         populated.close()

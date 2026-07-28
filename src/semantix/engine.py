@@ -247,15 +247,20 @@ def _qualify_for_unreadable(verdicts: list[Verdict], unread: list[str]) -> None:
     shown = ", ".join(sorted(unread)[:3])
     more = f" (+{len(unread) - 3} more)" if len(unread) > 3 else ""
     for verdict in verdicts:
-        if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+        if verdict.verdict_type in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+            lead = (f"Cannot certify: {len(unread)} artifact(s) in this estate could "
+                    f"not be read ({shown}{more}), and any of them may define this "
+                    f"concept differently.")
+        elif verdict.verdict_type is VerdictType.ORPHAN_CLAIM:
+            # "Declared but never computed" is an ASSERTION OF ABSENCE, and an
+            # unread artifact is exactly what could falsify it.
+            lead = (f"Cannot confirm this is uncomputed: {len(unread)} artifact(s) "
+                    f"could not be read ({shown}{more}), and any of them may compute it.")
+        else:
             continue
         verdict.verdict_type = VerdictType.UNRESOLVED
         verdict.severity = max(verdict.severity, 45)
-        verdict.summary = (
-            f"Cannot certify: {len(unread)} artifact(s) in this estate could not be "
-            f"read ({shown}{more}), and any of them may define this concept "
-            f"differently. {verdict.summary}"
-        )
+        verdict.summary = f"{lead} {verdict.summary}"
         verdict.evidence = {**verdict.evidence, "unread_estate": sorted(unread)}
 
 

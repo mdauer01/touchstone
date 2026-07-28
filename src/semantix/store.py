@@ -458,10 +458,12 @@ class Store:
         certify `net_revenue`."""
         refs = {
             r["ref_id"]
+            # substr, not LIKE: `_` is a LIKE wildcard and dbt object ids are
+            # full of them, so `model.acme.a_b` also matched `model.acme.axb`.
             for r in self._conn.execute(
                 "SELECT ref_id FROM observations WHERE kind = 'fingerprint' "
-                "AND object_key LIKE ?",
-                (f"{system}:{object_id}:%",),
+                "AND substr(object_key, 1, ?) = ?",
+                (len(f"{system}:{object_id}:"), f"{system}:{object_id}:"),
             )
         }
         if not refs:
@@ -561,6 +563,17 @@ class Store:
         append-only: the observation log remains the only temporal truth.
         """
         member_ids, _ = self.concept_members(concept_label)
+        # Membership recorded PER SCAN. Judging every observation against the
+        # union across all scans meant a fingerprint that left a concept kept
+        # being attributed to it, so a receipt could name definitions the
+        # current scan no longer clusters together.
+        per_scan: dict[str, set[str]] = {}
+        for r in self._conn.execute("SELECT scan_id, label, members_json FROM concepts"):
+            if normalize_name(r["label"]) == normalize_name(concept_label):
+                members = json.loads(r["members_json"] or "{}")
+                per_scan.setdefault(r["scan_id"], set()).update(
+                    members.get("fingerprints", [])
+                )
         target = normalize_name(concept_label)
         rows = self._conn.execute(
             """SELECT o.scan_id, o.object_key, o.observed_at, o.ref_id,
@@ -576,8 +589,13 @@ class Store:
             # Membership recorded at scan time is authoritative. The name
             # match is only a fallback for stores written before concepts
             # were persisted.
-            belongs = (r["ref_id"] in member_ids if member_ids
-                       else normalize_name(r["concept_candidate"]) == target)
+            scan_members = per_scan.get(r["scan_id"])
+            if scan_members is not None:
+                belongs = r["ref_id"] in scan_members
+            elif member_ids:
+                belongs = r["ref_id"] in member_ids
+            else:
+                belongs = normalize_name(r["concept_candidate"]) == target
             if not belongs:
                 continue
             seen.setdefault(r["object_key"], {})[r["scan_id"]] = r
@@ -857,17 +875,40 @@ class Store:
                 f"cannot certify: {len(unreadable)} artifact(s) in this estate could "
                 f"not be read — {detail}"
             ]
+        # What counts as evidence depends on what the verdict ASSERTS. A
+        # contradiction between two DECLARED definitions is fully substantiated
+        # by the claims themselves — requiring computed definitions there
+        # silenced a real disagreement down to "unresolved".
+        _, claim_ids = self.concept_members(concept_label)
+        has_evidence = bool(definition_version) or (
+            status == VerdictType.CONTRADICTION.value and bool(claim_ids)
+        )
         evidence_required = status in (
             VerdictType.CERTIFIED.value,
             VerdictType.ALIASING.value,
             VerdictType.CONTRADICTION.value,
         )
-        if evidence_required and not definition_version:
+        if evidence_required and not has_evidence:
             status = VerdictType.UNRESOLVED.value
             divergences = divergences + [
                 f"cannot substantiate {primary['verdict']}: no definition was live "
                 f"at {ts} for this concept — refusing to certify without evidence"
             ]
+
+        # The emitted verdict list must agree with the status. Leaving a
+        # CERTIFIED entry in `verdicts` while the status was downgraded made
+        # the signed receipt contradict itself, and a reader taking the more
+        # favourable of the two would be back where they started.
+        emitted = []
+        for v in sorted(verdicts, key=lambda v: -v["severity"]):
+            entry = {"verdict": v["verdict"], "severity": v["severity"],
+                     "summary": v["summary"]}
+            if status != primary["verdict"] and v["verdict"] in (
+                    VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+                entry = {**entry, "verdict": status,
+                         "superseded": v["verdict"],
+                         "summary": f"[downgraded] {v['summary']}"}
+            emitted.append(entry)
 
         receipt = Receipt(
             receipt_id="rcpt_" + uuid.uuid4().hex[:12],
@@ -877,11 +918,7 @@ class Store:
             lineage=sorted(lineage),
             known_divergences=divergences,
             scope=scope,
-            verdicts=[
-                {"verdict": v["verdict"], "severity": v["severity"],
-                 "summary": v["summary"]}
-                for v in sorted(verdicts, key=lambda v: -v["severity"])
-            ],
+            verdicts=emitted,
             as_of=as_of,
             issued_at=utcnow(),
             scan_id=scan["scan_id"],

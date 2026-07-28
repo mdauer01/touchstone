@@ -64,10 +64,15 @@ def annotate_with_execution(
     for artifact in artifacts:
         schema, _, _ = artifact.relation.rpartition(".")
         try:
+            # Estate SQL is a FILE, not a trusted statement. Interpolating it
+            # raw let a model body close the parenthesis and append its own
+            # statements — silently redefining the relations a divergence is
+            # then measured over. Re-render exactly one parsed statement.
+            body = _single_statement(artifact.sql, dialect)
             if schema:
                 con.execute(f"CREATE SCHEMA IF NOT EXISTS {qident(schema)}")
             con.execute(
-                f"CREATE OR REPLACE VIEW {qident(artifact.relation)} AS ({artifact.sql})"
+                f"CREATE OR REPLACE VIEW {qident(artifact.relation)} AS ({body})"
             )
         except Exception as e:  # noqa: BLE001
             failed.add(artifact.relation)
@@ -76,12 +81,21 @@ def annotate_with_execution(
 
     by_id = {c.concept_id: c for c in concepts}
     for verdict in verdicts:
-        if verdict.verdict_type != VerdictType.CONTRADICTION:
+        # CONTRADICTION is measured to QUANTIFY a difference we already
+        # suspect. CERTIFIED and ALIASING are measured for the opposite and
+        # more important reason: they are the verdicts that can be wrong in
+        # the unsurvivable direction, and execution is the only thing that can
+        # falsify a canonical equality. Measuring only contradictions pointed
+        # the one falsifying instrument at the one class of verdict that does
+        # not need it.
+        if verdict.verdict_type not in (VerdictType.CONTRADICTION,
+                                        VerdictType.CERTIFIED,
+                                        VerdictType.ALIASING):
             continue
         concept = by_id.get(verdict.concept_id)
         if concept is None:
             continue
-        measured = _measure_concept(con, concept, verdict, failed)
+        measured = _measure_concept(con, concept, verdict, failed, dialect)
         if measured is None:
             continue
         verdict.evidence["measured"] = measured
@@ -91,12 +105,25 @@ def annotate_with_execution(
 
         # A falsified canonical equality outranks any divergence figure: it
         # means the engine's own proof of sameness was wrong.
-        for collision in measured.get("collision_falsified", []):
+        collisions = measured.get("collision_falsified", [])
+        for collision in collisions:
             verdict.summary += (
                 f" ⚠ {collision['vs']} hashes identically to "
                 f"{measured['baseline']} but totals {collision['actual']:,.0f} "
                 f"vs {collision['baseline']:,.0f} — canonical equality unsound.")
             summary["collisions"] += 1
+        if collisions and verdict.verdict_type in (VerdictType.CERTIFIED,
+                                                   VerdictType.ALIASING):
+            # The certification was the claim these definitions agree. The
+            # data says they do not. Whatever the cause — an unsound
+            # canonicalization or a construct we do not model — the one thing
+            # that cannot stand is the certificate.
+            verdict.verdict_type = VerdictType.CONTRADICTION
+            verdict.severity = max(verdict.severity, 95)
+            verdict.summary = (
+                "Certification WITHDRAWN by execution: definitions the engine "
+                "proved canonically identical compute different values on the "
+                "same data. " + verdict.summary)
 
         worst = measured.get("max_divergence")
         if worst:
@@ -107,6 +134,59 @@ def annotate_with_execution(
                 f"{pct}.")
         summary["measured"] += 1
     return summary
+
+
+def _single_statement(sql: str, dialect: str) -> str:
+    """Re-render estate SQL as exactly one statement, or refuse.
+
+    Anything else — a trailing `; DROP ...`, an unparseable body — is not a
+    view definition and must not reach the warehouse.
+    """
+    statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
+    if len(statements) != 1:
+        raise ValueError(
+            f"expected exactly one statement, found {len(statements)}"
+        )
+    return statements[0].sql(dialect=dialect)
+
+
+def _relations_read(sql: str, dialect: str) -> set[str] | None:
+    """Physical relations a definition READS, lowercased and dotted.
+
+    Returns None when the SQL cannot be parsed: a caller must not conclude
+    anything from a name that merely appears somewhere in the text.
+    """
+    try:
+        node = sqlglot.parse_one(sql, read=dialect)
+    except Exception:  # noqa: BLE001 — arbitrary estate SQL
+        return None
+    if node is None:
+        return None
+    ctes = {cte.alias_or_name.lower() for cte in node.find_all(exp.CTE)}
+    out: set[str] = set()
+    for table in node.find_all(exp.Table):
+        parts = [p for p in (table.catalog, table.db, table.name) if p]
+        if not parts:
+            continue
+        if len(parts) == 1 and parts[0].lower() in ctes:
+            continue  # a CTE reference resolves in-query, not in the warehouse
+        out.add(".".join(parts).lower())
+    return out
+
+
+def _same_relation(a: str, b: str) -> bool:
+    """Do two relation names denote the same object?
+
+    Compared component-wise with suffix tolerance (`db.analytics.orders`
+    matches `analytics.orders`), never as substrings. A substring test made
+    `raw.orders` match `raw.orders_backup` — and match any definition whose
+    text merely CONTAINED the name, including inside a string literal or a
+    comment, so an unrelated failure silently suppressed measurement.
+    """
+    pa = [p for p in a.lower().split(".") if p]
+    pb = [p for p in b.lower().split(".") if p]
+    n = min(len(pa), len(pb))
+    return bool(n) and pa[-n:] == pb[-n:]
 
 
 def _is_additive(measure_expr: str) -> bool:
@@ -122,8 +202,20 @@ def _is_additive(measure_expr: str) -> bool:
         node = sqlglot.parse_one(measure_expr)
     except Exception:  # noqa: BLE001 — arbitrary estate SQL
         return False
-    if isinstance(node, exp.Alias):
-        node = node.this
+    # Unwrap wrappers that preserve additivity, so an ordinary
+    # `round(sum(x), 2)` or `coalesce(sum(x), 0)` is still measurable —
+    # declining on those refused to measure most real revenue models.
+    for _ in range(6):
+        if isinstance(node, (exp.Alias, exp.Paren, exp.Cast, exp.TryCast, exp.Round)):
+            node = node.this
+        elif isinstance(node, exp.Coalesce):
+            non_literal = [a for a in [node.this, *(node.expressions or [])]
+                           if not isinstance(a, exp.Literal)]
+            if len(non_literal) != 1:
+                return False
+            node = non_literal[0]
+        else:
+            break
     if not isinstance(node, (exp.Sum, exp.Count)):
         return False
     # DISTINCT de-duplicates before aggregating, so partial results do not
@@ -160,7 +252,8 @@ def _total(con, canonical_sql: str, column: str) -> tuple[float | None, str | No
 
 
 def _measure_concept(con, concept: Concept, verdict: Verdict,
-                     failed: set[str] | None = None) -> dict[str, Any] | None:
+                     failed: set[str] | None = None,
+                     dialect: str = "duckdb") -> dict[str, Any] | None:
     """Run every member definition of a contested concept; report totals and
     the largest divergence from the baseline definition."""
     members: list[dict[str, Any]] = []
@@ -185,18 +278,32 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
     # instead: an unmeasured contradiction is honest, a fabricated one is not.
     # A definition reading a relation that did not materialize cannot be
     # measured: whatever is under that name is not what this definition means.
-    tainted = sorted({
-        relation
-        for relation in (failed or ())
-        for m in members
-        if relation in (m["sql"] or "")
-    })
+    tainted: set[str] = set()
+    opaque: list[str] = []
+    for m in members:
+        reads = _relations_read(m["sql"] or "", dialect)
+        if reads is None:
+            opaque.append(m["where"])
+            continue
+        tainted |= {f for f in (failed or ())
+                    if any(_same_relation(f, r) for r in reads)}
     if tainted:
         return {
             "method": "duckdb-seed-execution",
             "measured": False,
             "reason": ("definitions read relations that failed to materialize, so any "
-                       "number would describe neither of them: " + ", ".join(tainted)),
+                       "number would describe neither of them: "
+                       + ", ".join(sorted(tainted))),
+        }
+    if opaque and failed:
+        # We cannot see what these read, and something in the estate is
+        # broken — so we cannot rule out that they read it.
+        return {
+            "method": "duckdb-seed-execution",
+            "measured": False,
+            "reason": ("could not determine which relations these definitions read "
+                       "while part of the estate failed to materialize: "
+                       + ", ".join(sorted(set(opaque)))),
         }
 
     non_additive = sorted({m["measure_expr"] for m in members

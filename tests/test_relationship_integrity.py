@@ -72,8 +72,13 @@ def test_a_single_non_null_row_does_not_prove_a_key(store, registry):
     try:
         record_declared(store, [("raw.orders.customer_id", "raw.customers.customer_id")], "c.yml")
         row = verify_edges(store, warehouse)[0]
-        assert row["status"] == "failed"
+        # Not certified — and not `failed` either: nothing was demonstrated
+        # about this key in EITHER direction, so calling it broken would be
+        # an accusation the data does not support.
+        assert row["status"] == "unverified"
         evidence = row["check"]["evidence"]
+        assert evidence["passed"] is False        # a stale CERTIFIED cannot survive
+        assert evidence["inconclusive"] is True
         assert "reason" in evidence
         assert evidence["left"]["null_fraction"] > 0.9 or \
                evidence["right"]["null_fraction"] > 0.9

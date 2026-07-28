@@ -28,10 +28,12 @@ def extract_fingerprints(
     set_op = False
     if select is None and isinstance(canon.ast, (exp.Union, exp.Except, exp.Intersect)):
         # A set-operation model produced NOTHING before — no fingerprint, no
-        # gap, no mention in coverage. Read the leading branch so the model is
-        # at least visible, and mark it: only one branch was read, so the
-        # measure is not the whole measure and can never be proof grade.
-        select = unwrap_select(canon.ast.this)
+        # gap, no mention in coverage. Descend the whole tree rather than just
+        # `.this`, which missed every branch of a 3+-way union, and mark the
+        # result: no single branch is the whole measure, so it is never proof
+        # grade.
+        branches = _set_op_branches(canon.ast)
+        select = branches[0] if branches else None
         set_op = True
     if select is None:
         return []
@@ -119,6 +121,23 @@ def extract_fingerprints(
     return fingerprints
 
 
+def _set_op_branches(node: exp.Expression) -> list[exp.Select]:
+    """Every leaf SELECT of a set-operation tree, left to right.
+
+    `UNION` nests left-associatively, so reading only `.this` reached one
+    branch of a two-way union and none of a three-way one.
+    """
+    if isinstance(node, (exp.Union, exp.Except, exp.Intersect)):
+        out: list[exp.Select] = []
+        for side in ("this", "expression"):
+            branch = node.args.get(side)
+            if isinstance(branch, exp.Expression):
+                out.extend(_set_op_branches(branch))
+        return out
+    select = unwrap_select(node)
+    return [select] if select is not None else []
+
+
 def _cte_bodies(select: exp.Select) -> dict[str, exp.Expression]:
     """Every CTE visible from this select, innermost scope winning."""
     bodies: dict[str, exp.Expression] = {}
@@ -130,27 +149,56 @@ def _cte_bodies(select: exp.Select) -> dict[str, exp.Expression]:
     return bodies
 
 
-def _body_digest(body: exp.Expression, bodies: dict[str, exp.Expression],
-                 dialect: str, seen: frozenset[str] = frozenset()) -> str:
-    """Content hash of a CTE body, with any CTEs IT references folded in too.
+def _body_digests(bodies: dict[str, exp.Expression], dialect: str) -> dict[str, str]:
+    """Content hash of every CTE body, with the CTEs each one references
+    folded in.
 
     Without this the body is invisible: an unmergeable CTE (one containing an
     aggregate, DISTINCT or a window — the standard dbt staging shape) survives
     optimization as a plain table reference, so two entirely unrelated measures
     reading a CTE that happens to share a name hashed identically.
+
+    Computed once per body with a memo rather than by re-descending from each
+    reference. The previous shape re-hashed a shared body once per PATH to it,
+    which is exponential in depth on a diamond-shaped CTE graph — precisely
+    the shape a layered dbt project produces (several models reading the same
+    staging CTE, four or five layers deep), where extraction stopped
+    responding rather than failing visibly.
     """
-    # Normalize the body the same way the outer scope is normalized before
-    # hashing it — the optimizer qualifies CTE bodies but leaves the author's
-    # aliases, so raw text made `from raw.orders as cust` differ from
-    # `from raw.orders`, fabricating a contradiction from a rename.
-    text = render(normalize_scope(body.copy(), dialect), dialect)
-    nested = []
-    for table in body.find_all(exp.Table):
-        name = table.name
-        if name in bodies and name not in seen:
-            nested.append(f"{name}={_body_digest(bodies[name], bodies, dialect, seen | {name})}")
-    payload = text + "|" + "|".join(sorted(nested))
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+    memo: dict[str, str] = {}
+    stack: list[str] = []
+
+    def digest(name: str) -> tuple[str, bool]:
+        """(hash, whether a cycle was involved) — a body reached through a
+        recursive reference is not memoized, because its value depends on
+        where the walk started."""
+        if name in memo:
+            return memo[name], False
+        body = bodies[name]
+        # Normalize the body the same way the outer scope is normalized before
+        # hashing it — the optimizer qualifies CTE bodies but leaves the
+        # author's aliases, so raw text made `from raw.orders as cust` differ
+        # from `from raw.orders`, fabricating a contradiction from a rename.
+        text = render(normalize_scope(body.copy(), dialect), dialect)
+        stack.append(name)
+        nested: list[str] = []
+        cyclic = False
+        for ref in sorted({t.name for t in body.find_all(exp.Table)} & set(bodies)):
+            if ref in stack:  # recursive CTE — do not fold it into itself
+                cyclic = True
+                continue
+            sub, sub_cyclic = digest(ref)
+            cyclic = cyclic or sub_cyclic
+            nested.append(f"{ref}={sub}")
+        stack.pop()
+        value = hashlib.sha256(
+            (text + "|" + "|".join(nested)).encode()
+        ).hexdigest()[:16]
+        if not cyclic:
+            memo[name] = value
+        return value, cyclic
+
+    return {name: digest(name)[0] for name in bodies}
 
 
 def _resolve_cte_sources(amap: dict[str, str], select: exp.Select,
@@ -163,11 +211,9 @@ def _resolve_cte_sources(amap: dict[str, str], select: exp.Select,
     bodies = _cte_bodies(select)
     if not bodies:
         return amap
-    resolved = {}
-    for alias, relation in amap.items():
-        body = bodies.get(relation)
-        resolved[alias] = f"cte:{_body_digest(body, bodies, dialect)}" if body is not None else relation
-    return resolved
+    digests = _body_digests(bodies, dialect)
+    return {alias: (f"cte:{digests[relation]}" if relation in digests else relation)
+            for alias, relation in amap.items()}
 
 
 def _render_bound(select: exp.Select, dialect: str) -> str | None:

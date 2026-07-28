@@ -95,9 +95,17 @@ def verify_receipt_dict(receipt_dict: dict[str, Any],
     """Verify a receipt dict. With `public_key_b64` the caller pins the
     expected signer; without it the embedded key is used (tamper-evidence
     only — say so in the message)."""
-    sig_block = receipt_dict.get("signature") or {}
-    if sig_block.get("alg") != ALG:
+    # A receipt arriving from elsewhere is arbitrary JSON, so every field is
+    # untrusted in TYPE as well as value — verification must return a verdict,
+    # never raise.
+    if not isinstance(receipt_dict, dict):
+        return False, "receipt is not a JSON object"
+    sig_block = receipt_dict.get("signature")
+    if not isinstance(sig_block, dict) or sig_block.get("alg") != ALG:
         return False, "receipt is unsigned or uses an unknown algorithm"
+    if not isinstance(sig_block.get("signature"), str) or \
+            not isinstance(sig_block.get("public_key"), str):
+        return False, "signature block is malformed"
     try:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey

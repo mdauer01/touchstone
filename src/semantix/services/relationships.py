@@ -217,11 +217,17 @@ def edge_status(edge_row: dict) -> str:
     A check that could not RUN is recorded so it supersedes any earlier
     verdict, but it reports `unverified` rather than `failed`: we learned
     nothing about the relationship, only that we can no longer confirm it.
+
+    The same holds for a check that ran and demonstrated nothing — an empty
+    table, an all-NULL column, a single distinct value. `failed` tells an
+    agent the join is KNOWN broken; saying that about an unloaded table
+    blames working code for the absence of evidence.
     """
     check = edge_row.get("check")
     if check is None:
         return "unverified"
-    if check.get("evidence", {}).get("unrunnable"):
+    evidence = check.get("evidence") or {}
+    if evidence.get("unrunnable") or evidence.get("inconclusive"):
         return "unverified"
     return "certified" if check["passed"] else "failed"
 
@@ -274,8 +280,19 @@ def verify_edges(
     if top:
         rows = rows[:top]
 
+    unbuilt = getattr(warehouse, "failed_relations", {})
     results = []
     for row in rows:
+        # An endpoint that never materialized cannot be checked. Querying it
+        # anyway either errors or, worse, answers from some pre-existing
+        # object of the same name.
+        broken = [r for r in (row["left_relation"], row["right_relation"]) if r in unbuilt]
+        if broken:
+            results.append({**row, "status": "unverified", "check": None,
+                            "unrunnable": {"unrunnable": True,
+                                           "error": f"relation(s) failed to build: "
+                                                    f"{', '.join(broken)}"}})
+            continue
         evidence = _check_edge(
             warehouse,
             row["left_relation"], row["left_column"],
@@ -295,13 +312,18 @@ def verify_edges(
                             "unrunnable": evidence})
             continue
         passed = bool(evidence.get("passed"))
+        # Recorded as not-passed either way, so a stale CERTIFIED can never
+        # survive a check that failed to demonstrate the key. The STATUS,
+        # though, comes from edge_status: an inconclusive check reports
+        # `unverified`, not `failed`.
         store.record_relationship_check(
             row["edge_id"], getattr(warehouse, "label", "?"), passed, evidence
         )
-        results.append({**row, "status": "certified" if passed else "failed",
-                        "check": {"passed": passed, "evidence": evidence,
-                                  "warehouse": getattr(warehouse, "label", "?"),
-                                  "checked_at": utcnow()}})
+        checked = {**row, "check": {"passed": passed, "evidence": evidence,
+                                    "warehouse": getattr(warehouse, "label", "?"),
+                                    "checked_at": utcnow()}}
+        checked["status"] = edge_status(checked)
+        results.append(checked)
     return results
 
 
@@ -338,8 +360,10 @@ def relationships_for_agent(store: Store, table: str | None = None) -> dict[str,
         "guidance": (
             "Join only through `certified` edges. `failed` edges are known "
             "broken — joining through them multiplies or drops rows. "
-            "`unverified` edges were observed in real queries but never "
-            "checked: treat as a hypothesis, not a fact."
+            "`unverified` edges were never checked, or were checked over data "
+            "that demonstrated nothing (an empty table, an all-NULL column); "
+            "either way treat them as a hypothesis, not a fact. Each carries "
+            "its own `reason`."
         ),
     }
 
@@ -457,14 +481,32 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
     if no_evidence:
         out["no_evidence"] = no_evidence
 
+    # Not-certified splits in two, and collapsing them was a false accusation.
+    # A DEMONSTRATED violation stands on evidence the floor cannot take away:
+    # N:M is established from distinct counts, a non-unique declared PK from
+    # duplicates, and orphans only when both sides actually carry values.
+    # Everything else — an empty table, an all-NULL column, one distinct
+    # value — is the ABSENCE of evidence, and reporting it as `failed` tells
+    # an agent the join is known broken when nothing of the kind was shown.
+    demonstrated = (
+        bool(pk_violations)
+        or not (unique_l or unique_r)
+        or bool(blocking_orphans and not empty_sides and not sparse)
+    )
+    if no_evidence and not demonstrated:
+        out["inconclusive"] = True
+
     if not passed:
         reasons = []
         if not (unique_l or unique_r):
             reasons.append("no unique side (N:M) — join semantics undefined")
-        elif blocking_orphans:
+        elif blocking_orphans and demonstrated:
             reasons.append(f"{blocking_orphans} orphan value(s) violate referential integrity")
         if no_evidence:
-            reasons.append(f"{no_evidence} — nothing was demonstrated")
+            reasons.append(
+                f"{no_evidence} — nothing was demonstrated"
+                + ("; the edge remains unverified" if out.get("inconclusive") else "")
+            )
         reasons.extend(pk_violations)
         out["reason"] = "; ".join(reasons)
     return out

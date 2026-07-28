@@ -114,6 +114,16 @@ def normalize_scope(ast: exp.Expression, dialect: str) -> exp.Expression:
     aliases in place, so hashing a body's rendered text made a rename inside
     a CTE look like a definition change.
     """
+    if isinstance(ast, (exp.Union, exp.Except, exp.Intersect)):
+        # A set operation has no single scope: `_canonical_table_aliases`
+        # unwraps to a Select, finds none, and silently returns the AST
+        # untouched — so an alias rename inside a UNION'd CTE body changed its
+        # digest and fabricated a contradiction. Normalize each branch.
+        for side in ("this", "expression"):
+            branch = ast.args.get(side)
+            if isinstance(branch, exp.Expression):
+                ast.set(side, normalize_scope(branch, dialect))
+        return _normalize_symmetric(ast, dialect)
     return _normalize_symmetric(_canonical_table_aliases(ast), dialect)
 
 

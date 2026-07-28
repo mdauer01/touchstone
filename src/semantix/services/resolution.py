@@ -50,19 +50,36 @@ def resolve_concepts(fingerprints: list[Fingerprint], claims: list[Claim]) -> li
             lo, hi = sorted((ra, rb))
             parent[hi] = lo
 
-    # Merge name buckets that share a canonical core — but ONLY when the
-    # bucket speaks with one voice. A bucket holding two different cores (two
-    # models both calling their measure `sales` while computing different
-    # things) would otherwise act as a bridge, chaining unrelated concepts
-    # into one and destroying every verdict for all of them. A heterogeneous
-    # bucket keeps its own identity rather than fusing its neighbours.
+    # Merge name buckets that share a canonical core, at MEMBER granularity.
+    #
+    # Two failure modes bound this. Unioning whole buckets let a bucket
+    # holding two different cores act as a bridge, chaining unrelated concepts
+    # together. But skipping such buckets entirely was equally wrong: a name
+    # that legitimately aliases another concept stopped merging the moment it
+    # picked up a second definition, splitting a certified concept into a
+    # false ORPHAN_CLAIM plus SHADOW_METRIC.
+    #
+    # So a bucket participates through each core it contains, and only buckets
+    # that genuinely share a core are joined — a heterogeneous bucket links to
+    # each of its cores' owners without those owners linking to each other,
+    # because union is applied per core rather than per bucket pair.
+    # Two definitions belong to one concept when they share a NAME (same name,
+    # different math — the contradiction we exist to find) or a CANONICAL CORE
+    # (same math, different names — aliasing). Both relations are required, so
+    # concept identity is their transitive closure, and a name that means two
+    # things genuinely does bridge the concepts it spans.
+    #
+    # Two attempts to break that transitivity both failed in review: unioning
+    # whole buckets let a bridge chain unrelated concepts silently, and then
+    # excluding bridges split legitimate aliases into a false ORPHAN_CLAIM
+    # plus SHADOW_METRIC. The closure is kept, and the ambiguity is reported
+    # as a verdict instead of being resolved by a heuristic — see
+    # reconcile's ambiguous-name handling.
     core_owner: dict[str, str] = {}
     for name in sorted(buckets):
         bucket = buckets[name]
-        hashes = {fp.core.hash() for fp in bucket.fingerprints}
-        hashes.update(cl.core.hash() for cl in bucket.claims if cl.core is not None)
-        if len(hashes) != 1:
-            continue
+        hashes = sorted({fp.core.hash() for fp in bucket.fingerprints}
+                        | {cl.core.hash() for cl in bucket.claims if cl.core is not None})
         for h in hashes:
             if h in core_owner:
                 union(name, core_owner[h])

@@ -17,8 +17,11 @@ def _scan(acme, db, **kw):
 def test_contradiction_carries_measured_divergence(acme, tmp_path):
     result, store = _scan(acme, tmp_path / "x.db",
                           execute_seed=str(acme / "seed.sql"))
-    assert result.execution["measured"] == 1
+    assert result.execution["measured"] == 3   # contradictions AND certifications
     assert result.execution["errors"] == []
+    # Nothing the engine certified was falsified by the data — the point of
+    # measuring certifications at all.
+    assert result.execution["collisions"] == 0
 
     v = next(v for v in result.verdicts if v.verdict_type == VerdictType.CONTRADICTION)
     measured = v.evidence["measured"]

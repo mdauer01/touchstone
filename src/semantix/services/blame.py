@@ -127,8 +127,18 @@ def _sentence(delta: dict[str, Any]) -> str:
         if expr["extra_refs"]:
             parts.append("expression adds " + ", ".join(expr["extra_refs"]))
         if not expr["missing_refs"] and not expr["extra_refs"]:
-            parts.append(f"computes {_readable(expr['actual'])} "
-                         f"instead of {_readable(expr['baseline'])}")
+            actual, baseline = _readable(expr["actual"]), _readable(expr["baseline"])
+            if actual != baseline:
+                parts.append(f"computes {actual} instead of {baseline}")
+            else:
+                # Same identifiers, and identical once table aliases and
+                # quoting are stripped — so the raw canonical expressions
+                # differ only in what those names BIND to (`t1.amount` over a
+                # different relation). Rendering that as "computes SUM(amount)
+                # instead of SUM(amount)" reads as a rendering bug and tells
+                # the reader nothing; show the qualified forms that differ.
+                parts.append(f"computes {actual} over different inputs "
+                             f"({expr['baseline']} vs {expr['actual']})")
 
     s = delta["sources"]
     if s["extra"] and s["missing"]:

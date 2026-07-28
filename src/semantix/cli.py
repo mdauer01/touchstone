@@ -269,8 +269,13 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"  [{v.verdict_type.value:<13}] sev {v.severity:>3}  {v.concept_label}: {v.summary}")
     if result.execution:
         ex = result.execution
-        print(f"\n  execution: {ex['measured']} contradiction(s) measured "
+        print(f"\n  execution: {ex['measured']} concept(s) measured "
               f"against {ex['seed']} ({ex['engine']})")
+        if ex["collisions"]:
+            print(f"    !! {ex['collisions']} canonical equality(ies) FALSIFIED by "
+                  "the data — a certification was withdrawn")
+        for declined in ex["declined"]:
+            print(f"    - not measured: {declined}")
         for err in ex["errors"]:
             print(f"    ! {err}")
 
@@ -494,6 +499,14 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     if result["false_certifications"]:
         print(f"  FALSE CERTIFICATIONS: {', '.join(result['false_certifications'])} "
               f"— a verifier cannot ship this", file=sys.stderr)
+        return 1
+    # "Zero false certifications" over a run that proved nothing is not a
+    # pass. A missed equivalence or an unproven near-miss means the prover
+    # did not demonstrate what the corpus asks of it.
+    if det["missed"] or nm["unproven"]:
+        print("  gate FAILED: the corpus was not fully demonstrated "
+              f"({len(det['missed'])} missed, {len(nm['unproven'])} unproven)",
+              file=sys.stderr)
         return 1
     print("  false certifications: 0 ✓")
     return 0

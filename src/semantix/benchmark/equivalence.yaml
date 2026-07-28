@@ -235,8 +235,24 @@ cases:
     category: near-miss
     expect: different
     note: >
-      Found while correcting this corpus, flagged by nothing else: SELECT
-      DISTINCT de-duplicates the result set and was simply not read.
+      SELECT DISTINCT de-duplicates the result set and was simply not read.
+      NOTE the shape: the grouping key must NOT be projected. An earlier
+      version of this case projected `customer_id`, which makes DISTINCT a
+      genuine no-op — grouping already guarantees distinct rows — so the
+      corpus asserted a difference that does not exist. Verified against
+      DuckDB before and after correcting it.
+    a: "select distinct sum(amount) as m from raw.orders group by customer_id"
+    b: "select sum(amount) as m from raw.orders group by customer_id"
+
+  - name: distinct-over-a-projected-key-is-neutral
+    category: normalization
+    expect: equivalent
+    known_gap: true
+    note: >
+      The converse, kept so the distinction stays honest: when the grouping
+      key IS projected, DISTINCT changes nothing. The engine models SELECT
+      DISTINCT as semantic and so reports a difference — missing toward
+      safety, which is the acceptable direction.
     a: "select distinct customer_id, sum(amount) as m from raw.orders group by 1"
     b: "select customer_id, sum(amount) as m from raw.orders group by 1"
 

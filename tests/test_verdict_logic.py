@@ -49,34 +49,31 @@ def kinds(verdicts):
 
 # ------------------------------------------------------------ clustering
 
-def test_a_shared_core_does_not_chain_unrelated_concepts_together():
-    """The chain needs a NAME BUCKET holding two different cores. Two models
-    both call their measure `sales`, but compute different things: one aliases
-    `revenue`, the other aliases `cost`. Unioning whole buckets let `sales`
-    act as a bridge, collapsing revenue, sales and cost into one concept and
-    destroying every verdict for all three."""
+def test_an_ambiguous_name_links_what_it_spans_and_says_so():
+    """Two models both call their measure `sales` while computing different
+    things: one aliases `revenue`, the other aliases `cost`.
+
+    Concept identity is the transitive closure of "same name" and "same core",
+    and both relations are required — so `sales` genuinely does bridge the two.
+    Two attempts to break that transitivity failed in review (unioning whole
+    buckets chained silently; excluding bridges split legitimate aliases into a
+    false ORPHAN_CLAIM plus SHADOW_METRIC). The closure is kept and the
+    ambiguity is REPORTED rather than resolved by a heuristic, so the reader
+    can see why the concept is large."""
     revenue, cost = core("SUM(amount)"), core("SUM(fee)")
     concepts = resolve_concepts(
         [
             fp("revenue", revenue, "analytics.a"),
-            fp("sales", revenue, "analytics.b"),   # bucket `sales`, core revenue
-            fp("sales", cost, "analytics.c"),      # bucket `sales`, core cost
+            fp("sales", revenue, "analytics.b"),
+            fp("sales", cost, "analytics.c"),
             fp("cost", cost, "analytics.d"),
         ],
         [],
     )
-    # `sales` legitimately holds two cores — that is a contradiction, and it
-    # is meant to stay one concept. What must NOT happen is `revenue` and
-    # `cost` being fused through it.
-    by_relation = {
-        f.relation: c.label for c in concepts for f in c.fingerprints
-    }
-    assert by_relation["analytics.a"] != by_relation["analytics.d"], (
-        "revenue and cost were chained into one concept via the `sales` bucket"
-    )
-    revenue_concept = next(c for c in concepts
-                           if any(f.relation == "analytics.a" for f in c.fingerprints))
-    assert {f.core.hash() for f in revenue_concept.fingerprints} == {revenue.hash()}
+    assert len(concepts) == 1
+    contradiction = next(v for v in reconcile(concepts)
+                         if v.verdict_type == VerdictType.CONTRADICTION)
+    assert "sales names more than one computation" in contradiction.summary
 
 
 def test_concept_labels_do_not_depend_on_input_order():

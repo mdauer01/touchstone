@@ -31,6 +31,8 @@ class DuckDBWarehouse:
     def __init__(self, connection, label: str):
         self._con = connection
         self.label = label
+        # relation -> why it could not be built (ephemeral warehouses only)
+        self.failed_relations: dict[str, str] = {}
 
     @classmethod
     def from_path(cls, path: str | Path) -> "DuckDBWarehouse":
@@ -46,20 +48,34 @@ class DuckDBWarehouse:
         the zero-infra demo/CI path."""
         import duckdb
 
+        import sqlglot
+
         con = duckdb.connect()
         if seed_sql:
             con.execute(seed_sql)
+        failed: dict[str, str] = {}
         for artifact in artifacts or []:
             schema, _, _ = artifact.relation.rpartition(".")
             try:
+                # One parsed statement, re-rendered — never the raw file text.
+                statements = [s for s in sqlglot.parse(artifact.sql, read=cls.dialect)
+                              if s is not None]
+                if len(statements) != 1:
+                    raise ValueError(f"expected one statement, found {len(statements)}")
                 if schema:
                     con.execute(f"CREATE SCHEMA IF NOT EXISTS {qident(schema)}")
                 con.execute(
-                    f"CREATE OR REPLACE VIEW {qident(artifact.relation)} AS ({artifact.sql})"
+                    f"CREATE OR REPLACE VIEW {qident(artifact.relation)} AS "
+                    f"({statements[0].sql(dialect=cls.dialect)})"
                 )
-            except Exception:  # noqa: BLE001 — best-effort, mirrors execute.py
-                continue
-        return cls(con, label=label)
+            except Exception as e:  # noqa: BLE001
+                # Remembered, not swallowed: a relation that never built must
+                # not have join keys "verified" against whatever else answers
+                # to that name.
+                failed[artifact.relation] = str(e)
+        warehouse = cls(con, label=label)
+        warehouse.failed_relations = failed
+        return warehouse
 
     def query(self, sql: str) -> list[tuple]:
         return self._con.execute(sql).fetchall()
