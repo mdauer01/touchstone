@@ -62,17 +62,34 @@ def load_metrics(path: str | Path) -> list[DeclaredSpec]:
             continue
         filters, bad_filters = _sql_terms(entry.get("filters"), "filters")
         group_by, bad_group = _sql_terms(entry.get("group_by"), "group_by")
+
+        # Scalar fields need the same guard as the list ones. A mapping or a
+        # list where a string belongs reached the store as a bind parameter
+        # and killed the scan mid-write with a SQLite type error.
+        scalars: dict[str, str | None] = {}
+        bad_scalars: list[str] = []
+        for field_name in ("model", "expr", "description", "owner"):
+            value = entry.get(field_name)
+            if value is None or isinstance(value, str):
+                scalars[field_name] = value
+            elif isinstance(value, (int, float, bool)):
+                scalars[field_name] = str(value)
+            else:
+                scalars[field_name] = None
+                bad_scalars.append(
+                    f"{field_name}: expected text, got {type(value).__name__}"
+                )
         specs.append(
             DeclaredSpec(
                 system="metrics_yaml",
                 name=str(entry["name"]),
-                description=entry.get("description"),
-                owner=entry.get("owner"),
-                model=entry.get("model"),
-                expr=entry.get("expr"),
+                description=scalars["description"],
+                owner=scalars["owner"],
+                model=scalars["model"],
+                expr=scalars["expr"],
                 filters=filters,
                 group_by=group_by,
-                untranslatable=bad_filters + bad_group,
+                untranslatable=bad_filters + bad_group + bad_scalars,
                 path=str(p),
             )
         )

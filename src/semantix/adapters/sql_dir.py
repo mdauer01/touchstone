@@ -44,7 +44,12 @@ def load_sql_dir(root: str | Path, dialect: str = "duckdb") -> list[ComputedArti
     rootp = Path(root)
     artifacts: list[ComputedArtifact] = []
     for path in sorted(rootp.rglob("*.sql")):
-        sql = path.read_text()
+        # Estate files are not guaranteed UTF-8 and may be unreadable; a
+        # single mis-encoded byte used to abort the whole scan.
+        try:
+            sql = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
         directive = _DIRECTIVE_RE.search(sql)
         if directive:
             relation = directive.group(1).replace('"', "")
