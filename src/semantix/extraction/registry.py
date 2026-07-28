@@ -137,9 +137,38 @@ class SchemaRegistry:
         # identical definitions then produced a false CONTRADICTION.
         if not cols and relation in self._types and self._types[relation]:
             return
+        known_before = relation in self._types and bool(self._types[relation])
         self._types[relation] = cols
         self._terminals[relation] = terms
-        self._schema_cache.clear()  # every mapping is stale the moment this changes
+        self._add_to_cached_schemas(relation, cols, replaced=known_before)
+
+    def _add_to_cached_schemas(self, relation: str, cols: dict[str, str],
+                               replaced: bool) -> None:
+        """Extend each cached MappingSchema in place instead of discarding it.
+
+        Rebuilding the whole mapping per model is O(models x relations x
+        columns) across a scan — the superlinearity that made 2,000 models
+        take 100s. Incremental `add_table` keeps it near-linear. The cache is
+        only discarded when the shape genuinely changes: a relation DEEPER
+        than the mapping (which would re-pad every existing entry) or a
+        replacement of an entry already in it.
+        """
+        if not cols or replaced:
+            self._schema_cache.clear()
+            return
+        parts = relation.split(".")
+        for dialect, schema in list(self._schema_cache.items()):
+            depth = schema.depth() or len(parts)
+            if len(parts) > depth:
+                del self._schema_cache[dialect]  # re-pad everything on next read
+                continue
+            padded = ".".join(["_"] * (depth - len(parts)) + parts)
+            try:
+                schema.add_table(
+                    padded, {c: (t or "text") for c, t in cols.items()}, dialect=dialect
+                )
+            except Exception:  # noqa: BLE001 — fall back to a full rebuild
+                del self._schema_cache[dialect]
 
     @staticmethod
     def _projection_type(proj: exp.Expression) -> str:

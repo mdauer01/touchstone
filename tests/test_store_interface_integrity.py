@@ -38,7 +38,10 @@ def test_unparseable_timestamps_are_refused_not_compared_as_text():
         normalize_ts("03/01/2026")
     with pytest.raises(ValueError):
         normalize_ts("last Tuesday")
-    assert normalize_ts("2026-03-01T00:00:00+00:00") == "2026-03-01T00:00:00Z"
+    # Canonical form is millisecond-precision: whole seconds could not
+    # represent two scans inside one second, which produced a valid
+    # interval of zero length — a definition live at no instant.
+    assert normalize_ts("2026-03-01T00:00:00+00:00") == "2026-03-01T00:00:00.000Z"
 
 
 def test_as_of_with_a_bad_timestamp_fails_loudly(acme, tmp_path):

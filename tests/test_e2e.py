@@ -1,3 +1,4 @@
+from semantix.store import normalize_ts
 """End-to-end: scan the acme demo estate and check every verdict lands."""
 
 import shutil
@@ -99,7 +100,7 @@ group by 1
     ]
     assert len(growth_site) == 2
     old, new = sorted(growth_site, key=lambda iv: iv.valid_from)
-    assert old.valid_to == "2026-02-01T00:00:00Z"
+    assert old.valid_to == normalize_ts("2026-02-01T00:00:00Z")
     assert new.valid_to is None
 
     # bitemporal as-of: January's meaning is still answerable after the change

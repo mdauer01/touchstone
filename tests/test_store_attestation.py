@@ -37,9 +37,12 @@ def scan(estate, db, **kw):
 
 
 def test_normalize_ts_canonicalizes_offsets():
-    assert normalize_ts("2026-03-01T00:00:00+00:00") == "2026-03-01T00:00:00Z"
-    assert normalize_ts("2026-03-01T05:00:00+05:00") == "2026-03-01T00:00:00Z"
-    assert normalize_ts("2026-03-01T00:00:00Z") == "2026-03-01T00:00:00Z"
+    # Canonical form is millisecond-precision: whole seconds could not
+    # represent two scans inside one second, which produced a valid
+    # interval of zero length — a definition live at no instant.
+    assert normalize_ts("2026-03-01T00:00:00+00:00") == "2026-03-01T00:00:00.000Z"
+    assert normalize_ts("2026-03-01T05:00:00+05:00") == "2026-03-01T00:00:00.000Z"
+    assert normalize_ts("2026-03-01T00:00:00Z") == "2026-03-01T00:00:00.000Z"
     # Unparseable input RAISES. Passing it through does not fail — text
     # comparison against '03/01/2026' silently answers with the wrong
     # definition and then signs it, which is worse than an error.

@@ -204,7 +204,17 @@ CREATE TABLE IF NOT EXISTS relationship_checks (
 
 
 def utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Now, to MILLISECONDS.
+
+    Whole seconds could not represent a change that happens inside one, so two
+    scans in the same second produced a ZERO-LENGTH valid interval: a
+    definition that genuinely existed was live at no instant, and an `asof`
+    query at the only moment it was ever observed returned its replacement.
+    Millisecond precision sorts identically as text (fixed width, zero-padded)
+    and stays comparable with the whole-second timestamps already in a store —
+    `normalize_ts` renders both to this shape.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 @dataclass
@@ -224,8 +234,19 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        # A scan of a real estate holds its write transaction for minutes, so
+        # two CI jobs on two PRs meant one died with a bare
+        # `sqlite3.OperationalError: database is locked`. WAL lets readers
+        # (concepts, attest, the MCP server) run against a store mid-scan, and
+        # busy_timeout makes a competing WRITER wait its turn instead of
+        # failing instantly.
+        self._conn = sqlite3.connect(self.path, timeout=120.0)
         self._conn.row_factory = sqlite3.Row
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            pass  # some filesystems (network mounts) refuse WAL; not fatal
+        self._conn.execute("PRAGMA busy_timeout=120000")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
@@ -236,7 +257,11 @@ class Store:
 
     def begin_scan(self, label: str | None, dialect: str) -> tuple[str, str]:
         scan_id = "scan_" + uuid.uuid4().hex[:12]
-        started_at = utcnow()
+        # Normalized at the WRITE boundary, not only on read. Valid time is
+        # compared as TEXT, so a store holding two representations of the same
+        # instant ('...00Z' and '...00.000Z') orders them wrongly and an as-of
+        # query at exactly that instant returns the previous definition.
+        started_at = normalize_ts(utcnow())
         self._conn.execute(
             "INSERT INTO scans (scan_id, label, dialect, started_at) VALUES (?, ?, ?, ?)",
             (scan_id, label, dialect, started_at),
@@ -405,7 +430,7 @@ class Store:
     def _observe(self, scan_id: str, observed_at: str, kind: str, object_key: str, ref_id: str) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO observations VALUES (?, ?, ?, ?, ?)",
-            (scan_id, observed_at, kind, object_key, ref_id),
+            (scan_id, normalize_ts(observed_at), kind, object_key, ref_id),
         )
 
     # ------------------------------------------------------ concepts/verdicts
@@ -1132,4 +1157,9 @@ def normalize_ts(ts: str) -> str:
         ) from e
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc)
-    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Millisecond precision, matching utcnow. Fixed width and zero-padded, so
+    # text comparison still orders correctly against whole-second timestamps
+    # already written by earlier versions ('...:00Z' < '...:00.000Z' is the
+    # only ordering subtlety, and it puts the older form first, which is the
+    # correct reading of an interval that began before sub-second stamping).
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"

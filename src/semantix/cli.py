@@ -62,6 +62,15 @@ def main(argv: list[str] | None = None) -> int:
              "that passes on an unread estate is not a gate",
     )
     p_scan.add_argument(
+        "--min-severity", type=int, metavar="N",
+        help="only PRINT verdicts at severity >= N (all are still stored, "
+             "reported and written to --json)",
+    )
+    p_scan.add_argument(
+        "--top", type=int, metavar="N",
+        help="only PRINT the N most severe verdicts",
+    )
+    p_scan.add_argument(
         "--min-coverage",
         type=float,
         metavar="PCT",
@@ -287,8 +296,28 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     for relation, ids in result.duplicate_relations.items():
         print(f"  ! {relation} is produced by {len(ids)} artifacts: {', '.join(ids)}")
     print()
-    for v in result.verdicts:
+    # TRIAGE. A first scan of a real estate emits one verdict per undeclared
+    # measure — 764 SHADOW_METRICs from 800 models in one measured run — and
+    # an unfiltered wall of them is indistinguishable from noise. The verdicts
+    # are all still recorded and still in the report and JSON; this only bounds
+    # what the terminal prints.
+    shown = [v for v in result.verdicts if v.severity >= (args.min_severity or 0)]
+    hidden_by_severity = len(result.verdicts) - len(shown)
+    if args.top:
+        truncated = len(shown) - args.top
+        shown = shown[:args.top]
+    else:
+        truncated = 0
+    for v in shown:
         print(f"  [{v.verdict_type.value:<13}] sev {v.severity:>3}  {v.concept_label}: {v.summary}")
+    if hidden_by_severity or truncated:
+        parts = []
+        if truncated > 0:
+            parts.append(f"{truncated} more above the --top limit")
+        if hidden_by_severity:
+            parts.append(f"{hidden_by_severity} below --min-severity {args.min_severity}")
+        print(f"  … {', '.join(parts)} — all {len(result.verdicts)} are in the "
+              f"store, the report and --json")
     if result.execution:
         ex = result.execution
         print(f"\n  execution: {ex['measured']} concept(s) measured "
@@ -465,10 +494,41 @@ def _cmd_attest(args: argparse.Namespace) -> int:
 def _cmd_verify_receipt(args: argparse.Namespace) -> int:
     from semantix.signing import verify_receipt_dict
 
-    raw = sys.stdin.read() if args.receipt == "-" else Path(args.receipt).read_text()
-    ok, message = verify_receipt_dict(json.loads(raw), args.public_key)
+    if args.receipt == "-":
+        raw = sys.stdin.read()
+    else:
+        p = Path(args.receipt)
+        if not p.is_file():
+            raise ValueError(f"{p}: receipt file not found")
+        raw = p.read_text()
+    try:
+        receipt = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{args.receipt}: is not valid JSON — {e}") from e
+
+    ok, message = verify_receipt_dict(receipt, args.public_key)
     print(message)
-    return 0 if ok else 1
+    if not ok:
+        return 1
+
+    # A valid SIGNATURE is not a valid STATUS. This command is documented to
+    # agents as "check a receipt before trusting its status", and it evaluated
+    # bytes only: a years-old receipt whose own freshness block says `stale`
+    # verified with exit 0 and no qualification at all. The receipt carries
+    # `verified_as_of` and a freshness block precisely so verification can
+    # decay; report both, and refuse to call a stale certificate good.
+    verified_as_of = receipt.get("verified_as_of")
+    freshness = (receipt.get("freshness") or {}).get("status")
+    status = receipt.get("status")
+    if verified_as_of:
+        print(f"  status {status} · verified as of {verified_as_of}"
+              + (f" · freshness {freshness}" if freshness else ""))
+    if freshness in ("stale", "partial"):
+        print(f"  WARNING: this receipt's own freshness block reports "
+              f"`{freshness}` — the estate has drifted since it was issued; "
+              f"re-attest before relying on it", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_mcp(args: argparse.Namespace) -> int:

@@ -5,7 +5,7 @@ import pytest
 
 import semantix.store as store_mod
 from semantix.models import Fingerprint, Provenance, SemanticCore
-from semantix.store import Store
+from semantix.store import Store, normalize_ts
 
 
 @pytest.fixture
@@ -57,8 +57,8 @@ def test_history_derives_valid_time_from_observations(tmp_path, clock):
     history = store.history("net_revenue")
     assert len(history) == 2
     first, second = sorted(history, key=lambda iv: iv.valid_from)
-    assert first.valid_from == t1 and first.valid_to == t2  # superseded
-    assert second.valid_from == t2 and second.valid_to is None  # live
+    assert first.valid_from == normalize_ts(t1) and first.valid_to == normalize_ts(t2)
+    assert second.valid_from == normalize_ts(t2) and second.valid_to is None  # live
 
     # as-of returns the definition that was live at the time
     assert store.as_of("net_revenue", t1)[0].ref_id == fp_v1.fingerprint_id
