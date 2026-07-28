@@ -121,6 +121,7 @@ def run_scan(
         store.record_artifact_state(scan_id, s["system"], s["object_id"], readable=False)
     fingerprints: list[Fingerprint] = []
     unmeasured: list[str] = []
+    unparseable: list[str] = []
     canon_levels: Counter = Counter()
 
     for artifact in artifacts:
@@ -147,6 +148,8 @@ def run_scan(
             scan_id, artifact.system, artifact.object_id,
             readable=canon.level != CanonLevel.FAILED,
         )
+        if canon.level == CanonLevel.FAILED:
+            unparseable.append(f"{artifact.system}:{artifact.object_id}")
         found = extract_fingerprints(canon, artifact.relation, provenance, dialect, registry)
         if not found:
             # Parsed fine, yielded no measure (a set operation, a non-aggregate
@@ -188,7 +191,10 @@ def run_scan(
 
     concepts = resolve_concepts(fingerprints, claims)
     verdicts = reconcile(concepts)
-    _qualify_for_unreadable(store, verdicts, skipped)
+    # Everything in the estate we did not understand: enumerated but without
+    # SQL, or with SQL we could not parse. Both block certification.
+    unread = [f"{s['system']}:{s['object_id']}" for s in skipped] + unparseable
+    _qualify_for_unreadable(verdicts, unread)
 
     execution: dict | None = None
     if execute_seed:
@@ -221,37 +227,36 @@ def run_scan(
     return result, store
 
 
-def _qualify_for_unreadable(store: Store, verdicts: list[Verdict],
-                            skipped: list[dict]) -> None:
-    """Downgrade certification for concepts with a KNOWN unread definition.
+def _qualify_for_unreadable(verdicts: list[Verdict], unread: list[str]) -> None:
+    """No certification over an estate that was not fully read.
 
-    An artifact the scan enumerated but could not read might contain a
-    competing definition. Where the store already knows it once defined a
-    concept — the routine `dbt build --select` case, where a contradicting
-    model simply was not compiled — certifying that concept asserts agreement
-    among definitions we did not see. The verdict is qualified in place so the
-    report and the CI gate say so too, not only the receipt.
+    An artifact the scan could not read — no compiled SQL, or SQL that would
+    not parse — may define a competing version of ANY concept; not reading it
+    is precisely why we cannot say. Earlier versions of this guard consulted
+    prior scans to decide which concepts were "affected", which meant it did
+    nothing at all on a first scan of a fresh store: the documented CI flow,
+    and the exact case it was written for.
+
+    So the rule is unconditional and deliberately unclever. Missing a
+    certification is an acceptable cost; issuing a false one is not. The
+    qualification names what blocked it, and `skipped` artifacts are usually
+    one `dbt compile` away from resolving.
     """
-    if not skipped:
+    if not unread:
         return
-    affected: dict[str, list[str]] = {}
-    for s in skipped:
-        for label in store.concepts_touching_artifact(s["system"], s["object_id"]):
-            affected.setdefault(label, []).append(f"{s['system']}:{s['object_id']}")
-    if not affected:
-        return
+    shown = ", ".join(sorted(unread)[:3])
+    more = f" (+{len(unread) - 3} more)" if len(unread) > 3 else ""
     for verdict in verdicts:
-        sites = affected.get(verdict.concept_label)
-        if not sites:
+        if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
             continue
-        if verdict.verdict_type in (VerdictType.CERTIFIED, VerdictType.ALIASING):
-            verdict.verdict_type = VerdictType.UNRESOLVED
-            verdict.severity = max(verdict.severity, 45)
-            verdict.summary = (
-                f"Cannot verify: this concept is also defined in {', '.join(sorted(set(sites)))}, "
-                f"which this scan could not read. {verdict.summary}"
-            )
-            verdict.evidence = {**verdict.evidence, "unreadable_sites": sorted(set(sites))}
+        verdict.verdict_type = VerdictType.UNRESOLVED
+        verdict.severity = max(verdict.severity, 45)
+        verdict.summary = (
+            f"Cannot certify: {len(unread)} artifact(s) in this estate could not be "
+            f"read ({shown}{more}), and any of them may define this concept "
+            f"differently. {verdict.summary}"
+        )
+        verdict.evidence = {**verdict.evidence, "unread_estate": sorted(unread)}
 
 
 def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> Claim:

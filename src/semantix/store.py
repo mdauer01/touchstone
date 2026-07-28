@@ -827,11 +827,16 @@ class Store:
             if not ok
         )
         concept_sites = {_artifact_key(iv.object_key) for iv in self.history(concept_label)}
-        blocking = sorted(concept_sites & set(unreadable))
+        known_relevant = sorted(concept_sites & set(unreadable))
         scope = {
             "complete": not unreadable,
             "unreadable": unreadable,
-            "unreadable_for_this_concept": blocking,
+            # Named separately from `known_relevant` because an EMPTY list of
+            # known-relevant sites is not proof of irrelevance — on a first
+            # scan there is no history to consult, and reporting `[]` there
+            # asserted "no relevant gap" when the truth was "we cannot say".
+            "known_relevant": known_relevant,
+            "relevance_determinable": bool(concept_sites),
         }
 
         # A receipt asserting verification must name what it verified. If the
@@ -840,12 +845,17 @@ class Store:
         # computed definition (ORPHAN_CLAIM: declared, never computed) are
         # unaffected; the incoherent combination is "certified, but of what?"
         status = primary["verdict"]
-        if blocking and status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+        # Any unread estate blocks a signed certification, whether or not we
+        # can show the gap is relevant to THIS concept. Requiring proof of
+        # relevance inverted the burden: it certified by default and objected
+        # only when history happened to contain a counterexample.
+        if unreadable and status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
             status = VerdictType.UNRESOLVED.value
+            detail = (", ".join(known_relevant) + " (known to define this concept)"
+                      if known_relevant else ", ".join(unreadable[:3]))
             divergences = divergences + [
-                "cannot certify: this concept is also defined in "
-                + ", ".join(blocking)
-                + ", which this scan could not read (uncompiled or unparseable)"
+                f"cannot certify: {len(unreadable)} artifact(s) in this estate could "
+                f"not be read — {detail}"
             ]
         evidence_required = status in (
             VerdictType.CERTIFIED.value,

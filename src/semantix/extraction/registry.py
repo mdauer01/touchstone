@@ -28,11 +28,26 @@ class SchemaRegistry:
             self._terminals[rel] = {c: (f"{rel}.{c}",) for c in cols}
 
     def sqlglot_schema(self) -> dict:
+        """Nested schema for sqlglot — containing only relations we actually
+        know the columns of.
+
+        A columnless entry is poison. sqlglot infers the schema's nesting
+        depth from its contents, so a single `{}` table (or a bare relation
+        name with no schema part) makes the whole mapping unreadable and
+        every qualification in the scan fails — one unparseable model in a
+        real estate dropped every OTHER model from `optimized` to `parsed`
+        and coverage from 100% to 0%. An unknown relation must be ABSENT
+        here, which degrades only the models that reference it.
+        """
         nested: dict[str, dict] = {}
         for rel, cols in self._types.items():
+            if not cols:
+                continue
             db, _, table = rel.rpartition(".")
             if not db:
-                db, table = "", rel
+                # A bare relation has a different depth from `schema.table`;
+                # mixing the two corrupts sqlglot's depth detection.
+                continue
             nested.setdefault(db, {})[table] = {c: (t or "text") for c, t in cols.items()}
         return nested
 
