@@ -24,6 +24,8 @@ import sqlglot
 from sqlglot import exp
 
 from semantix.models import Concept, Verdict, VerdictType
+from semantix.services.relationships import qcol
+from semantix.warehouse import qident
 
 
 def annotate_with_execution(
@@ -54,14 +56,23 @@ def annotate_with_execution(
         return summary
 
     # Materialize the estate as views, dependency order (adapter is topo-sorted).
+    # Relations that fail are REMEMBERED: a seed script may already define an
+    # object of the same name, so a failed materialization can leave a stale
+    # relation behind, and measuring through it produces a number describing
+    # neither definition — presented as fact.
+    failed: set[str] = set()
     for artifact in artifacts:
         schema, _, _ = artifact.relation.rpartition(".")
         try:
             if schema:
-                con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
-            con.execute(f"CREATE OR REPLACE VIEW {artifact.relation} AS ({artifact.sql})")
+                con.execute(f"CREATE SCHEMA IF NOT EXISTS {qident(schema)}")
+            con.execute(
+                f"CREATE OR REPLACE VIEW {qident(artifact.relation)} AS ({artifact.sql})"
+            )
         except Exception as e:  # noqa: BLE001
+            failed.add(artifact.relation)
             summary["errors"].append(f"materialize {artifact.relation}: {e}")
+    summary["failed_relations"] = sorted(failed)
 
     by_id = {c.concept_id: c for c in concepts}
     for verdict in verdicts:
@@ -70,7 +81,7 @@ def annotate_with_execution(
         concept = by_id.get(verdict.concept_id)
         if concept is None:
             continue
-        measured = _measure_concept(con, concept, verdict)
+        measured = _measure_concept(con, concept, verdict, failed)
         if measured is None:
             continue
         verdict.evidence["measured"] = measured
@@ -113,17 +124,34 @@ def _is_additive(measure_expr: str) -> bool:
         return False
     if isinstance(node, exp.Alias):
         node = node.this
-    if isinstance(node, exp.Count):
-        return node.find(exp.Distinct) is None
-    return isinstance(node, exp.Sum)
+    if not isinstance(node, (exp.Sum, exp.Count)):
+        return False
+    # DISTINCT de-duplicates before aggregating, so partial results do not
+    # recompose — true of SUM(DISTINCT x) exactly as much as COUNT(DISTINCT x),
+    # which is the half that was checked.
+    return node.find(exp.Distinct) is None
+
+
+def _diverges(a: float, b: float, rel: float = 1e-9) -> bool:
+    """Do two totals of the SAME canonical definition genuinely disagree?
+
+    Compared relatively, not absolutely: an absolute 1e-9 epsilon is tighter
+    than ordinary float summation noise on currency (700.70 sums to
+    700.7000000000001), so identical definitions were being reported as a
+    falsified canonical equality — the loudest alarm the engine has.
+    """
+    return abs(a - b) > max(abs(a), abs(b), 1.0) * rel
 
 
 def _total(con, canonical_sql: str, column: str) -> tuple[float | None, str | None]:
     """Grand total of the measure column over the definition's full output —
     grain-independent, so monthly and weekly variants stay comparable."""
     try:
+        # The column name comes from an alias in estate SQL, i.e. from a file
+        # we do not control — quote it the same way every other warehouse call
+        # does rather than interpolating it raw.
         row = con.execute(
-            f'SELECT SUM("{column}") FROM ({canonical_sql}) _semantix_q'
+            f'SELECT SUM({qcol(column)}) FROM ({canonical_sql}) _semantix_q'
         ).fetchone()
         value = row[0] if row else None
         return (float(value) if value is not None else None), None
@@ -131,7 +159,8 @@ def _total(con, canonical_sql: str, column: str) -> tuple[float | None, str | No
         return None, str(e)
 
 
-def _measure_concept(con, concept: Concept, verdict: Verdict) -> dict[str, Any] | None:
+def _measure_concept(con, concept: Concept, verdict: Verdict,
+                     failed: set[str] | None = None) -> dict[str, Any] | None:
     """Run every member definition of a contested concept; report totals and
     the largest divergence from the baseline definition."""
     members: list[dict[str, Any]] = []
@@ -154,6 +183,22 @@ def _measure_concept(con, concept: Concept, verdict: Verdict) -> dict[str, Any] 
     # or a COUNT(DISTINCT) produces a number with no interpretation — and then
     # reports it as "measured on seed data", i.e. fabricates evidence. Refuse
     # instead: an unmeasured contradiction is honest, a fabricated one is not.
+    # A definition reading a relation that did not materialize cannot be
+    # measured: whatever is under that name is not what this definition means.
+    tainted = sorted({
+        relation
+        for relation in (failed or ())
+        for m in members
+        if relation in (m["sql"] or "")
+    })
+    if tainted:
+        return {
+            "method": "duckdb-seed-execution",
+            "measured": False,
+            "reason": ("definitions read relations that failed to materialize, so any "
+                       "number would describe neither of them: " + ", ".join(tainted)),
+        }
+
     non_additive = sorted({m["measure_expr"] for m in members
                            if not _is_additive(m["measure_expr"])})
     if non_additive:
@@ -187,7 +232,7 @@ def _measure_concept(con, concept: Concept, verdict: Verdict) -> dict[str, Any] 
                 # a certification somewhere is wrong — this is the one case
                 # execution can falsify rather than merely quantify, so it is
                 # measured rather than skipped.
-                if abs_div > 1e-9:
+                if _diverges(t["total"], base_total):
                     collisions.append({
                         "vs": t["where"], "baseline": base_total, "actual": t["total"],
                         "note": "definitions hash identically but compute different "

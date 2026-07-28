@@ -53,7 +53,7 @@ class DuckDBWarehouse:
             schema, _, _ = artifact.relation.rpartition(".")
             try:
                 if schema:
-                    con.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+                    con.execute(f"CREATE SCHEMA IF NOT EXISTS {qident(schema)}")
                 con.execute(
                     f"CREATE OR REPLACE VIEW {qident(artifact.relation)} AS ({artifact.sql})"
                 )

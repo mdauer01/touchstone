@@ -212,9 +212,16 @@ def record_declared(store: Store, declared: list[tuple[str, str]], source: str) 
 
 
 def edge_status(edge_row: dict) -> str:
-    """Validity axis — only a warehouse check can move this off unverified."""
+    """Validity axis — only a warehouse check can move this off unverified.
+
+    A check that could not RUN is recorded so it supersedes any earlier
+    verdict, but it reports `unverified` rather than `failed`: we learned
+    nothing about the relationship, only that we can no longer confirm it.
+    """
     check = edge_row.get("check")
     if check is None:
+        return "unverified"
+    if check.get("evidence", {}).get("unrunnable"):
         return "unverified"
     return "certified" if check["passed"] else "failed"
 
@@ -276,8 +283,14 @@ def verify_edges(
             declared_pks=declared_pks,
         )
         if evidence.get("unrunnable"):
-            # No check happened, so no check is recorded: the edge stays
-            # unverified rather than being libelled as broken.
+            # The check did not run, so the edge is not FAILED — but neither
+            # can an earlier CERTIFIED stand: the warehouse can no longer
+            # answer for it, and continuing to tell agents to join through it
+            # would be certifying from a state we can no longer confirm.
+            store.record_relationship_check(
+                row["edge_id"], getattr(warehouse, "label", "?"), False,
+                {**evidence, "supersedes_previous_verdict": True},
+            )
             results.append({**row, "status": "unverified", "check": None,
                             "unrunnable": evidence})
             continue
@@ -377,12 +390,24 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
     # This gates CERTIFICATION only: a class that is demonstrable without
     # matching rows (N:M, established from distinct counts alone) is still
     # reported, because refusing to fail is its own kind of dishonesty.
+    null_fraction_l = 1.0 - (l_total / l_rows) if l_rows else 1.0
+    null_fraction_r = 1.0 - (r_total / r_rows) if r_rows else 1.0
+
     empty_sides = [f"{r}.{c}" for r, c, t in
                    ((rel_l, col_l, l_total), (rel_r, col_r, r_total)) if t == 0]
+    # Uniqueness over a single value is trivially true and demonstrates
+    # nothing; and a column that is mostly NULL does not participate in the
+    # relationship at all, so a join through it silently drops those rows.
+    sparse = [f"{r}.{c} ({int(f * 100)}% NULL)" for r, c, t, f in
+              ((rel_l, col_l, l_total, null_fraction_l),
+               (rel_r, col_r, r_total, null_fraction_r))
+              if t and (t < 2 or f > 0.5)]
     if empty_sides:
         no_evidence = "no non-null values in " + ", ".join(empty_sides)
     elif matched == 0:
         no_evidence = "no rows join across this edge"
+    elif sparse:
+        no_evidence = "too few values to demonstrate a key: " + ", ".join(sparse)
     else:
         no_evidence = None
 
@@ -411,9 +436,11 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
         parent=parent,  # verified direction: the unique side
         matched_rows=matched,
         left={"relation": rel_l, "column": col_l, "rows": l_rows, "non_null": l_total,
-              "distinct": l_distinct, "unique": unique_l, "orphans": orphans_l},
+              "distinct": l_distinct, "unique": unique_l, "orphans": orphans_l,
+              "null_fraction": round(null_fraction_l, 4)},
         right={"relation": rel_r, "column": col_r, "rows": r_rows, "non_null": r_total,
-               "distinct": r_distinct, "unique": unique_r, "orphans": orphans_r},
+               "distinct": r_distinct, "unique": unique_r, "orphans": orphans_r,
+               "null_fraction": round(null_fraction_r, 4)},
     )
     # A declared primary key is a claim like any other. If the catalog says a
     # column is the PK and the warehouse says it is not unique, that is a

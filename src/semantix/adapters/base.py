@@ -30,6 +30,11 @@ class DeclaredSpec:
     filters: list[str] = field(default_factory=list)
     group_by: list[str] = field(default_factory=list)
     path: str | None = None
+    # Parts of the source declaration the adapter could not faithfully render
+    # as SQL. Non-empty makes the whole claim inexpressible: a claim missing
+    # one of its filters is not a weaker claim, it is a DIFFERENT claim, and
+    # reconciling it would certify or contradict something nobody declared.
+    untranslatable: list[str] = field(default_factory=list)
 
 
 def spec_content_text(spec: DeclaredSpec) -> str:

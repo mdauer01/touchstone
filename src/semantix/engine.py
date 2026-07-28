@@ -268,6 +268,16 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
         claim.error = "no expr/model declared — not machine-expressible"
         return claim
 
+    # A claim the adapter could only PARTLY translate is not a weaker claim,
+    # it is a different one. Reconciling it would certify or contradict a
+    # definition nobody wrote, so it stays inexpressible and says why.
+    if spec.untranslatable:
+        claim.error = (
+            "could not translate part of the declaration, so it cannot be "
+            "verified without inventing it: " + "; ".join(spec.untranslatable)
+        )
+        return claim
+
     sql = _synthesize_claim_sql(spec)
     canon = canonicalize_sql(sql, registry.sqlglot_schema(), dialect)
     claim.canon_level = canon.level.value

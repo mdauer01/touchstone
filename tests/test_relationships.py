@@ -256,8 +256,15 @@ def test_missing_relation_stays_unverified_not_failed(store, registry, warehouse
     assert row["check"] is None
     assert "error" in row["unrunnable"]
     assert row["unrunnable"].get("cardinality") is None  # no fabricated verdict
-    # and nothing was persisted, so a later successful run is the first word
-    assert store._conn.execute("SELECT COUNT(*) FROM relationship_checks").fetchone()[0] == 0
+    # The attempt IS recorded, so it supersedes any earlier CERTIFIED — an
+    # edge the warehouse can no longer answer for must stop reading as
+    # verified — but it surfaces as `unverified`, never as `failed`.
+    stored = store._conn.execute(
+        "SELECT evidence_json FROM relationship_checks"
+    ).fetchall()
+    assert len(stored) == 1
+    assert '"unrunnable": true' in stored[0]["evidence_json"]
+    assert graph_with_status(store)[0]["status"] == "unverified"
 
 
 def test_empty_table_is_not_certified_as_a_key(store, registry, tmp_path):

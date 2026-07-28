@@ -46,11 +46,20 @@ def test_lookml_measure_translation():
     by_name = {s.name: s for s in specs}
     gmv = by_name["gmv"]
     assert gmv.expr == "sum(amount)"
-    assert gmv.filters == ["channel <> 'internal'", "status <> 'cancelled'"]
+    # LookML negation includes NULLs in Looker. The earlier expectation here
+    # (a bare `<>`) encoded the bug: it made the claim stricter than the
+    # declaration, so a model that also dropped NULLs would falsely certify.
+    assert gmv.filters == [
+        "(channel <> 'internal' OR channel IS NULL)",
+        "(status <> 'cancelled' OR status IS NULL)",
+    ]
     assert gmv.model == "analytics.fct_orders"
     assert by_name["buyers"].expr == "count(distinct customer_id)"
-    # unparseable filter text passes through raw and degrades downstream
-    assert by_name["weird"].filters == ["advanced lookml soup"]
+    # Unparseable filter text is REPORTED, never passed through as if it were
+    # a SQL predicate — emitting it verbatim invented a claim.
+    weird = by_name["weird"]
+    assert weird.filters == []
+    assert weird.untranslatable == ["advanced lookml soup"]
 
 
 def test_json_and_duckdb_intake_produce_identical_claims(acme, tmp_path):

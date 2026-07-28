@@ -570,9 +570,13 @@ def _cmd_verify_relationships(args: argparse.Namespace) -> int:
         print("no edges recorded — run mine-relationships first", file=sys.stderr)
         return 2
     _print_graph(results)
+    # Count by actual status. Deriving "certified" as everything-not-failed
+    # counted every edge the warehouse could not answer for as a success.
+    certified = [r for r in results if r["status"] == "certified"]
     failed = [r for r in results if r["status"] == "failed"]
-    print(f"\n  checked {len(results)} edge(s): "
-          f"{len(results) - len(failed)} certified, {len(failed)} failed")
+    unverified = [r for r in results if r["status"] not in ("certified", "failed")]
+    print(f"\n  checked {len(results)} edge(s): {len(certified)} certified, "
+          f"{len(failed)} failed, {len(unverified)} unverified")
     return 0
 
 

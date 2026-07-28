@@ -62,21 +62,46 @@ def _lookml_expr(row: dict[str, Any]) -> str | None:
     return sql  # type: number / pre-aggregated expression — pass through
 
 
-def _lookml_filters(raw: str | None) -> list[str]:
-    """`[status: "completed", channel: "-internal"]` → SQL predicates.
-    A leading `-` is LookML negation. Unrecognized text passes through raw."""
+# LookML filter values are a small language, not literals: ranges (`>100`,
+# `1 to 10`), wildcards (`%x%`), null tests, inline lists, and relative dates.
+# Anything carrying this syntax cannot be rendered as an equality, and
+# guessing produces a predicate nobody declared.
+_LOOKML_DSL = re.compile(
+    r"""^\s*(?:NOT\s+NULL|NULL|EMPTY|-?\s*$)          # null / empty tests
+        |[<>%^,]                                       # ranges, wildcards, lists
+        |\b(?:to|before|after|ago|month|year|day|week|quarter|hour|minute|fiscal)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _lookml_filters(raw: str | None) -> tuple[list[str], list[str]]:
+    """`[status: "completed", channel: "-internal"]` → (predicates, untranslatable).
+
+    Only plain literal equality and its negation are translated. A leading `-`
+    is LookML negation, and in Looker that INCLUDES rows where the field is
+    NULL — rendering it as a bare `<>` silently drops them, making the claim
+    stricter than the declaration and able to falsely match a model that also
+    drops them.
+    """
     if not raw:
-        return []
+        return [], []
     pairs = _LOOKML_FILTER_RE.findall(raw)
     if not pairs:
-        return [raw]
-    out = []
-    for field, value in pairs:
-        if value.startswith("-"):
-            out.append(f"{field} <> '{value[1:]}'")
+        return [], [str(raw)]
+
+    predicates: list[str] = []
+    untranslatable: list[str] = []
+    for field_name, value in pairs:
+        negated = value.startswith("-")
+        literal = value[1:] if negated else value
+        if _LOOKML_DSL.search(literal) or not literal:
+            untranslatable.append(f"{field_name}: {value}")
+        elif negated:
+            predicates.append(f"({field_name} <> '{literal}' OR {field_name} IS NULL)")
         else:
-            out.append(f"{field} = '{value}'")
-    return out
+            predicates.append(f"{field_name} = '{literal}'")
+    return predicates, untranslatable
 
 
 def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
@@ -107,13 +132,19 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
             continue
         view = views.get(str(row.get("view_name") or ""))
         model = str(view["sql_table_name"]) if view and view.get("sql_table_name") else None
+        raw_filters = row.get("filters")
+        filters, untranslatable = _lookml_filters(
+            raw_filters if isinstance(raw_filters, str) or raw_filters is None
+            else str(raw_filters)
+        )
         specs.append(DeclaredSpec(
             system="agents_lookml",
             name=str(row["measure_name"]),
             description=row.get("description") or row.get("ai_context"),
             model=model,
             expr=_lookml_expr(row),
-            filters=_lookml_filters(row.get("filters")),
+            filters=filters,
+            untranslatable=untranslatable,
             path=path,
         ))
     return specs
