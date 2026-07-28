@@ -16,7 +16,7 @@ from semantix.adapters.base import (
     topo_sort,
 )
 from semantix.adapters.catalog import load_catalog
-from semantix.adapters.dbt import load_dbt_detailed
+from semantix.adapters.dbt import load_dbt_detailed, load_dbt_metrics
 from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.extraction.canonicalize import canonicalize_sql
@@ -157,6 +157,11 @@ def run_scan(
             store.record_fingerprint(fp, scan_id, observed_at)
 
     specs: list[DeclaredSpec] = []
+    if dbt_path:
+        # Both sides of the reconciliation live in the same manifest: reading
+        # only `nodes` reported every dbt Semantic Layer metric as a shadow
+        # metric while its declaration sat unread in the file already open.
+        specs += load_dbt_metrics(dbt_path)
     if metrics_path:
         specs += load_metrics(metrics_path)
     if agents_schema_path:

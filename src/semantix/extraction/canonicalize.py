@@ -106,6 +106,17 @@ def _resolve_group_ordinals(ast: exp.Expression) -> None:
                     item.replace(target.copy())
 
 
+def normalize_scope(ast: exp.Expression, dialect: str) -> exp.Expression:
+    """Apply the alias and operand normalizations to one scope.
+
+    Exposed because CTE bodies need the same treatment as the top-level
+    select: the optimizer qualifies them but leaves the author's table
+    aliases in place, so hashing a body's rendered text made a rename inside
+    a CTE look like a definition change.
+    """
+    return _normalize_symmetric(_canonical_table_aliases(ast), dialect)
+
+
 def _canonical_table_aliases(ast: exp.Expression) -> exp.Expression:
     """Assign deterministic aliases t0..tn to the top scope's tables, ordered
     by relation name. Ambiguous re-used ref names are left untouched — a

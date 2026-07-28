@@ -69,6 +69,12 @@ class SchemaRegistry:
                     src = amap.get(col.table) or single or col.table or "<unknown>"
                     terminal_set.update(self.terminals_for(src, col.name))
                 terms[name] = tuple(sorted(terminal_set))
+        # Never replace real knowledge with nothing. Writing `{}` for a model
+        # we could not resolve erased a genuine catalog entry, after which
+        # every downstream model over that table failed to qualify — and two
+        # identical definitions then produced a false CONTRADICTION.
+        if not cols and relation in self._types and self._types[relation]:
+            return
         self._types[relation] = cols
         self._terminals[relation] = terms
 

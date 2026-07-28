@@ -58,6 +58,19 @@ def _set_delta(baseline: list, actual: list) -> dict[str, list]:
     return {"missing": sorted(b - a), "extra": sorted(a - b)}
 
 
+def blame_site(member: dict) -> str:
+    """Where a reader should go to FIX this member.
+
+    For computed members that is the relation. For a declared one it is the
+    ontology entry — never the model the claim reads, which is working code
+    that would be corrected for a fault in someone's YAML.
+    """
+    if member.get("kind") == "declared":
+        source = member.get("system") or member.get("path") or "the ontology"
+        return f"the {source} declaration of {member.get('name')}"
+    return member["where"]
+
+
 def blame_members(members: list[dict]) -> dict[str, Any]:
     """Per-divergent-member minimal diffs against the baseline definition.
     Members are the reconciliation evidence rows (each carries components())."""
@@ -73,7 +86,7 @@ def blame_members(members: list[dict]) -> dict[str, Any]:
         comp = m["components"]
         delta: dict[str, Any] = {
             "member_id": m["member_id"],
-            "where": m["where"],
+            "where": blame_site(m),
             "kind": m["kind"],
             "filters": _set_delta(base["filters"], comp["filters"]),
             "grain": _set_delta(base["grain"], comp["grain"]),
@@ -92,7 +105,7 @@ def blame_members(members: list[dict]) -> dict[str, Any]:
         divergent.append(delta)
 
     return {
-        "baseline": {"member_id": baseline["member_id"], "where": baseline["where"],
+        "baseline": {"member_id": baseline["member_id"], "where": blame_site(baseline),
                      "kind": baseline["kind"]},
         "divergent": divergent,
     }

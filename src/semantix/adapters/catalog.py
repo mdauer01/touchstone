@@ -28,12 +28,23 @@ RESERVED_SECTIONS = {"primary_keys", "relationships"}
 def load_catalog(path: str | Path) -> dict[str, dict[str, str]]:
     data = yaml.safe_load(Path(path).read_text()) or {}
     catalog: dict[str, dict[str, str]] = {}
-    for schema_name, tables in data.items():
-        if schema_name in RESERVED_SECTIONS:
+    if not isinstance(data, dict):
+        return catalog
+    for key, value in data.items():
+        if key in RESERVED_SECTIONS or not isinstance(value, dict):
             continue
-        for table_name, columns in (tables or {}).items():
-            catalog[f"{schema_name}.{table_name}"] = {
-                str(col): str(dtype) for col, dtype in (columns or {}).items()
+        # Both documented shapes. Nested: `schema: {table: {col: type}}`.
+        # Flat: `schema.table: {col: type}` — which the CLI's own help text
+        # describes, and which used to raise a traceback here.
+        if all(isinstance(v, dict) for v in value.values()) and value:
+            for table_name, columns in value.items():
+                catalog[f"{key}.{table_name}"] = {
+                    str(col): str(dtype) for col, dtype in (columns or {}).items()
+                }
+        else:
+            catalog[str(key)] = {
+                str(col): str(dtype) for col, dtype in value.items()
+                if not isinstance(dtype, dict)
             }
     return catalog
 

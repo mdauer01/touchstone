@@ -57,7 +57,13 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
         claim_hashes = {c.core.hash() for c in expressible}
         all_hashes = set(core_hashes) | claim_hashes
 
-        if len(all_hashes) == 1 and expressible and proof_grade:
+        # Certification asserts that EVERY declared definition agrees with the
+        # code. A claim we could not translate was silently dropped from the
+        # comparison, so a concept certified while a human-written declaration
+        # sat unexamined beside it.
+        fully_expressible = len(expressible) == len(claims)
+
+        if len(all_hashes) == 1 and expressible and proof_grade and fully_expressible:
             verdicts.append(
                 _verdict(
                     VerdictType.CERTIFIED,
@@ -87,6 +93,24 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
             severity = 80 + 10 + min(10, 2 * len(fps))
             verdicts.append(
                 _verdict(VerdictType.CONTRADICTION, concept, severity, summary, base_evidence)
+            )
+        elif not expressible and len(core_hashes) > 1:
+            # The code disagrees with itself. An unreadable declaration does
+            # not make that disagreement go away, and reporting it as merely
+            # "unresolved" buries a real contradiction.
+            blame = blame_members(members)
+            verdicts.append(
+                _verdict(
+                    VerdictType.CONTRADICTION,
+                    concept,
+                    severity=80 + min(10, 2 * len(fps)),
+                    summary=(
+                        f"{len(fps)} computed definitions disagree; the declared "
+                        f"definition could not be read, so neither can be confirmed "
+                        f"correct. {_blame_clause(blame, members)}"
+                    ),
+                    evidence={**base_evidence, "blame": blame},
+                )
             )
         elif not expressible:
             verdicts.append(
@@ -132,6 +156,25 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
         )
 
     if claims and not fps:
+        # Two ontologies declaring the same concept differently is a real
+        # disagreement even when nothing computes it — arguably the purest
+        # one, since no code exists to arbitrate.
+        declared_hashes = {c.core.hash() for c in expressible}
+        if len(declared_hashes) > 1:
+            blame = blame_members(members)
+            verdicts.append(
+                _verdict(
+                    VerdictType.CONTRADICTION,
+                    concept,
+                    severity=80,
+                    summary=(
+                        f"{len(expressible)} declared definitions of this concept "
+                        f"disagree, and nothing in the estate computes it. "
+                        f"{_blame_clause(blame, members)}"
+                    ),
+                    evidence={**base_evidence, "blame": blame},
+                )
+            )
         verdicts.append(
             _verdict(
                 VerdictType.ORPHAN_CLAIM,
@@ -146,7 +189,10 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
             _verdict(
                 VerdictType.SHADOW_METRIC,
                 concept,
-                severity=25 + 2 * (len(fps) - 1),
+                # Capped below the orphan/contradiction bands: severity drives
+                # triage order, and an unbounded shadow score sorted ahead of
+                # real contradictions once enough sites computed it.
+                severity=min(39, 25 + 2 * (len(fps) - 1)),
                 summary=(
                     f"Computed at {len(fps)} site{'s' if len(fps) != 1 else ''} in the "
                     "estate but absent from the declared ontology."
@@ -192,7 +238,11 @@ def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) ->
                 "member_id": claim.short_id,
                 "kind": "declared",
                 "name": claim.name,
+                # The model a claim names is the table it READS, not where the
+                # faulty text lives. Blame renders declared sites from
+                # `system`, so a YAML fault is not reported against code.
                 "where": claim.model or claim.provenance.system,
+                "system": claim.provenance.system,
                 "path": claim.provenance.path,
                 "canon_level": claim.canon_level,
                 "core_hash": claim.core.hash()[:12],
@@ -206,6 +256,7 @@ def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) ->
                 "kind": "computed",
                 "name": fp.concept_candidate,
                 "where": fp.relation,
+                "system": fp.provenance.system,
                 "path": fp.provenance.path,
                 "canon_level": fp.canon_level,
                 "core_hash": fp.core.hash()[:12],

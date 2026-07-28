@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from semantix.adapters.base import ComputedArtifact, topo_sort
+from semantix.adapters.base import ComputedArtifact, DeclaredSpec, topo_sort
 
 
 def load_dbt(project_dir: str | Path) -> list[ComputedArtifact]:
@@ -33,15 +33,35 @@ def load_dbt_detailed(
     manifest_path = _find_manifest(root)
     data = json.loads(manifest_path.read_text())
 
+    all_nodes = data.get("nodes") or {}
     nodes = {
-        uid: node
-        for uid, node in (data.get("nodes") or {}).items()
+        uid: node for uid, node in all_nodes.items()
         if node.get("resource_type") == "model"
     }
     relation_of = {uid: _relation(node) for uid, node in nodes.items()}
 
     artifacts: list[ComputedArtifact] = []
     skipped: list[dict] = []
+
+    # Node types we do not read are DISCLOSED rather than dropped. Snapshots
+    # and ephemeral models define real transformations; an ephemeral model in
+    # particular is inlined into its consumers, so ignoring it silently made
+    # its logic vanish from lineage while appearing nowhere in coverage.
+    for uid, node in all_nodes.items():
+        kind = node.get("resource_type")
+        if kind == "model" and node.get("config", {}).get("materialized") != "ephemeral":
+            continue
+        if kind in ("test", "analysis", "operation", "sql_operation"):
+            continue
+        if kind == "model":
+            continue  # ephemeral models are handled with the rest below
+        if kind in ("snapshot", "seed"):
+            skipped.append({
+                "object_id": uid,
+                "relation": _relation(node),
+                "path": node.get("original_file_path"),
+                "reason": f"{kind}s are not read by this adapter",
+            })
     for uid, node in nodes.items():
         sql, path = _compiled_sql(root, node)
         if sql is None:
@@ -70,6 +90,68 @@ def load_dbt_detailed(
             )
         )
     return topo_sort(artifacts), skipped
+
+
+def load_dbt_metrics(project_dir: str | Path) -> list[DeclaredSpec]:
+    """Declared metrics from the SAME manifest the models come from.
+
+    A dbt project using the Semantic Layer carries `metrics` and
+    `semantic_models` alongside `nodes`, so both sides of the reconciliation
+    are already in the file we open — and reading only one of them reported
+    every declared metric as a SHADOW_METRIC, which is precisely backwards.
+    """
+    data = json.loads(_find_manifest(Path(project_dir)).read_text())
+    semantic_models = data.get("semantic_models") or {}
+    # semantic model name -> the relation it is defined over
+    model_relation: dict[str, str] = {}
+    for sm in semantic_models.values():
+        name = sm.get("name")
+        node_relation = sm.get("node_relation") or {}
+        relation = node_relation.get("relation_name") or node_relation.get("alias")
+        if name and relation:
+            model_relation[str(name)] = str(relation).replace('"', "")
+
+    specs: list[DeclaredSpec] = []
+    for metric in (data.get("metrics") or {}).values():
+        name = metric.get("name")
+        if not name:
+            continue
+        expr, model, untranslatable = _metric_expression(metric, model_relation)
+        specs.append(DeclaredSpec(
+            system="dbt_metrics",
+            name=str(name),
+            description=metric.get("description"),
+            model=model,
+            expr=expr,
+            untranslatable=untranslatable,
+            path=metric.get("original_file_path"),
+        ))
+    return specs
+
+
+def _metric_expression(metric: dict, model_relation: dict[str, str]):
+    """(expr, model, untranslatable) for one MetricFlow metric.
+
+    Only `simple` metrics map cleanly onto a single measure over one table.
+    Ratio, derived, cumulative and conversion metrics compose other metrics
+    or carry window semantics the SemanticCore does not represent — those are
+    reported as untranslatable rather than guessed into a wrong claim.
+    """
+    metric_type = str(metric.get("type") or "").lower()
+    type_params = metric.get("type_params") or {}
+    measure = type_params.get("measure") or {}
+    measure_name = measure.get("name") if isinstance(measure, dict) else measure
+
+    if metric_type != "simple" or not measure_name:
+        return None, None, [f"{metric_type or 'unknown'} metric is not a single measure"]
+
+    agg = str(measure.get("agg") or "").lower() if isinstance(measure, dict) else ""
+    expr = measure.get("expr") if isinstance(measure, dict) else None
+    column = expr or measure_name
+    model = model_relation.get(str(measure.get("semantic_model") or "")) if isinstance(measure, dict) else None
+    if not agg:
+        return None, model, [f"measure {measure_name} declares no aggregation"]
+    return f"{agg}({column})", model, []
 
 
 def _find_manifest(root: Path) -> Path:

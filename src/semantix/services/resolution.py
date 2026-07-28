@@ -50,10 +50,19 @@ def resolve_concepts(fingerprints: list[Fingerprint], claims: list[Claim]) -> li
             lo, hi = sorted((ra, rb))
             parent[hi] = lo
 
+    # Merge name buckets that share a canonical core — but ONLY when the
+    # bucket speaks with one voice. A bucket holding two different cores (two
+    # models both calling their measure `sales` while computing different
+    # things) would otherwise act as a bridge, chaining unrelated concepts
+    # into one and destroying every verdict for all of them. A heterogeneous
+    # bucket keeps its own identity rather than fusing its neighbours.
     core_owner: dict[str, str] = {}
-    for name, bucket in buckets.items():
+    for name in sorted(buckets):
+        bucket = buckets[name]
         hashes = {fp.core.hash() for fp in bucket.fingerprints}
         hashes.update(cl.core.hash() for cl in bucket.claims if cl.core is not None)
+        if len(hashes) != 1:
+            continue
         for h in hashes:
             if h in core_owner:
                 union(name, core_owner[h])
@@ -82,11 +91,16 @@ def resolve_concepts(fingerprints: list[Fingerprint], claims: list[Claim]) -> li
 
 
 def _pick_label(bucket: _Bucket) -> str:
-    # Declared names win; otherwise the most common computed candidate.
+    """Declared names win; otherwise the most common computed candidate.
+
+    Ties break lexicographically rather than by input order: an order-
+    dependent label yields a different concept_id on a rescan of an unchanged
+    estate, which splits the concept's bitemporal history in two.
+    """
     if bucket.claims:
-        return normalize_name(bucket.claims[0].name)
+        return min(normalize_name(c.name) for c in bucket.claims)
     counts: dict[str, int] = {}
     for fp in bucket.fingerprints:
         n = normalize_name(fp.concept_candidate)
         counts[n] = counts.get(n, 0) + 1
-    return max(sorted(counts), key=lambda n: counts[n])
+    return min(sorted(counts), key=lambda n: (-counts[n], n))

@@ -116,7 +116,10 @@ def test_cross_provider_scan_surfaces_underspecified_declarations(acme, tmp_path
     assert nr
     wheres = {d["where"] for d in nr[0].evidence["blame"]["divergent"]}
     assert "analytics.growth_net_revenue" in wheres
-    assert "analytics.fct_orders" in wheres  # the OSI declaration itself
+    # The OSI declaration itself — named as the declaration, not as the table
+    # it reads. Blaming `analytics.fct_orders` sent a reader to correct
+    # working code for a fault in someone's ontology entry.
+    assert "the agents_osi declaration of net_revenue" in wheres
 
 
 def test_publish_receipts_into_agents_root(acme, tmp_path):

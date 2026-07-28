@@ -10,7 +10,7 @@ import hashlib
 
 from sqlglot import exp
 
-from semantix.extraction.canonicalize import CanonResult
+from semantix.extraction.canonicalize import CanonResult, normalize_scope
 from semantix.extraction.completeness import detect_gaps
 from semantix.extraction.registry import SchemaRegistry
 from semantix.extraction.sqlutil import flatten_conjuncts, render, table_map, unwrap_select
@@ -25,6 +25,14 @@ def extract_fingerprints(
     registry: SchemaRegistry,
 ) -> list[Fingerprint]:
     select = unwrap_select(canon.ast)
+    set_op = False
+    if select is None and isinstance(canon.ast, (exp.Union, exp.Except, exp.Intersect)):
+        # A set-operation model produced NOTHING before — no fingerprint, no
+        # gap, no mention in coverage. Read the leading branch so the model is
+        # at least visible, and mark it: only one branch was read, so the
+        # measure is not the whole measure and can never be proof grade.
+        select = unwrap_select(canon.ast.this)
+        set_op = True
     if select is None:
         return []
 
@@ -67,6 +75,8 @@ def extract_fingerprints(
     # represent, the fingerprint must not be treated as proof-grade — the
     # unread construct would otherwise read as "identical" to its absence.
     gaps = detect_gaps(select)
+    if set_op:
+        gaps = tuple(sorted({*gaps, "set operation"}))
     level = canon.level.value
     if gaps and level in PROOF_LEVELS:
         level = CanonLevel.INCOMPLETE.value
@@ -129,7 +139,11 @@ def _body_digest(body: exp.Expression, bodies: dict[str, exp.Expression],
     optimization as a plain table reference, so two entirely unrelated measures
     reading a CTE that happens to share a name hashed identically.
     """
-    text = render(body, dialect)
+    # Normalize the body the same way the outer scope is normalized before
+    # hashing it — the optimizer qualifies CTE bodies but leaves the author's
+    # aliases, so raw text made `from raw.orders as cust` differ from
+    # `from raw.orders`, fabricating a contradiction from a rename.
+    text = render(normalize_scope(body.copy(), dialect), dialect)
     nested = []
     for table in body.find_all(exp.Table):
         name = table.name
