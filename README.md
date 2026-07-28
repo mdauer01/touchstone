@@ -216,13 +216,13 @@ true — in the same tables, over the same SQL.**
 
 ```bash
 .venv/bin/semantix bench
-# equivalence corpus: 25 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 100.0%
+# equivalence corpus: 26 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 100.0%
 #     duckdb      9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
 #     databricks  9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
 #     snowflake   9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
 #     bigquery    9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
 #   equivalence detection: 36/36 (100%)
-#   known gaps: 1 confirmed
+#   known gaps: 2 confirmed
 #   near-misses distinguished: 60/60
 #   false certifications: 0 ✓
 ```
@@ -298,10 +298,18 @@ carry `method: static-canonical-diff` and name exactly which components diverge
 (expression / filters / grain / join graph / physical lineage). The Phase 1 execution
 harness upgrades hypotheses to measured numeric divergence.
 
-**Degradation ladder, never hard failure.** optimized → qualified → parsed → failed.
-Artifacts that can't be fully canonicalized still get recorded; equality below proof
-grade can't certify (`UNRESOLVED`, not a false `CERTIFIED`). The scan prints
-canonicalization coverage — the §9 target is >85 %; the demo estate hits 100 %.
+**Degradation ladder, never hard failure.** optimized → qualified → parsed → failed,
+plus `incomplete` — the completeness gate's verdict on SQL we parsed but cannot
+fully model. Artifacts that can't be fully canonicalized still get recorded; equality
+below proof grade can't certify (`UNRESOLVED`, not a false `CERTIFIED`). The scan
+prints canonicalization coverage — the §9 target is >85 %; the demo estate hits 100 %.
+
+In practice `qualified` almost never fires: `qualify()` fails on the same
+unresolvable-column condition as `optimize()`, so coverage behaves as a binary
+between "bound to the catalog" and "not". Coverage on a real estate therefore depends
+entirely on whether relation names in the SQL match the names in `--catalog` and in the
+manifest — see `--min-coverage`, which fails a scan that read the estate but understood
+little of it.
 
 **Names live outside the semantic core.** Two definitions are compared by name-free
 canonical content, which is what makes aliasing detectable and renames non-events.

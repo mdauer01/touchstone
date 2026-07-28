@@ -222,6 +222,7 @@ def run_scan(
         )
     _qualify_for_unreadable(verdicts, unread)
     _qualify_for_ambiguous_relations(verdicts, dupes)
+    _qualify_for_untranslated_claims(verdicts, concepts)
     store.save_results(scan_id, concepts, verdicts)
 
     result = ScanResult(
@@ -243,6 +244,40 @@ def run_scan(
     )
     store.finish_scan(scan_id, result.stats())
     return result, store
+
+
+def _qualify_for_untranslated_claims(verdicts: list[Verdict],
+                                     concepts: list[Concept]) -> None:
+    """No affirmative equivalence for a concept with an unread declaration.
+
+    Unlike an unreadable SQL artifact — which may define ANY concept, so it
+    qualifies everything — an untranslatable DECLARATION is scoped: we know
+    exactly which concept it belongs to. But within that concept it is the
+    same problem, and it was not treated as one: a scan carrying an
+    untranslatable LookML measure reported 100% coverage and 0 skipped, and
+    still emitted an ALIASING equivalence for the very concept whose second
+    declaration it had not read.
+    """
+    blocked = {
+        concept.concept_id: [c for c in concept.claims if c.core is None]
+        for concept in concepts
+    }
+    for verdict in verdicts:
+        untranslated = blocked.get(verdict.concept_id) or []
+        if not untranslated:
+            continue
+        if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+            continue
+        names = ", ".join(f"{c.name} ({c.provenance.system})" for c in untranslated)
+        verdict.verdict_type = VerdictType.UNRESOLVED
+        verdict.severity = max(verdict.severity, 45)
+        verdict.summary = (
+            f"Cannot certify: {len(untranslated)} declaration(s) of this concept "
+            f"could not be translated and were never compared ({names}). "
+            + verdict.summary
+        )
+        verdict.evidence = {**verdict.evidence,
+                            "untranslated_claims": [c.error for c in untranslated]}
 
 
 def _qualify_for_ambiguous_relations(verdicts: list[Verdict], dupes: dict) -> None:

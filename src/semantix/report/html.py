@@ -207,6 +207,10 @@ def _concept_card(concept: Concept, verdicts: list[Verdict], store: Store) -> st
 
     members = primary.evidence.get("members", [])
     table = _members_table(members) if members else ""
+    # The declarations that BLOCKED comparison. They have no canonical core, so
+    # they cannot appear in the members table — and without this a reader is
+    # told the concept could not be certified and given no way to see why.
+    table += _inexpressible_table(primary.evidence.get("inexpressible_claims", []))
 
     history = _history_html(store, concept.label)
 
@@ -220,6 +224,27 @@ def _concept_card(concept: Concept, verdicts: list[Verdict], store: Store) -> st
   {history}
 </section>
 """
+
+
+def _inexpressible_table(claims: list[dict]) -> str:
+    if not claims:
+        return ""
+    rows = ""
+    for c in claims:
+        rows += (
+            "<tr>"
+            f"<td><code>{html.escape(str(c.get('name', '')))}</code></td>"
+            f"<td>{html.escape(str(c.get('system', '')))}</td>"
+            f"<td><code>{html.escape(str(c.get('expr_raw') or '—'))}</code></td>"
+            f"<td>{html.escape(str(c.get('reason', '')))}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="tablewrap"><table class="members">'
+        "<thead><tr><th>declaration not compared</th><th>system</th>"
+        "<th>as written</th><th>why</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+    )
 
 
 def _members_table(members: list[dict]) -> str:

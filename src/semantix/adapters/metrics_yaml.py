@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
+from semantix.adapters.loadutil import load_yaml
 
 from semantix.adapters.base import DeclaredSpec
 
@@ -48,7 +48,7 @@ def _sql_terms(value, label: str) -> tuple[list[str], list[str]]:
 
 def load_metrics(path: str | Path) -> list[DeclaredSpec]:
     p = Path(path)
-    data = yaml.safe_load(p.read_text()) or {}
+    data = load_yaml(p)
     if isinstance(data, list):          # a bare list of metrics, no wrapper key
         entries = data
     elif isinstance(data, dict):

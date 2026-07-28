@@ -54,7 +54,12 @@ def load_sql_dir(root: str | Path, dialect: str = "duckdb") -> tuple[list[Comput
     rootp = Path(root)
     artifacts: list[ComputedArtifact] = []
     skipped: list[dict] = []
-    for path in sorted(rootp.rglob("*.sql")):
+    # Case-insensitive: `rglob("*.sql")` silently skipped `.SQL` and `.Sql`
+    # files, and a dropped artifact is a missing contradictor.
+    candidates = sorted(
+        p for p in rootp.rglob("*") if p.is_file() and p.suffix.lower() == ".sql"
+    )
+    for path in candidates:
         rel_path = path.relative_to(rootp)
         object_id = str(rel_path)
         # Estate files are not guaranteed UTF-8 and may be unreadable; a

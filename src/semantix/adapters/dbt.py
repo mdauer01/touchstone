@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from semantix.adapters.loadutil import load_json
 from semantix.adapters.base import ComputedArtifact, DeclaredSpec, topo_sort
 
 
@@ -31,7 +32,7 @@ def load_dbt_detailed(
     """
     root = Path(project_dir)
     manifest_path = _find_manifest(root)
-    data = json.loads(manifest_path.read_text())
+    data = load_json(manifest_path)
 
     all_nodes = data.get("nodes") or {}
     nodes = {
@@ -108,7 +109,7 @@ def load_dbt_metrics(project_dir: str | Path) -> list[DeclaredSpec]:
     are already in the file we open — and reading only one of them reported
     every declared metric as a SHADOW_METRIC, which is precisely backwards.
     """
-    data = json.loads(_find_manifest(Path(project_dir)).read_text())
+    data = load_json(_find_manifest(Path(project_dir)))
     semantic_models = data.get("semantic_models") or {}
 
     # A metric's `type_params.measure` is a REFERENCE — usually just a name.

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from semantix.adapters.base import DeclaredSpec
+from semantix.adapters.loadutil import load_json
 
 AGENTS_TABLES = ("osi_metric", "osi_dataset", "osi_field",
                  "lookml_measure", "lookml_view")
@@ -313,7 +314,7 @@ def load_agents_schema(path: str | Path) -> list[DeclaredSpec]:
     file containing the AGENTS schema."""
     p = Path(path)
     if p.suffix.lower() == ".json":
-        data = json.loads(p.read_text())
+        data = load_json(p)
         tables = {k.lower(): v for k, v in data.items() if isinstance(v, list)}
         return claims_from_tables(tables, path=str(p))
 

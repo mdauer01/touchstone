@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     p_rel.add_argument("--db", default="semantix.db")
 
     args = parser.parse_args(argv)
-    return {
+    handler = {
         "scan": _cmd_scan,
         "diff": _cmd_diff,
         "concepts": _cmd_concepts,
@@ -209,7 +209,16 @@ def main(argv: list[str] | None = None) -> int:
         "mine-relationships": _cmd_mine_relationships,
         "verify-relationships": _cmd_verify_relationships,
         "relationships": _cmd_relationships,
-    }[args.command](args)
+    }[args.command]
+    try:
+        return handler(args)
+    except (ValueError, FileNotFoundError) as e:
+        # Intake problems the adapters have already described precisely — a
+        # missing manifest, a truncated JSON file, a YAML of the wrong shape,
+        # an unsupported warehouse URL. They arrived as raw tracebacks, which
+        # is the least actionable way to tell an operator their path is wrong.
+        print(f"semantix: {e}", file=sys.stderr)
+        return 2
 
 
 def _add_estate_args(parser: argparse.ArgumentParser) -> None:
@@ -684,6 +693,13 @@ def _print_graph(rows: list[dict]) -> None:
 def _cmd_pubkey(args: argparse.Namespace) -> int:
     from semantix.signing import ensure_keypair
 
+    # A typo'd --db silently CREATED a store and minted a fresh key, which the
+    # operator then published as the pin — after which every real receipt fails
+    # verification, and the failure looks like tampering rather than a typo.
+    if not Path(args.db).exists():
+        print(f"semantix: no store at {args.db} — pubkey reads an existing "
+              f"store's signing key and will not create one", file=sys.stderr)
+        return 2
     keypair = ensure_keypair(Store(args.db))
     if keypair is None:
         print("no crypto backend (pip install cryptography)", file=sys.stderr)

@@ -49,6 +49,11 @@ def spec_content_text(spec: DeclaredSpec) -> str:
             "expr": spec.expr,
             "filters": list(spec.filters),
             "group_by": list(spec.group_by),
+            # A declaration that GAINS a filter the adapter cannot render has
+            # changed — and recorded byte-identically to the one before it, so
+            # the content-addressed artifact id was unchanged, the freshness
+            # re-check saw no drift, and a prior receipt still verified.
+            "untranslatable": sorted(spec.untranslatable),
         },
         sort_keys=True,
     )
@@ -80,9 +85,16 @@ def topo_sort(artifacts: list[ComputedArtifact]) -> list[ComputedArtifact]:
     would come back CERTIFIED for want of its contradictor. This function is
     total: every input artifact appears exactly once in the output.
     """
+    # `setdefault` kept the FIRST artifact under a given (system, object_id)
+    # and dropped the rest — silently. A `CREATE OR REPLACE VIEW` dump names
+    # the same view twice by design, so the store recorded the SUPERSEDED
+    # definition as the estate's current one and never mentioned the one
+    # actually deployed. `duplicate_relations` could not report it either,
+    # because dedup happened first. Later wins, which is what "OR REPLACE"
+    # means, and the collision is surfaced through duplicate_relations.
     by_key: dict[tuple[str, str], ComputedArtifact] = {}
     for a in artifacts:
-        by_key.setdefault(artifact_key(a), a)
+        by_key[artifact_key(a)] = a
 
     producers: dict[str, list[tuple[str, str]]] = {}
     for key, a in by_key.items():

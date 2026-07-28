@@ -415,6 +415,13 @@ class Store:
             members = {
                 "fingerprints": [fp.fingerprint_id for fp in concept.fingerprints],
                 "claims": [cl.claim_id for cl in concept.claims],
+                # Every NAME this concept goes by. The label is only one of
+                # them and is chosen from the members, so it moves when the
+                # ontology gains an alias — after which `attest <the old name>`
+                # returned nothing with no explanation. Recorded so a receipt
+                # can be found by any name the estate actually uses.
+                "names": sorted({fp.concept_candidate for fp in concept.fingerprints}
+                                | {cl.name for cl in concept.claims}),
             }
             # (scan_id, concept_id) is unique per scan, so this is a pure append;
             # OR IGNORE only makes a crashed-and-retried save idempotent.
@@ -527,6 +534,25 @@ class Store:
             for r in self._conn.execute(
                 "SELECT scan_id, started_at FROM scans ORDER BY started_at, rowid")
         ]
+
+    def concept_labels_containing(self, name: str, scan_id: str) -> list[str]:
+        """Concept labels in this scan whose MEMBERS include `name`.
+
+        Concept labels are derived from member names, so an ontology addition
+        that changes nothing about a concept's meaning can rename it. Without
+        this, the documented `attest <metric>` flow simply stopped returning
+        anything the day someone declared an alias.
+        """
+        target = normalize_name(name)
+        out = []
+        for r in self._conn.execute(
+            "SELECT label, members_json FROM concepts WHERE scan_id = ?", (scan_id,)
+        ):
+            members = json.loads(r["members_json"] or "{}")
+            names = {normalize_name(n) for n in members.get("names", [])}
+            if target in names:
+                out.append(r["label"])
+        return out
 
     def _relation_for(self, scan_id: str, object_key: str) -> str | None:
         """The relation the ARTIFACT at this definition site reported.
@@ -853,11 +879,24 @@ class Store:
         scan = self.scan_as_of(as_of) if as_of else self.latest_scan()
         if scan is None:
             return None
+        all_verdicts = self.verdicts_for_scan(scan["scan_id"])
         verdicts = [
             v
-            for v in self.verdicts_for_scan(scan["scan_id"])
+            for v in all_verdicts
             if normalize_name(v["concept_label"]) == normalize_name(concept_label)
         ]
+        if not verdicts:
+            # A concept's LABEL is chosen from its members, so declaring a new
+            # alias renames the concept — after which `attest revenue` returned
+            # nothing at all, with no error explaining why, though the ontology
+            # still declares `revenue`. Fall back to membership: the concept
+            # this name belongs to is the concept to attest.
+            for label in self.concept_labels_containing(concept_label,
+                                                        scan["scan_id"]):
+                verdicts = [v for v in all_verdicts
+                            if normalize_name(v["concept_label"]) == normalize_name(label)]
+                if verdicts:
+                    break
         if not verdicts:
             return None
 

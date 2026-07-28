@@ -164,16 +164,31 @@ def _relations_read(sql: str, dialect: str) -> set[str] | None:
         return None
     if node is None:
         return None
-    ctes = {cte.alias_or_name.lower() for cte in node.find_all(exp.CTE)}
     out: set[str] = set()
     for table in node.find_all(exp.Table):
         parts = [p for p in (table.catalog, table.db, table.name) if p]
         if not parts:
             continue
-        if len(parts) == 1 and parts[0].lower() in ctes:
-            continue  # a CTE reference resolves in-query, not in the warehouse
+        # A CTE reference resolves in-query, not in the warehouse — but only
+        # a CTE VISIBLE FROM THIS TABLE's scope. Collecting CTE names from the
+        # whole tree let an unrelated subquery's CTE named `orders` mask a
+        # genuine unqualified read of the physical `orders`, so the taint
+        # guard concluded "reads nothing failed" and measured through a
+        # relation that did not materialize.
+        if len(parts) == 1 and parts[0].lower() in _visible_ctes(table):
+            continue
         out.add(".".join(parts).lower())
     return out
+
+
+def _visible_ctes(node: exp.Expression) -> set[str]:
+    """CTE aliases in scope at `node`, walking outward from it."""
+    names: set[str] = set()
+    scope = node.parent_select
+    while scope is not None:
+        names |= {cte.alias_or_name.lower() for cte in (scope.ctes or [])}
+        scope = scope.parent_select
+    return names
 
 
 def _same_relation(a: str, b: str) -> bool:
@@ -187,8 +202,14 @@ def _same_relation(a: str, b: str) -> bool:
     """
     pa = [p for p in a.lower().split(".") if p]
     pb = [p for p in b.lower().split(".") if p]
+    # Suffix tolerance is for QUALIFICATION (`db.schema.t` vs `schema.t`), not
+    # for a bare table name: matching `staging.orders` against an unqualified
+    # `orders` made an unrelated failure suppress measurement and name a
+    # relation the definition never touches. Both sides need at least a schema.
     n = min(len(pa), len(pb))
-    return bool(n) and pa[-n:] == pb[-n:]
+    if n < 2:
+        return pa == pb
+    return pa[-n:] == pb[-n:]
 
 
 def _is_additive(measure_expr: str) -> bool:
@@ -218,11 +239,36 @@ def _is_additive(measure_expr: str) -> bool:
             node = non_literal[0]
         else:
             break
+    # An arithmetic combination of additive aggregates is itself additive:
+    # SUM(gross) - SUM(refunds) is the commonest net-revenue shape there is,
+    # and rejecting it meant those contradictions were never quantified while
+    # the stated reason blamed non-additivity for an expression that is
+    # additive. Scaling by a constant is additive too.
+    if isinstance(node, (exp.Add, exp.Sub)):
+        return _is_additive_node(node.this) and _is_additive_node(node.expression)
+    if isinstance(node, (exp.Mul, exp.Div)):
+        additive = [s for s in (node.this, node.expression) if not _is_literal(s)]
+        return len(additive) == 1 and _is_additive_node(additive[0])
+    return _is_additive_node(node)
+
+
+def _is_literal(node: exp.Expression) -> bool:
+    inner = node.this if isinstance(node, exp.Paren) else node
+    return isinstance(inner, exp.Literal)
+
+
+def _is_additive_node(node: exp.Expression) -> bool:
+    if isinstance(node, exp.Paren):
+        return _is_additive_node(node.this)
+    if isinstance(node, (exp.Add, exp.Sub)):
+        return _is_additive_node(node.this) and _is_additive_node(node.expression)
     if not isinstance(node, (exp.Sum, exp.Count)):
         return False
-    # DISTINCT de-duplicates before aggregating, so partial results do not
-    # recompose — true of SUM(DISTINCT x) exactly as much as COUNT(DISTINCT x),
-    # which is the half that was checked.
+    # A FILTER (WHERE ...) clause restricts which rows the aggregate sees; the
+    # result still sums across partitions, so it stays additive.
+    # DISTINCT does not: it de-duplicates before aggregating, so partial
+    # results do not recompose — true of SUM(DISTINCT x) exactly as much as
+    # COUNT(DISTINCT x), which is the half that was checked.
     return node.find(exp.Distinct) is None
 
 

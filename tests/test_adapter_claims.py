@@ -147,7 +147,27 @@ def test_non_string_filter_values_do_not_become_predicates(tmp_path):
     assert spec.group_by == []
 
 
-def test_top_level_list_yaml_does_not_crash(tmp_path):
+def test_a_wrongly_shaped_metrics_file_is_reported_not_silently_empty(tmp_path):
+    """Returning [] for a file we could not read is a silent drop of every
+    declaration in it — the estate then looks smaller than it is and concepts
+    certify with their declarations unexamined. The error must name the file
+    and say what is wrong with it."""
     p = tmp_path / "m.yml"
     p.write_text("- name: revenue\n  model: a.b\n  expr: sum(x)\n")
-    assert load_metrics(p) == [] or load_metrics(p)[0].name == "revenue"
+    with pytest.raises(ValueError) as e:
+        load_metrics(p)
+    assert "m.yml" in str(e.value)
+    assert "list" in str(e.value)
+
+
+@pytest.mark.parametrize("content,fragment", [
+    ("metrics: [\n", "not valid YAML"),
+    ("just a string", "expected a YAML dict"),
+])
+def test_malformed_metrics_files_name_the_problem(tmp_path, content, fragment):
+    p = tmp_path / "m.yml"
+    p.write_text(content)
+    with pytest.raises(ValueError) as e:
+        load_metrics(p)
+    assert fragment in str(e.value)
+    assert "m.yml" in str(e.value)
