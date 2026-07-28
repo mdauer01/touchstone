@@ -84,9 +84,31 @@ def test_reobservation_of_same_definition_extends_no_interval(tmp_path, clock):
 def test_latest_scan_tie_breaks_by_insertion_order(tmp_path, clock):
     store = Store(tmp_path / "t.db")
     clock()
-    store.begin_scan("first", "duckdb")
+    scan1, _ = store.begin_scan("first", "duckdb")
     scan2, _ = store.begin_scan("second", "duckdb")  # same second
+    store.finish_scan(scan1, {})
+    store.finish_scan(scan2, {})
     assert store.latest_scan()["scan_id"] == scan2
+
+
+def test_an_interrupted_scan_is_not_the_latest_scan(tmp_path, clock):
+    """A scan that died partway wrote no stats and describes nothing. It was
+    still the newest row, so every "current health" read — concepts, attest,
+    publish, the MCP tools — answered from it and reported a CLEAN ESTATE
+    while the store held a recorded CONTRADICTION."""
+    store = Store(tmp_path / "t.db")
+    clock()
+    done, _ = store.begin_scan("complete", "duckdb")
+    store.finish_scan(done, {})
+    store.begin_scan("interrupted", "duckdb")  # process dies here
+    assert store.latest_scan()["scan_id"] == done
+
+
+def test_latest_scan_is_none_before_any_scan_completes(tmp_path, clock):
+    store = Store(tmp_path / "t.db")
+    clock()
+    store.begin_scan("interrupted", "duckdb")
+    assert store.latest_scan() is None
 
 
 def test_fingerprint_rows_are_immutable_content_addressed(tmp_path, clock):

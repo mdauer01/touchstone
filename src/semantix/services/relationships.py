@@ -286,12 +286,29 @@ def verify_edges(
         # An endpoint that never materialized cannot be checked. Querying it
         # anyway either errors or, worse, answers from some pre-existing
         # object of the same name.
-        broken = [r for r in (row["left_relation"], row["right_relation"]) if r in unbuilt]
+        # Endpoint names come from catalog YAML or mined SQL (usually two-part,
+        # lower case) while `unbuilt` keys come from artifact.relation, which on
+        # a dbt/Snowflake estate is three-part and upper case. An exact string
+        # test never matched, so the guard was inert exactly where it is needed
+        # and the edge was certified against whatever stale object the seed had
+        # left behind under that name.
+        broken = [r for r in (row["left_relation"], row["right_relation"])
+                  if any(same_relation(r, u) for u in unbuilt)]
         if broken:
+            evidence = {"unrunnable": True,
+                        "error": f"relation(s) failed to build: {', '.join(broken)}"}
+            # RECORD it. The sibling unrunnable branch below already does, for
+            # the same reason: a check that cannot run must still supersede an
+            # earlier CERTIFIED, or every later reader — the CLI, the MCP
+            # server, relationships_for_agent — keeps reading `certified` from
+            # the store and keeps telling agents to join through an edge whose
+            # relation did not build. Only the return value said `unverified`.
+            store.record_relationship_check(
+                row["edge_id"], getattr(warehouse, "label", "?"), False,
+                {**evidence, "supersedes_previous_verdict": True},
+            )
             results.append({**row, "status": "unverified", "check": None,
-                            "unrunnable": {"unrunnable": True,
-                                           "error": f"relation(s) failed to build: "
-                                                    f"{', '.join(broken)}"}})
+                            "unrunnable": evidence})
             continue
         evidence = _check_edge(
             warehouse,
@@ -336,6 +353,12 @@ def relationships_for_agent(store: Store, table: str | None = None) -> dict[str,
 
     def summarize(r: dict) -> dict:
         ev = (r.get("check") or {}).get("evidence") or {}
+        # An UNVERIFIED edge has no measured cardinality or parent key. Over
+        # two empty tables the check computes `0 == 0` and reports "1:1" with a
+        # named parent — two fabricated measurements on an edge this function's
+        # own docstring says must never look like a fact. The unrunnable path
+        # already returns None for both; inconclusive must match it.
+        measured = r["status"] != "unverified"
         return {
             "join": r["label"],
             "left": f"{r['left_relation']}.{r['left_column']}",
@@ -343,8 +366,8 @@ def relationships_for_agent(store: Store, table: str | None = None) -> dict[str,
             "status": r["status"],
             "usage": r["usage"],
             "queries_observed": r["mined_queries"],
-            "cardinality": ev.get("cardinality"),
-            "parent_key": ev.get("parent"),
+            "cardinality": ev.get("cardinality") if measured else None,
+            "parent_key": ev.get("parent") if measured else None,
             "reason": ev.get("reason") or ev.get("error"),
             "competing_keys": r["competing_keys"],
         }
@@ -488,10 +511,19 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
     # Everything else — an empty table, an all-NULL column, one distinct
     # value — is the ABSENCE of evidence, and reporting it as `failed` tells
     # an agent the join is known broken when nothing of the kind was shown.
+    # An ORPHAN is positive evidence: a row exists whose non-NULL key value has
+    # no match. The NULL-ness of OTHER rows cannot unmake it, so `not sparse`
+    # discarded a measured violation — the exact shape of a broken backfill on
+    # a newly-added nullable FK (mostly NULL, the populated part all orphans),
+    # i.e. the most actionable failure this layer can find, reported as a
+    # hypothesis with "nothing was demonstrated" printed beside "orphans: 100".
+    # Only an EMPTY side makes orphans uninformative: with nothing on one side
+    # every value on the other is trivially an orphan, which says nothing about
+    # the relationship.
     demonstrated = (
         bool(pk_violations)
         or not (unique_l or unique_r)
-        or bool(blocking_orphans and not empty_sides and not sparse)
+        or bool(blocking_orphans and not empty_sides)
     )
     if no_evidence and not demonstrated:
         out["inconclusive"] = True
@@ -502,14 +534,31 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
             reasons.append("no unique side (N:M) — join semantics undefined")
         elif blocking_orphans and demonstrated:
             reasons.append(f"{blocking_orphans} orphan value(s) violate referential integrity")
-        if no_evidence:
-            reasons.append(
-                f"{no_evidence} — nothing was demonstrated"
-                + ("; the edge remains unverified" if out.get("inconclusive") else "")
-            )
+        # Only say "nothing was demonstrated" when nothing WAS. Appending it
+        # unconditionally produced a self-contradictory sentence: an orphan
+        # count and "nothing was demonstrated" in one breath.
+        if no_evidence and not demonstrated:
+            reasons.append(f"{no_evidence} — nothing was demonstrated; "
+                           "the edge remains unverified")
+        elif no_evidence:
+            reasons.append(f"note: {no_evidence}")
         reasons.extend(pk_violations)
         out["reason"] = "; ".join(reasons)
     return out
+
+
+def same_relation(a: str, b: str) -> bool:
+    """Do two relation names denote the same object?
+
+    Component-wise with suffix tolerance and case-insensitive, so
+    `PROD.ANALYTICS.FCT_ORDERS` from a dbt manifest matches
+    `analytics.fct_orders` from a catalog YAML. Never a substring test:
+    `raw.orders` must not match `raw.orders_backup`.
+    """
+    pa = [p for p in a.lower().split(".") if p]
+    pb = [p for p in b.lower().split(".") if p]
+    n = min(len(pa), len(pb))
+    return bool(n) and pa[-n:] == pb[-n:]
 
 
 def qcol(column: str) -> str:

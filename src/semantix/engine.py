@@ -198,17 +198,25 @@ def run_scan(
     # Everything in the estate we did not understand: enumerated but without
     # SQL, or with SQL we could not parse. Both block certification.
     unread = [f"{s['system']}:{s['object_id']}" for s in skipped] + unparseable
-    _qualify_for_unreadable(verdicts, unread)
 
     execution: dict | None = None
     if execute_seed:
-        # Before save_results, so measured divergence is part of the recorded
-        # verdict, not a display-time decoration.
+        # BEFORE the unread-estate downgrade, and before save_results.
+        #
+        # Ordering matters: annotate_with_execution only looks at CONTRADICTION,
+        # CERTIFIED and ALIASING, so running it after the downgrade — which
+        # rewrites CERTIFIED/ALIASING to UNRESOLVED — silently switched off
+        # execution-based falsification for the entire estate whenever a single
+        # unrelated artifact was unreadable. That is exactly backwards: a
+        # partially-read estate is the riskiest one, and execution is the only
+        # instrument that can falsify a canonical equality.
         from semantix.services.execute import annotate_with_execution
 
         execution = annotate_with_execution(
             concepts, verdicts, artifacts, execute_seed, dialect
         )
+    _qualify_for_unreadable(verdicts, unread)
+    _qualify_for_ambiguous_relations(verdicts, dupes)
     store.save_results(scan_id, concepts, verdicts)
 
     result = ScanResult(
@@ -229,6 +237,34 @@ def run_scan(
     )
     store.finish_scan(scan_id, result.stats())
     return result, store
+
+
+def _qualify_for_ambiguous_relations(verdicts: list[Verdict], dupes: dict) -> None:
+    """No certification over a relation the estate defines twice.
+
+    Two artifacts producing the same relation is a conflict the scan cannot
+    resolve: `registry.register_model` is last-write-wins, so the certified
+    core — and the physical lineage signed into the receipt — is decided by
+    registration order. The same estate certified two DIFFERENT lineages
+    depending on file name ordering, with `scope.complete: true` both times.
+    `duplicate_relations` was computed, reported in stats, and then discarded.
+    """
+    if not dupes:
+        return
+    names = ", ".join(sorted(dupes)[:3])
+    more = f" (+{len(dupes) - 3} more)" if len(dupes) > 3 else ""
+    for verdict in verdicts:
+        if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+            continue
+        verdict.verdict_type = VerdictType.UNRESOLVED
+        verdict.severity = max(verdict.severity, 45)
+        verdict.summary = (
+            f"Cannot certify: {len(dupes)} relation(s) are defined by more than "
+            f"one artifact ({names}{more}), so what they mean is decided by scan "
+            f"order rather than by the estate. {verdict.summary}"
+        )
+        verdict.evidence = {**verdict.evidence,
+                            "ambiguous_relations": {k: sorted(v) for k, v in dupes.items()}}
 
 
 def _qualify_for_unreadable(verdicts: list[Verdict], unread: list[str]) -> None:

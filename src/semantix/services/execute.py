@@ -17,6 +17,7 @@ the evidence, never a failed scan and never a fabricated number.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -109,8 +110,9 @@ def annotate_with_execution(
         for collision in collisions:
             verdict.summary += (
                 f" ⚠ {collision['vs']} hashes identically to "
-                f"{measured['baseline']} but totals {collision['actual']:,.0f} "
-                f"vs {collision['baseline']:,.0f} — canonical equality unsound.")
+                f"{collision.get('against', measured.get('baseline'))} but totals "
+                f"{collision['actual']:,.0f} vs {collision['baseline']:,.0f} "
+                f"— canonical equality unsound.")
             summary["collisions"] += 1
         if collisions and verdict.verdict_type in (VerdictType.CERTIFIED,
                                                    VerdictType.ALIASING):
@@ -224,6 +226,28 @@ def _is_additive(measure_expr: str) -> bool:
     return node.find(exp.Distinct) is None
 
 
+def _output_is_not_summable(sql: str, dialect: str) -> bool:
+    """Would SUM() over this definition's rows produce a meaningless number?
+
+    True for a set operation (the stored canonical_sql is one branch, so the
+    total describes neither definition) and for any grouping that emits
+    subtotal rows (summing counts the same money twice). Unparseable SQL is
+    treated as not-summable: declining to measure is the safe direction.
+    """
+    try:
+        node = sqlglot.parse_one(sql, read=dialect)
+    except Exception:  # noqa: BLE001 — arbitrary estate SQL
+        return True
+    if node is None:
+        return True
+    if node.find(exp.Union, exp.Except, exp.Intersect) is not None:
+        return True
+    for group in node.find_all(exp.Group):
+        if any(group.args.get(k) for k in ("rollup", "cube", "grouping_sets", "totals")):
+            return True
+    return False
+
+
 def _diverges(a: float, b: float, rel: float = 1e-9) -> bool:
     """Do two totals of the SAME canonical definition genuinely disagree?
 
@@ -231,8 +255,16 @@ def _diverges(a: float, b: float, rel: float = 1e-9) -> bool:
     than ordinary float summation noise on currency (700.70 sums to
     700.7000000000001), so identical definitions were being reported as a
     falsified canonical equality — the loudest alarm the engine has.
+
+    A flat 1e-9 was calibrated to float64 SUMMATION noise, but warehouse
+    DECIMAL arithmetic is exact and float64 resolution near 5e9 is ~1e-6 —
+    so on a $2bn book the check went blind six orders of magnitude above
+    actual noise and a deterministic $1.50 difference read as sound. The
+    tolerance is now the larger of the relative term and one float ULP at the
+    magnitude being compared, which is the real noise floor.
     """
-    return abs(a - b) > max(abs(a), abs(b), 1.0) * rel
+    scale = max(abs(a), abs(b), 1.0)
+    return abs(a - b) > max(scale * rel, math.ulp(scale) * 4)
 
 
 def _total(con, canonical_sql: str, column: str) -> tuple[float | None, str | None]:
@@ -316,6 +348,27 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
                        "be a meaningful comparison: " + "; ".join(non_additive)),
         }
 
+    # `_is_additive` judges the measure EXPRESSION; `_total` sums the
+    # definition's OUTPUT ROWS. Two shapes break that correspondence:
+    #
+    #  * a SET OPERATION — the fingerprint's canonical_sql is ONE BRANCH of the
+    #    union, so a `us UNION ALL eu` model measured 100 instead of 1,900 and
+    #    manufactured a -94.7% gap against definitions that agree exactly.
+    #    UNION ALL across regions is the commonest dbt model shape there is.
+    #  * ROLLUP/CUBE/GROUPING SETS — the output CONTAINS its own subtotals, so
+    #    summing it double-counts and reports +100% between definitions that
+    #    agree.
+    unsummable = sorted({m["where"] for m in members
+                         if _output_is_not_summable(m["sql"] or "", dialect)})
+    if unsummable:
+        return {
+            "method": "duckdb-seed-execution",
+            "measured": False,
+            "reason": ("the definition's output rows cannot be summed into a "
+                       "comparable total (set operation, or a grouping that emits "
+                       "its own subtotals): " + ", ".join(unsummable)),
+        }
+
     baseline = next((m for m in members if m["kind"] == "declared"), members[0])
     totals = []
     for m in members:
@@ -323,29 +376,53 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
         totals.append({"where": m["where"], "kind": m["kind"], "total": value,
                        **({"error": error} if error else {})})
 
+    # POSITIVE-EVIDENCE FLOOR. The relationship layer has one; execution had
+    # none, so an empty seed produced `measured: true, collisions: 0` over
+    # totals of [null, null] — and the CI assertion that certifications are
+    # falsified against real data passed on zero rows, proving nothing. A
+    # number we could not compute is not evidence that two definitions agree.
+    measurable = [t for t in totals if t["total"] is not None]
+    if len(measurable) < 2:
+        return {
+            "method": "duckdb-seed-execution",
+            "measured": False,
+            "reason": ("fewer than two definitions produced a number on this seed "
+                       "data, so nothing could be compared"),
+            "totals": totals,
+        }
+
+    # Falsification compares every SAME-HASH pair, not just each member against
+    # the baseline. Two non-baseline members sharing a core — exactly the pair
+    # an ALIASING certificate names — were never compared to each other, so a
+    # falsified equality between them survived untouched. And a NULL baseline
+    # used to disable the whole check, leaving the contradicting evidence
+    # printed beside a surviving certificate.
+    collisions = []
+    by_hash: dict[str, list[dict]] = {}
+    for t, m in zip(totals, members):
+        if t["total"] is not None:
+            by_hash.setdefault(m["core_hash"], []).append(t)
+    for group in by_hash.values():
+        anchor = group[0]
+        for other in group[1:]:
+            if _diverges(other["total"], anchor["total"]):
+                collisions.append({
+                    "vs": other["where"], "against": anchor["where"],
+                    "baseline": anchor["total"], "actual": other["total"],
+                    "note": "definitions hash identically but compute different "
+                            "values — the canonical equality is unsound",
+                })
+
     base_total = next((t["total"] for t, m in zip(totals, members)
                        if m is baseline), None)
     worst = None
-    collisions = []
     if base_total is not None:
         for t, m in zip(totals, members):
             if m is baseline or t["total"] is None:
                 continue
-            same_hash = m["core_hash"] == baseline["core_hash"]
+            if m["core_hash"] == baseline["core_hash"]:
+                continue  # same-hash pairs are falsification, not divergence
             abs_div = abs(t["total"] - base_total)
-            if same_hash:
-                # Members we called canonically IDENTICAL must produce the same
-                # number. If they do not, the equality was a hash collision and
-                # a certification somewhere is wrong — this is the one case
-                # execution can falsify rather than merely quantify, so it is
-                # measured rather than skipped.
-                if _diverges(t["total"], base_total):
-                    collisions.append({
-                        "vs": t["where"], "baseline": base_total, "actual": t["total"],
-                        "note": "definitions hash identically but compute different "
-                                "values — the canonical equality is unsound",
-                    })
-                continue
             if worst is None or abs_div > worst["abs"]:
                 worst = {
                     "vs": t["where"],

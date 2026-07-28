@@ -253,10 +253,20 @@ class Store:
         self._conn.commit()
 
     def latest_scan(self) -> dict | None:
+        """The newest scan that actually FINISHED.
+
+        A scan that died partway wrote no stats and describes nothing, but it
+        is still the newest row — so every "current health" interface
+        (`concepts`, `attest`, `publish`, the MCP tools) answered from it and
+        reported a CLEAN ESTATE. The store held a recorded CONTRADICTION at
+        that moment; `concepts` printed an empty verdict list, which reads as
+        "nothing is wrong". `completed_scans` already applied this filter and
+        `diff` already used it; the rest of the read paths did not.
+        """
         # rowid = insertion order: two scans inside the same second must not
         # tie-break on the random scan_id (recent_scans already does this).
         row = self._conn.execute(
-            "SELECT * FROM scans ORDER BY rowid DESC LIMIT 1"
+            "SELECT * FROM scans WHERE stats_json IS NOT NULL ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
         return dict(row) if row else None
 
@@ -809,7 +819,14 @@ class Store:
                         "receipt issuance — re-attest",
             }
 
-        ts = as_of or utcnow()
+        # An `as_of` in the FUTURE is not a question we can answer. `attest X
+        # --as-of 2099-01-01` — and the MCP `attest` tool, whose schema invites
+        # an agent to pass "the timestamp the answer refers to" — produced a
+        # signed CERTIFIED for 73 years of unobserved time, with no divergence
+        # noted. Evidence cannot describe a moment nobody has looked at.
+        now = utcnow()
+        ts = as_of or now
+        future = normalize_ts(ts) > normalize_ts(now)
         live = self.as_of(concept_label, ts)
         definition_version = [
             {
@@ -883,10 +900,15 @@ class Store:
         has_evidence = bool(definition_version) or (
             status == VerdictType.CONTRADICTION.value and bool(claim_ids)
         )
+        # SHADOW_METRIC asserts "computed at N sites in the estate" — an
+        # EXISTENCE claim about a computed definition. Omitting it from this
+        # set let a receipt make that claim while showing definition_version:
+        # [] and lineage: [], a signed statement its own evidence contradicts.
         evidence_required = status in (
             VerdictType.CERTIFIED.value,
             VerdictType.ALIASING.value,
             VerdictType.CONTRADICTION.value,
+            VerdictType.SHADOW_METRIC.value,
         )
         if evidence_required and not has_evidence:
             status = VerdictType.UNRESOLVED.value
@@ -894,6 +916,33 @@ class Store:
                 f"cannot substantiate {primary['verdict']}: no definition was live "
                 f"at {ts} for this concept — refusing to certify without evidence"
             ]
+
+        if future and status in (VerdictType.CERTIFIED.value,
+                                 VerdictType.ALIASING.value):
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                f"cannot certify for {ts}: that instant is in the future and no "
+                f"evidence describes it (last observation {now})"
+            ]
+
+        # A receipt whose OWN freshness block reports a definition removed, or
+        # the estate drifted, cannot also assert a clean certification. One
+        # signed document said "this definition is live at issue time" and
+        # "this definition no longer exists in the estate" in the same breath;
+        # stale freshness reached neither `status`, `known_divergences`, nor
+        # `scope`.
+        fresh_status = (freshness or {}).get("status")
+        if fresh_status in ("stale", "partial", "unknown"):
+            detail = []
+            for key in ("removed", "changed", "added"):
+                if (freshness or {}).get(key):
+                    detail.append(f"{key}: {', '.join(sorted((freshness or {})[key]))}")
+            note = f"freshness is {fresh_status}" + (
+                f" — {'; '.join(detail)}" if detail else "")
+            divergences = divergences + [note]
+            scope = {**scope, "freshness": fresh_status}
+            if status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+                status = VerdictType.UNRESOLVED.value
 
         # The emitted verdict list must agree with the status. Leaving a
         # CERTIFIED entry in `verdicts` while the status was downgraded made

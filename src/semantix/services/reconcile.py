@@ -108,7 +108,24 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
             matching, diverging = _split_by_claim(fps, expressible)
             blame = blame_members(members)
             base_evidence = {**base_evidence, "blame": blame}
-            if matching:
+            # When the ONTOLOGIES disagree with each other, the code is not the
+            # fault. `_split_by_claim` tests each fingerprint against the UNION
+            # of claim hashes while blame measures divergence against ONE
+            # baseline claim, so the same site was reported as both matching
+            # and diverging in a single forwardable sentence — and the actual
+            # finding (two ontologies declare this differently while the code
+            # faithfully implements both) was never stated.
+            if len(claim_hashes) > 1:
+                summary = (
+                    f"{len(expressible)} declared definitions of this concept "
+                    f"disagree with each other"
+                    + (f", and the estate computes {len(core_hashes)} distinct "
+                       f"definition(s) across {len(fps)} site(s)"
+                       if len(core_hashes) > 1 else
+                       f"; the estate computes one definition at {len(fps)} site(s)")
+                    + f". {_blame_clause(blame, members)}"
+                )
+            elif matching:
                 summary = (
                     f"Declared definition matches {_names(matching)}; "
                     f"{_blame_clause(blame, members)}"
@@ -118,24 +135,53 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                     f"No computed definition matches the declared one; "
                     f"{_blame_clause(blame, members)}"
                 )
+            # A bridging name is WHY an unrelated model was pulled into this
+            # concept, and the clause was emitted only in the no-claims branch
+            # — so as soon as a declaration existed the reader lost the
+            # explanation and was handed a bare accusation instead, naming a
+            # correct model that never claimed to compute this concept.
+            summary += _ambiguity_clause(fps)
             severity = 80 + 10 + min(10, 2 * len(fps))
             verdicts.append(
                 _verdict(VerdictType.CONTRADICTION, concept, severity, summary, base_evidence)
+            )
+        elif not expressible and len(core_hashes) > 1 and not proof_grade:
+            # Same gate as the sibling branch above. Without it, an UNREADABLE
+            # declaration — which contributes zero canonical information —
+            # UPGRADED an explicitly-unproven difference into a severity-84
+            # CONTRADICTION: identical fingerprints at 0% coverage produced
+            # UNRESOLVED with no declaration and a top-band accusation with a
+            # description-only one.
+            verdicts.append(
+                _verdict(
+                    VerdictType.UNRESOLVED,
+                    concept,
+                    severity=40,
+                    summary=(
+                        f"{len(fps)} computed definitions differ and the declared "
+                        "definition could not be read, but at least one definition "
+                        "could not be canonicalized to proof grade — the difference "
+                        "is unproven."
+                    ),
+                    evidence=base_evidence,
+                )
             )
         elif not expressible and len(core_hashes) > 1:
             # The code disagrees with itself. An unreadable declaration does
             # not make that disagreement go away, and reporting it as merely
             # "unresolved" buries a real contradiction.
             blame = blame_members(members)
+            plural = "neither" if len(fps) == 2 else "none of them"
             verdicts.append(
                 _verdict(
                     VerdictType.CONTRADICTION,
                     concept,
                     severity=80 + min(10, 2 * len(fps)),
                     summary=(
-                        f"{len(fps)} computed definitions disagree; the declared "
-                        f"definition could not be read, so neither can be confirmed "
-                        f"correct. {_blame_clause(blame, members)}"
+                        f"{len(fps)} computed definitions disagree; "
+                        f"{_declared_phrase(claims)} could not be read, so "
+                        f"{plural} can be confirmed correct. "
+                        f"{_blame_clause(blame, members)}"
                     ),
                     evidence={**base_evidence, "blame": blame},
                 )
@@ -219,7 +265,7 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
         # disagreement even when nothing computes it — arguably the purest
         # one, since no code exists to arbitrate.
         declared_hashes = {c.core.hash() for c in expressible}
-        if len(declared_hashes) > 1:
+        if len(declared_hashes) > 1 and proof_grade:
             blame = blame_members(members)
             verdicts.append(
                 _verdict(
@@ -260,8 +306,7 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
             )
         )
 
-    alias_names = _alias_names(fps)
-    if alias_names:
+    for alias_names in _alias_groups(fps):
         verdicts.append(
             _verdict(
                 VerdictType.ALIASING,
@@ -278,6 +323,19 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
     return verdicts
 
 
+def _copy_evidence(evidence: dict) -> dict:
+    """One evidence dict PER VERDICT.
+
+    `base_evidence` was shared by every verdict a concept produced, so
+    execution writing `verdict.evidence["measured"] = ...` on one of them
+    attached a measured result to verdicts it had deliberately not measured —
+    an UNRESOLVED whose summary says the difference is unproven, carrying
+    evidence asserting a measured total. Scan-level counts and per-verdict
+    evidence then disagreed about what was measured.
+    """
+    return dict(evidence)
+
+
 def _verdict(vt: VerdictType, concept: Concept, severity: int, summary: str, evidence: dict) -> Verdict:
     return Verdict(
         verdict_type=vt,
@@ -285,7 +343,7 @@ def _verdict(vt: VerdictType, concept: Concept, severity: int, summary: str, evi
         concept_label=concept.label,
         severity=severity,
         summary=summary,
-        evidence=evidence,
+        evidence=_copy_evidence(evidence),
     )
 
 
@@ -347,6 +405,13 @@ def _claim_names(claims: list[Claim]) -> str:
     return ", ".join(f"{c.name} ({c.provenance.system})" for c in claims) or "none"
 
 
+def _declared_phrase(claims: list[Claim]) -> str:
+    """"the declared definition" is wrong when two ontologies declare it."""
+    if len(claims) > 1:
+        return f"{len(claims)} declared definitions"
+    return "the declared definition"
+
+
 def _component_diff(members: list[dict]) -> dict[str, bool]:
     """component -> True when all members agree on it."""
     diff = {}
@@ -387,12 +452,22 @@ def _ambiguity_clause(fps: list[Fingerprint]) -> str:
     large concept.
     """
     by_name: dict[str, set[str]] = {}
+    # Report the name the ESTATE uses, not its normalized form. `orders.count`
+    # and `orders_count` are two different names that normalize to one string,
+    # so the clause named a token no artifact contains and the stated reason
+    # for the grouping was false — a reader grepping for it finds one model.
+    raw: dict[str, set[str]] = {}
     for fp in fps:
-        by_name.setdefault(normalize_name(fp.concept_candidate), set()).add(fp.core.hash())
+        key = normalize_name(fp.concept_candidate)
+        by_name.setdefault(key, set()).add(fp.core.hash())
+        raw.setdefault(key, set()).add(fp.concept_candidate)
     ambiguous = sorted(n for n, hashes in by_name.items() if len(hashes) > 1)
     if not ambiguous:
         return ""
-    return (f" These are grouped because {', '.join(ambiguous)} names more than one "
+    spelled = sorted({name for n in ambiguous for name in raw[n]})
+    joined = ", ".join(spelled)
+    verb = "name" if len(spelled) > 1 else "names"
+    return (f" These are grouped because {joined} {verb} more than one "
             f"computation, which links every definition it spans.")
 
 
@@ -408,13 +483,40 @@ def _blame_clause(blame: dict, members: list[dict]) -> str:
     return "; ".join(shown) + more + "."
 
 
-def _alias_names(fps: list[Fingerprint]) -> set[str]:
-    """Names that share one identical canonical core — proof-grade aliasing."""
+def _alias_groups(fps: list[Fingerprint]) -> list[set[str]]:
+    """Every set of names sharing one identical canonical core.
+
+    Three defects in the previous single-set version, all in the direction of
+    over-claiming:
+
+    * it returned on the FIRST group found, so a second, unrelated alias set in
+      the same concept was reported nowhere;
+    * a name that denotes MORE than one computation was still listed, so
+      ALIASING asserted "alpha and beta are identical" when only one of the two
+      things called `alpha` was — a reader consolidating on that merges a SUM
+      and an AVG. Ambiguous names are now excluded from the claim;
+    * names were compared AFTER normalization, so `revenue.total` and
+      `revenue_total` collapsed to one name and the aliasing went unreported,
+      while the converse produced a summary naming a string no artifact uses.
+      Grouping is still normalized (that is what makes them the same concept)
+      but the names REPORTED are the ones the estate actually contains.
+    """
     by_hash: dict[str, set[str]] = {}
+    name_hashes: dict[str, set[str]] = {}
+    raw_names: dict[str, set[str]] = {}
     for fp in fps:
-        if fp.canon_level in PROOF_LEVELS:
-            by_hash.setdefault(fp.core.hash(), set()).add(normalize_name(fp.concept_candidate))
+        if fp.canon_level not in PROOF_LEVELS:
+            continue
+        key = normalize_name(fp.concept_candidate)
+        digest = fp.core.hash()
+        by_hash.setdefault(digest, set()).add(key)
+        name_hashes.setdefault(key, set()).add(digest)
+        raw_names.setdefault(key, set()).add(fp.concept_candidate)
+
+    groups = []
     for names in by_hash.values():
-        if len(names) > 1:
-            return names
-    return set()
+        # A name meaning more than one thing cannot be said to BE another name.
+        unambiguous = {n for n in names if len(name_hashes[n]) == 1}
+        if len(unambiguous) > 1:
+            groups.append({raw for n in unambiguous for raw in raw_names[n]})
+    return groups
