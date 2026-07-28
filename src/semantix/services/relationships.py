@@ -102,7 +102,7 @@ def mine_sql_text(
     parsed, skipped = _parse_statements(text, dialect)
 
     for statement in parsed:
-        canon = canonicalize_sql(statement.sql(dialect=dialect), registry.sqlglot_schema(), dialect)
+        canon = canonicalize_sql(statement.sql(dialect=dialect), registry.sqlglot_schema(dialect), dialect)
         ast = canon.ast if canon.ast is not None else statement
         statement_edges: set[Edge] = set()
         for select in ast.find_all(exp.Select):

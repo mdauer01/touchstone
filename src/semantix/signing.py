@@ -113,6 +113,16 @@ def verify_receipt_dict(receipt_dict: dict[str, Any],
         return False, "cannot verify: cryptography not installed"
 
     pinned = public_key_b64 is not None
+    # An EMPTY pin is not "no pin". `verify-receipt r.json --public-key
+    # "$SEMANTIX_PUBKEY"` with the variable unset is the ordinary CI shape;
+    # falling back to the receipt's OWN embedded key there verified every
+    # forged receipt and reported "signature valid against pinned public
+    # key". Identity checking is the one thing that separates a receipt from
+    # a self-signed assertion, so a caller who asked to pin and supplied
+    # nothing must be refused, not quietly downgraded.
+    if pinned and not public_key_b64.strip():
+        return False, ("a pinned public key was requested but is empty — refusing to "
+                       "fall back to the key embedded in the receipt")
     key_b64 = public_key_b64 or sig_block.get("public_key", "")
     if pinned and sig_block.get("public_key") not in (None, key_b64):
         return False, "signer key does not match the pinned public key"

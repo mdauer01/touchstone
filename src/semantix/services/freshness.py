@@ -71,9 +71,9 @@ def current_estate_shas(
     if dbt_path:
         computed += load_dbt(dbt_path)
     if sql_dir:
-        computed += load_sql_dir(sql_dir, dialect)
+        computed += load_sql_dir(sql_dir, dialect)[0]
     if views_path:
-        computed += load_views_file(views_path, dialect)
+        computed += load_views_file(views_path, dialect)[0]
     for artifact in computed:
         shas.setdefault((artifact.system, artifact.object_id), set()).add(_sha(artifact.sql))
 

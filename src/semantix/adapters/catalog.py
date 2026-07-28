@@ -43,12 +43,25 @@ def load_catalog(path: str | Path) -> dict[str, dict[str, str]]:
         """
         if not value:
             return
-        if all(not isinstance(v, dict) for v in value.values()):
-            catalog[prefix] = {str(col): str(dtype) for col, dtype in value.items()}
+        scalars = {k: v for k, v in value.items() if not isinstance(v, dict)}
+        nested = {k: v for k, v in value.items() if isinstance(v, dict)}
+        if not nested:
+            catalog[prefix] = {str(col): str(dtype) for col, dtype in scalars.items()}
             return
-        for key, child in value.items():
-            if isinstance(child, dict):
-                descend(f"{prefix}.{key}" if prefix else str(key), child)
+        if scalars:
+            # A node holding BOTH scalars and dicts is a table with a STRUCT /
+            # VARIANT / RECORD column — routine on BigQuery, Snowflake and
+            # Databricks. Treating it as a pure namespace deleted the table
+            # outright (its scalar columns unrecoverable) and invented a
+            # phantom relation named after the struct. Keep the table, and
+            # record the nested column by name so it is not silently absent.
+            catalog[prefix] = {
+                **{str(col): str(dtype) for col, dtype in scalars.items()},
+                **{str(col): "struct" for col in nested},
+            }
+            return
+        for key, child in nested.items():
+            descend(f"{prefix}.{key}" if prefix else str(key), child)
 
     for key, value in data.items():
         if key in RESERVED_SECTIONS or not isinstance(value, dict):

@@ -53,7 +53,7 @@ def _core_hash(sql: str, registry: SchemaRegistry, dialect: str,
     core cannot represent something the query uses, and the benchmark must
     see that downgrade or it will score a blind spot as a success.
     """
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(), dialect)
+    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
     fps = extract_fingerprints(canon, f"bench.{site}",
                                Provenance("bench", site), dialect, registry)
     if not fps:

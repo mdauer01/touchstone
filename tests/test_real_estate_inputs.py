@@ -96,7 +96,7 @@ def test_a_non_utf8_sql_file_does_not_kill_the_scan(tmp_path):
     (root / "analytics").mkdir(parents=True)
     (root / "analytics" / "good.sql").write_text("select sum(x) as m from raw.t")
     (root / "analytics" / "bad.sql").write_bytes(b"select \xff\xfe sum(x) as m from raw.t")
-    artifacts = load_sql_dir(root)
+    artifacts, _skipped = load_sql_dir(root)
     assert any(a.object_id.endswith("good.sql") for a in artifacts)
 
 

@@ -33,7 +33,7 @@ def test_sql_dir_naming_directive_and_topo_order(tmp_path):
     (tmp_path / "analytics" / "fct_orders.sql").write_text(FCT_ORDERS_SQL)
     (tmp_path / "finance.sql").write_text(FINANCE_SQL)  # directive names it
 
-    artifacts = load_sql_dir(tmp_path)
+    artifacts, _skipped = load_sql_dir(tmp_path)
     relations = [a.relation for a in artifacts]
     assert "analytics.finance_net_revenue" in relations  # directive won
     assert "analytics.fct_orders" in relations           # path-derived
@@ -46,7 +46,7 @@ def test_sql_dir_naming_directive_and_topo_order(tmp_path):
 def test_views_dump_parses_create_statements(tmp_path):
     dump = tmp_path / "views.sql"
     dump.write_text(VIEWS_DUMP)
-    artifacts = load_views_file(dump)
+    artifacts, _skipped = load_views_file(dump)
     assert [a.relation for a in artifacts] == [
         "analytics.fct_orders", "analytics.growth_net_revenue"]
     assert all(a.system == "views" for a in artifacts)

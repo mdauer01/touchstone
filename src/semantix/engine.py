@@ -107,9 +107,13 @@ def run_scan(
         artifacts += dbt_artifacts
         skipped += [{**s, "system": "dbt"} for s in dbt_skipped]
     if sql_dir:
-        artifacts += load_sql_dir(sql_dir, dialect)
+        sql_artifacts, sql_skipped = load_sql_dir(sql_dir, dialect)
+        artifacts += sql_artifacts
+        skipped += [{**s, "system": "sql"} for s in sql_skipped]
     if views_path:
-        artifacts += load_views_file(views_path, dialect)
+        view_artifacts, view_skipped = load_views_file(views_path, dialect)
+        artifacts += view_artifacts
+        skipped += [{**s, "system": "views"} for s in view_skipped]
     # Re-sort globally: cross-source dependencies (a view over a dbt mart)
     # must still register upstream-first.
     artifacts = topo_sort(artifacts)
@@ -125,7 +129,7 @@ def run_scan(
     canon_levels: Counter = Counter()
 
     for artifact in artifacts:
-        canon = canonicalize_sql(artifact.sql, registry.sqlglot_schema(), dialect)
+        canon = canonicalize_sql(artifact.sql, registry.sqlglot_schema(dialect), dialect)
         canon_levels[canon.level.value] += 1
         registry.register_model(artifact.relation, canon.ast)
         store.record_artifact(
@@ -294,7 +298,7 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
         return claim
 
     sql = _synthesize_claim_sql(spec)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(), dialect)
+    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
     claim.canon_level = canon.level.value
     if not canon.usable or canon.level == CanonLevel.PARSED:
         claim.error = canon.error or "canonicalization below proof grade"

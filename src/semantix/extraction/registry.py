@@ -12,6 +12,7 @@ Serves two jobs:
 from __future__ import annotations
 
 from sqlglot import exp
+from sqlglot.schema import MappingSchema
 
 from semantix.extraction.sqlutil import table_map, unwrap_select
 
@@ -23,32 +24,78 @@ class SchemaRegistry:
         # relation -> {column: physical terminal columns}
         self._terminals: dict[str, dict[str, tuple[str, ...]]] = {}
         self.physical: set[str] = set(catalog)
+        # Cached per dialect: identifier normalization is dialect-specific
+        # (Snowflake folds unquoted names to UPPER, most others to lower), so
+        # one schema object cannot serve two dialects.
+        self._schema_cache: dict[str | None, MappingSchema] = {}
         for rel, cols in catalog.items():
             self._types[rel] = dict(cols)
             self._terminals[rel] = {c: (f"{rel}.{c}",) for c in cols}
 
-    def sqlglot_schema(self) -> dict:
-        """Nested schema for sqlglot — containing only relations we actually
-        know the columns of.
+    def sqlglot_schema(self, dialect: str | None = None) -> MappingSchema:
+        """Schema object for sqlglot — only relations we know the columns of.
 
-        A columnless entry is poison. sqlglot infers the schema's nesting
-        depth from its contents, so a single `{}` table (or a bare relation
-        name with no schema part) makes the whole mapping unreadable and
-        every qualification in the scan fails — one unparseable model in a
-        real estate dropped every OTHER model from `optimized` to `parsed`
-        and coverage from 100% to 0%. An unknown relation must be ABSENT
-        here, which degrades only the models that reference it.
+        Three constraints, each learned the hard way:
+
+        1. A columnless entry is poison. sqlglot infers nesting depth from
+           the contents, so one `{}` table made the whole mapping unreadable
+           and every qualification in the scan failed — one unparseable model
+           dropped every OTHER model from `optimized` to `parsed`.
+
+        2. The mapping must be UNIFORMLY deep. sqlglot refuses a mixed one
+           outright ("Table X must match the schema's nesting level"), and a
+           real estate always mixes: dbt emits `database.schema.model` while a
+           hand-written catalog is usually `schema.table`. Whichever arity was
+           seen first won and every relation at the other arity silently
+           failed to resolve. Short names are therefore PADDED to the deepest
+           arity present. Padding is safe because sqlglot resolves references
+           by SUFFIX — a two-part `raw.orders` still matches a three-part
+           entry, and vice versa — so nothing is lost and nothing is invented.
+
+        3. `database.schema.table` is THREE levels, not a two-level dict with
+           a dotted key. Splitting on the last dot only produced
+           `{"RAW_PROD.landing": {"orders": ...}}`, which sqlglot can never
+           match — so on Snowflake, Databricks and BigQuery, where every
+           relation is three-part, proof-grade coverage was ~0% and nothing
+           in the estate could ever be certified.
+
+        Returns a built MappingSchema rather than a raw dict: sqlglot
+        re-normalizes a dict on every optimize() call, which is O(models x
+        relations x columns) across a scan — 40% of total runtime and the
+        whole superlinearity at 2,000 models. It must be built with the SAME
+        dialect the query is optimized under, or normalization disagrees and
+        nothing resolves: Snowflake folds unquoted identifiers to upper case
+        and most other dialects fold to lower.
         """
+        if dialect not in self._schema_cache:
+            try:
+                schema = MappingSchema(self._nested(), dialect=dialect)
+            except Exception:  # noqa: BLE001 — sqlglot rejects unknown dialects
+                # A dialect we cannot honor must degrade, not raise: parsing
+                # will fail for the same reason a moment later and the scan
+                # will record FAILED, which is the honest answer. Building the
+                # schema is not the place to end a run with a traceback.
+                schema = MappingSchema(self._nested())
+            self._schema_cache[dialect] = schema
+        return self._schema_cache[dialect]
+
+    def _nested(self) -> dict:
+        known = {rel: cols for rel, cols in self._types.items() if cols}
+        if not known:
+            return {}
+        depth = max(len(rel.split(".")) for rel in known)
         nested: dict[str, dict] = {}
-        for rel, cols in self._types.items():
-            if not cols:
-                continue
-            db, _, table = rel.rpartition(".")
-            if not db:
-                # A bare relation has a different depth from `schema.table`;
-                # mixing the two corrupts sqlglot's depth detection.
-                continue
-            nested.setdefault(db, {})[table] = {c: (t or "text") for c, t in cols.items()}
+        for rel, cols in known.items():
+            parts = rel.split(".")
+            # `_` is not a legal warehouse identifier in the position it
+            # occupies here, so a padded entry can never collide with a real
+            # one; and because lookup is by suffix, the placeholder is never
+            # what a query has to match.
+            parts = ["_"] * (depth - len(parts)) + parts
+            node = nested
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = {c: (t or "text") for c, t in cols.items()}
         return nested
 
     def knows(self, relation: str) -> bool:
@@ -92,6 +139,7 @@ class SchemaRegistry:
             return
         self._types[relation] = cols
         self._terminals[relation] = terms
+        self._schema_cache.clear()  # every mapping is stale the moment this changes
 
     @staticmethod
     def _projection_type(proj: exp.Expression) -> str:

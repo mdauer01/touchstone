@@ -42,7 +42,10 @@ class CanonResult:
         return self.ast is not None
 
 
-def canonicalize_sql(sql: str, schema: dict, dialect: str) -> CanonResult:
+def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
+    """`schema` is a raw nested dict or a prebuilt sqlglot MappingSchema;
+    the registry hands over the latter so it is normalized once per scan
+    rather than once per model."""
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
     except Exception as e:  # noqa: BLE001 — adapter input is arbitrary SQL

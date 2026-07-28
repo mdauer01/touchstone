@@ -38,7 +38,32 @@ AGENTS_TABLES = ("osi_metric", "osi_dataset", "osi_field",
 
 _LOOKML_TABLE_REF = re.compile(r"\$\{TABLE\}\.")
 _LOOKML_FIELD_REF = re.compile(r"\$\{(\w+)\}")
-_LOOKML_FILTER_RE = re.compile(r'(\w+)\s*:\s*"([^"]*)"')
+# The modern form: `[status: "completed", channel: "-internal"]`. The field is
+# matched with dots allowed so a VIEW-QUALIFIED reference is SEEN rather than
+# resynced past: `\w+` could not match `users.country`, so the regex skipped
+# the qualifier and matched `country`, applying a joined view's filter to this
+# view's base table as though it were a local column.
+_LOOKML_FILTER_RE = re.compile(r'([\w.]+)\s*:\s*"([^"]*)"')
+
+# The legacy form, still valid and ubiquitous in pre-21.12 LookML:
+#   filters: { field: status, value: "complete" }
+# The modern regex matched the sub-token `value: "complete"` inside it and
+# produced a predicate on a column literally named `value` — which exists in
+# plenty of fact tables — while dropping the real `status` filter entirely.
+_LOOKML_LEGACY_BLOCK = re.compile(
+    r"\{\s*field\s*:\s*([\w.]+)\s*,\s*value\s*:\s*\"([^\"]*)\"\s*\}", re.IGNORECASE)
+_LOOKML_LEGACY_MARKER = re.compile(r"\bfield\s*:", re.IGNORECASE)
+
+
+def _sql_literal(value: str) -> str:
+    """A single-quoted SQL literal with embedded quotes doubled.
+
+    Interpolating raw made `Lowe's` produce unparseable SQL — and a
+    quote-balanced value like `x' OR TRUE OR '` produce a VALID predicate the
+    optimizer then folded away, so a filtered declaration canonicalized to
+    `filters=()` at proof grade and would certify against unfiltered code.
+    """
+    return "'" + value.replace("'", "''") + "'"
 
 # LookML aggregate measure types that wrap `sql` in an aggregate function.
 _LOOKML_AGG_TYPES = {"sum", "average", "avg", "min", "max", "count", "count_distinct"}
@@ -50,16 +75,54 @@ def _lookml_sql(sql: str) -> str:
     return _LOOKML_FIELD_REF.sub(r"\1", _LOOKML_TABLE_REF.sub("", sql)).strip()
 
 
-def _lookml_expr(row: dict[str, Any]) -> str | None:
-    sql = _lookml_sql(str(row.get("sql") or ""))
+def _lookml_expr(row: dict[str, Any]) -> tuple[str | None, list[str]]:
+    """(expression, untranslatable). A LookML measure type this adapter does
+    not model must be REFUSED, not passed through.
+
+    Passing the raw `sql` through was the fabrication path: `type: number`
+    over other measures turned `${refund_total}` — itself an aggregate — into
+    a bare column reference, and `type: median`/`percentile`/`running_total`
+    handed a non-aggregate on as if it were a measure. Both reached proof
+    grade as definitions nobody wrote.
+    """
+    raw_sql = str(row.get("sql") or "")
+    sql = _lookml_sql(raw_sql)
     mtype = str(row.get("type") or "").lower()
-    if not sql:
-        return None
+    untranslatable: list[str] = []
+
+    # Looker's symmetric aggregate. It de-duplicates by the given key before
+    # aggregating; rendering it as a plain SUM asserts the very thing
+    # `sql_distinct_key` exists to prevent, and would certify against a naive
+    # fan-out-prone model.
+    if row.get("sql_distinct_key"):
+        untranslatable.append(
+            f"sql_distinct_key: {row['sql_distinct_key']} — Looker emits a symmetric "
+            f"aggregate here, which is not a plain {mtype or 'aggregate'}()")
+        return None, untranslatable
+
+    if mtype == "count":
+        # `type: count` counts ROWS and takes no `sql`. Wrapping a column in
+        # count() answered a different question, and quietly ignored the
+        # Looker semantics when `sql` was absent.
+        return "count(*)", untranslatable
     if mtype == "count_distinct":
-        return f"count(distinct {sql})"
+        if not sql:
+            return None, ["type: count_distinct with no sql expression"]
+        return f"count(distinct {sql})", untranslatable
     if mtype in _LOOKML_AGG_TYPES:
-        return f"{'avg' if mtype == 'average' else mtype}({sql})"
-    return sql  # type: number / pre-aggregated expression — pass through
+        if not sql:
+            return None, [f"type: {mtype} with no sql expression"]
+        return f"{'avg' if mtype == 'average' else mtype}({sql})", untranslatable
+
+    # Everything else — number, median, percentile, running_total,
+    # sum_distinct, yesno, string, or an empty/unknown type.
+    if not sql:
+        return None, [f"measure type {mtype or '(none)'} with no sql expression"]
+    return None, [
+        f"measure type `{mtype or '(none)'}` is not a modelled aggregate; its sql "
+        f"({raw_sql}) may reference other measures and cannot be read as a "
+        f"column expression"
+    ]
 
 
 # LookML filter values are a small language, not literals: ranges (`>100`,
@@ -93,7 +156,12 @@ _DATE_UNIT = (r"(?:second|minute|hour|day|week|month|quarter|year|"
 #    `after hours support`.
 _DATE_SHAPED = re.compile(
     rf"""^\s*(?:today|yesterday|tomorrow|now)\s*$        # standalone
-       | ^\s*(?:before|after|past)\s+\S*\d               # before 2024-01-01
+       # `before`/`after`/`past` take a date operand — a literal, a
+       # number+unit, OR another relative keyword. Requiring a DIGIT let
+       # `before yesterday` and `after today` through as string equalities
+       # against their own text, on a date column.
+       | ^\s*(?:before|after|past)\s+
+         (?:\S*\d|today|yesterday|tomorrow|now|this|last|next|fy)
        | ^\s*(?:this|last|next)\s+(?:\d+\s*)?{_DATE_UNIT}\b   # this month, last 3 days
        | ^\s*fy\s*\d{{2,4}}\b                            # FY2024
        | ^\s*\d{{4}}\s*$          # a bare year IS a date filter on a date field,
@@ -144,22 +212,40 @@ def _lookml_filters(raw: str | None) -> tuple[list[str], list[str]]:
     """
     if not raw:
         return [], []
-    pairs = _LOOKML_FILTER_RE.findall(raw)
-    if not pairs:
-        return [], [str(raw)]
+
+    if _LOOKML_LEGACY_MARKER.search(raw):
+        pairs = _LOOKML_LEGACY_BLOCK.findall(raw)
+        if not pairs:
+            # It announces itself as the legacy form but does not match the
+            # shape we know. Guessing here is how a filter on `value` got
+            # invented; refuse and say so.
+            return [], [f"{raw} (legacy `filters: {{ field: ..., value: ... }}` "
+                        f"block in a shape this adapter cannot read)"]
+    else:
+        pairs = _LOOKML_FILTER_RE.findall(raw)
+        if not pairs:
+            return [], [str(raw)]
 
     predicates: list[str] = []
     untranslatable: list[str] = []
     for field_name, value in pairs:
         negated = value.startswith("-")
         literal = value[1:] if negated else value
+        if "." in field_name:
+            # `users.country` is a field of a JOINED view, not a column of
+            # this view's table. Rendering it against the base relation
+            # asserts a predicate on a column that is not there.
+            untranslatable.append(
+                f"{field_name}: {value} (field of another view, not of this measure's table)")
+            continue
         reason = _lookml_untranslatable(literal)
         if reason:
             untranslatable.append(f"{field_name}: {value} ({reason})")
         elif negated:
-            predicates.append(f"({field_name} <> '{literal}' OR {field_name} IS NULL)")
+            predicates.append(
+                f"({field_name} <> {_sql_literal(literal)} OR {field_name} IS NULL)")
         else:
-            predicates.append(f"{field_name} = '{literal}'")
+            predicates.append(f"{field_name} = {_sql_literal(literal)}")
     return predicates, untranslatable
 
 
@@ -174,6 +260,17 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
         if not row.get("name"):
             continue
         dataset = datasets.get(str(row.get("dataset_name") or ""))
+        # An OSI metric row may carry qualifiers beyond its expression. Reading
+        # only `expression` recorded an UNFILTERED metric for a declaration
+        # that filters — a claim narrower than the one written, which will
+        # certify against unfiltered code. The LookML branch three lines below
+        # already reads its filters; this one silently discarded them.
+        osi_untranslatable = [
+            f"osi_metric.{field} is declared but not translatable: {row[field]}"
+            for field in ("filters", "filter", "dimensions", "time_grain",
+                          "window", "non_additive_dimension")
+            if row.get(field)
+        ]
         specs.append(DeclaredSpec(
             system="agents_osi",
             name=str(row["name"]),
@@ -182,6 +279,7 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
             # dataset; without one the claim is honestly inexpressible.
             model=str(dataset["source_table"]) if dataset and dataset.get("source_table") else None,
             expr=row.get("expression"),
+            untranslatable=osi_untranslatable,
             path=path,
         ))
 
@@ -196,14 +294,15 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
             raw_filters if isinstance(raw_filters, str) or raw_filters is None
             else str(raw_filters)
         )
+        expr, expr_untranslatable = _lookml_expr(row)
         specs.append(DeclaredSpec(
             system="agents_lookml",
             name=str(row["measure_name"]),
             description=row.get("description") or row.get("ai_context"),
             model=model,
-            expr=_lookml_expr(row),
+            expr=expr,
             filters=filters,
-            untranslatable=untranslatable,
+            untranslatable=untranslatable + expr_untranslatable,
             path=path,
         ))
     return specs
