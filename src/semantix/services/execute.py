@@ -107,6 +107,11 @@ def annotate_with_execution(
             measured_cache[concept.concept_id] = measured
             if measured is not None and measured.get("measured"):
                 summary["measured"] += 1
+                # Falsified equalities counted HERE, once per concept. The
+                # per-verdict increment double-counted the loudest alarm the
+                # engine has: a CERTIFIED+ALIASING concept with one falsified
+                # equality printed "2 canonical equality(ies) FALSIFIED".
+                summary["collisions"] += len(measured.get("collision_falsified", []))
         if measured is None:
             continue
         verdict.evidence["measured"] = measured
@@ -125,7 +130,6 @@ def annotate_with_execution(
                 f"{collision.get('against', measured.get('baseline'))} but totals "
                 f"{collision['actual']:,.0f} vs {collision['baseline']:,.0f} "
                 f"— canonical equality unsound.")
-            summary["collisions"] += 1
         if collisions and verdict.verdict_type in (VerdictType.CERTIFIED,
                                                    VerdictType.ALIASING):
             # The certification was the claim these definitions agree. The
@@ -155,7 +159,10 @@ def annotate_with_execution(
                     f" Measured on seed data: {worst['vs']} totals "
                     f"{worst['actual']:,.0f} vs baseline {worst['baseline']:,.0f}"
                     f"{pct}.")
-        elif measured.get("unmeasured_members"):
+        # Additive, not elif: a CONTRADICTION whose worst divergence excludes
+        # an errored member read as covering everything while the REAL worst
+        # may be the member that could not be measured.
+        if measured.get("unmeasured_members"):
             verdict.summary += (
                 " (execution could not measure "
                 + ", ".join(measured["unmeasured_members"]) + ".)")
@@ -296,6 +303,8 @@ def _is_additive(measure_expr: str) -> bool:
 
 def _is_literal(node: exp.Expression) -> bool:
     inner = node.this if isinstance(node, exp.Paren) else node
+    if isinstance(inner, exp.Neg):  # a negated literal is still a scale factor
+        inner = inner.this
     return isinstance(inner, exp.Literal)
 
 
@@ -304,6 +313,14 @@ def _is_additive_node(node: exp.Expression) -> bool:
         return _is_additive_node(node.this)
     if isinstance(node, (exp.Add, exp.Sub)):
         return _is_additive_node(node.this) and _is_additive_node(node.expression)
+    # Literal-scaled CHAINS (`SUM(a)/2/2`, `SUM(a)*2/4`) are additive; without
+    # these arms they declined with a reason blaming non-additivity for
+    # additive expressions — the wording defect one nesting level deeper.
+    if isinstance(node, exp.Mul):
+        sides = [s for s in (node.this, node.expression) if not _is_literal(s)]
+        return len(sides) == 1 and _is_additive_node(sides[0])
+    if isinstance(node, exp.Div):
+        return _is_literal(node.expression) and _is_additive_node(node.this)
     if not isinstance(node, (exp.Sum, exp.Count)):
         return False
     # A FILTER (WHERE ...) clause restricts which rows the aggregate sees; the
@@ -356,7 +373,11 @@ def _diverges(a: float, b: float, rel: float = 1e-12) -> bool:
     2e-13), while $1.50 on $2bn (7.5e-10) now correctly diverges.
     """
     scale = max(abs(a), abs(b), 1.0)
-    return abs(a - b) > max(scale * rel, math.ulp(scale) * 8)
+    # No ULP max term: for every scale >= 1, ulp(scale)*k is orders below
+    # scale*1e-12, so a max() never selects it — the same dead-code criticism
+    # the previous round made of its own predecessor. The relative bound IS
+    # the check.
+    return abs(a - b) > scale * rel
 
 
 def _total(con, canonical_sql: str, column: str) -> tuple[float | None, str | None]:
@@ -404,6 +425,17 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
                         "column": fp.concept_candidate, "sql": fp.canonical_sql,
                         "core_hash": fp.core.hash(),
                         "measure_expr": fp.core.measure_expr})
+    # Disambiguate colliding display names by KIND: a metric declared over
+    # the very model that computes it makes claim.model == fp.relation, and
+    # the withdrawal alarm — the most consequential sentence the engine emits
+    # — read "analytics.orders hashes identically to analytics.orders".
+    where_counts: dict[str, int] = {}
+    for m in members:
+        where_counts[m["where"]] = where_counts.get(m["where"], 0) + 1
+    for m in members:
+        if where_counts[m["where"]] > 1:
+            m["where"] = f"{m['where']} ({m['kind']})"
+
     if branch_only and len(members) >= 2:
         pass  # measurable members remain; the exclusion is disclosed below
     elif branch_only:

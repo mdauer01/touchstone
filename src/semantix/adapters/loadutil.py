@@ -46,9 +46,12 @@ def load_yaml(path: str | Path, expect: type = dict) -> Any:
     if data is None:
         return expect()
     if not isinstance(data, expect):
+        hint = (" — if this is a bare list of entries, wrap it under the "
+                "expected top-level key (e.g. `metrics:`)"
+                if isinstance(data, list) and expect is dict else "")
         raise ValueError(
             f"{p}: expected a YAML {expect.__name__} at the top level, found "
-            f"{type(data).__name__}")
+            f"{type(data).__name__}{hint}")
     return data
 
 

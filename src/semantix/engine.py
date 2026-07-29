@@ -32,6 +32,7 @@ from semantix.models import (
     VerdictType,
 )
 from semantix.services.reconcile import reconcile
+from semantix.services.relationships import same_relation as same_rel
 from semantix.services.resolution import resolve_concepts
 from semantix.store import Store
 
@@ -127,6 +128,8 @@ def run_scan(
     # them as known-but-unreadable is what stops a routine partial compile
     # from looking like a deletion.
     for s in skipped:
+        if s.get("informational"):
+            continue  # content WAS read; disclosure only, never absence-blocking
         store.record_artifact_state(scan_id, s["system"], s["object_id"], readable=False)
     fingerprints: list[Fingerprint] = []
     unmeasured: list[str] = []
@@ -141,9 +144,14 @@ def run_scan(
     for artifact in artifacts:
         canon = canonicalize_sql(artifact.sql, registry.sqlglot_schema(dialect), dialect)
         canon_levels[canon.level.value] += 1
+        # Keyed later on the artifact's fingerprint CORES when it has any:
+        # rendered text carries CTE NAMES, so two vendored copies differing
+        # only in a CTE rename read as "differing content ... decided by scan
+        # order" — false by the fingerprint module's own invariant.
         if artifact.relation in dupe_content:
-            rendered = canon.ast.sql(dialect=dialect) if canon.ast is not None else artifact.sql
-            dupe_content[artifact.relation].add(rendered)
+            dupe_pending = artifact.relation
+        else:
+            dupe_pending = None
         registry.register_model(artifact.relation, canon.ast)
         store.record_artifact(
             kind="computed",
@@ -168,6 +176,13 @@ def run_scan(
         if canon.level == CanonLevel.FAILED:
             unparseable.append(f"{artifact.system}:{artifact.object_id}")
         found = extract_fingerprints(canon, artifact.relation, provenance, dialect, registry)
+        if dupe_pending is not None:
+            if found:
+                content_key = "|".join(sorted(fp.core.hash() for fp in found))
+            else:
+                content_key = (canon.ast.sql(dialect=dialect)
+                               if canon.ast is not None else artifact.sql)
+            dupe_content[dupe_pending].add(content_key)
         if not found:
             # Parsed fine, yielded no measure (a set operation, a non-aggregate
             # model, an unreadable shape). Not an error, but not coverage either.
@@ -210,7 +225,8 @@ def run_scan(
     verdicts = reconcile(concepts)
     # Everything in the estate we did not understand: enumerated but without
     # SQL, or with SQL we could not parse. Both block certification.
-    unread = [f"{s['system']}:{s['object_id']}" for s in skipped] + unparseable
+    unread = [f"{s['system']}:{s['object_id']}" for s in skipped
+              if not s.get("informational")] + unparseable
 
     execution: dict | None = None
     if execute_seed:
@@ -231,7 +247,24 @@ def run_scan(
     _qualify_for_unreadable(verdicts, unread)
     contested = {rel: dupes[rel] for rel, contents in dupe_content.items()
                  if len(contents) > 1}
-    _qualify_for_ambiguous_relations(verdicts, concepts, contested)
+    # TRANSITIVE closure over the dependency graph: a CTE-mediated reader's
+    # join_nodes are `cte:<digest>` strings, and a downstream model's
+    # source_columns resolve THROUGH the registry past the contested relation
+    # to raw terminals — so neither direct test saw non-direct consumers, and
+    # a model one hop downstream of the collision kept a signed CERTIFIED
+    # with scope.complete: true. The adapters' depends_on edges see every
+    # reference (including through CTEs), so contamination propagates there.
+    tainted = set(contested)
+    for artifact in artifacts:  # already topologically sorted
+        if artifact.relation in tainted:
+            continue
+        if any(any(same_rel(dep, t) for t in tainted) for dep in artifact.depends_on):
+            tainted.add(artifact.relation)
+    contested_closure = {
+        rel: contested.get(rel, [f"downstream of {', '.join(sorted(contested))}"])
+        for rel in tainted
+    }
+    _qualify_for_ambiguous_relations(verdicts, concepts, contested_closure)
     _qualify_for_untranslated_claims(verdicts, concepts)
     store.save_results(scan_id, concepts, verdicts)
 
@@ -338,31 +371,57 @@ def _qualify_for_ambiguous_relations(verdicts: list[Verdict],
         hit = set()
         for fp in concept.fingerprints:
             for relation in contested:
-                if fp.relation == relation or relation in fp.core.join_nodes or any(
-                    col.startswith(relation + ".") for col in fp.core.source_columns
-                ):
+                if (same_rel(fp.relation, relation)
+                        or relation in fp.core.join_nodes
+                        or any(same_rel(node, relation)
+                               for node in fp.core.join_nodes
+                               if not node.startswith("cte:"))
+                        or any(col.rsplit(".", 1)[0] == relation
+                               or same_rel(col.rsplit(".", 1)[0], relation)
+                               for col in fp.core.source_columns
+                               if "." in col)):
                     hit.add(relation)
         for claim in concept.claims:
-            if claim.model and claim.model in contested:
-                hit.add(claim.model)
+            for relation in contested:
+                # Exact-string here shared the case/arity blindness the
+                # re-aggregation lookup had; the YAML's spelling of a model
+                # need not match the artifact's.
+                if claim.model and same_rel(claim.model, relation):
+                    hit.add(relation)
         return sorted(hit)
 
     by_id = {c.concept_id: c for c in concepts}
     for verdict in verdicts:
-        if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+        was_certifying = verdict.verdict_type in (VerdictType.CERTIFIED,
+                                                  VerdictType.ALIASING)
+        # Compose with the unreadable downgrade rather than skipping — the
+        # same one-pair-over composition hole round five fixed for
+        # untranslated claims: with one unread artifact anywhere, the
+        # contested-relation reason was recorded on NO verdict in the scan,
+        # so fixing the compile error revealed a "new" blocker this scan had
+        # already observed.
+        already_downgraded = (
+            verdict.verdict_type is VerdictType.UNRESOLVED
+            and "unread_estate" in verdict.evidence
+        )
+        if not (was_certifying or already_downgraded):
+            continue
+        if "ambiguous_relations" in verdict.evidence:
             continue
         concept = by_id.get(verdict.concept_id)
         hit = touches(concept) if concept else []
         if not hit:
             continue
         names = ", ".join(hit[:3]) + (f" (+{len(hit) - 3} more)" if len(hit) > 3 else "")
-        verdict.verdict_type = VerdictType.UNRESOLVED
-        verdict.severity = max(verdict.severity, 45)
-        verdict.summary = (
-            f"Cannot certify: this concept reads relation(s) defined by more than "
-            f"one artifact with differing content ({names}), so what they mean is "
-            f"decided by scan order rather than by the estate. {verdict.summary}"
-        )
+        note = (f"this concept reads relation(s) defined by more than one artifact "
+                f"with differing content ({names}), so what they mean is decided "
+                f"by scan order rather than by the estate.")
+        if was_certifying:
+            verdict.verdict_type = VerdictType.UNRESOLVED
+            verdict.severity = max(verdict.severity, 45)
+            verdict.summary = f"Cannot certify: {note} {verdict.summary}"
+        else:
+            verdict.summary = f"{verdict.summary} Additionally: {note}"
         verdict.evidence = {**verdict.evidence,
                             "ambiguous_relations": {k: contested[k] for k in hit}}
 

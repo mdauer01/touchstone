@@ -3,11 +3,12 @@
 Two invariants are enforced structurally rather than by convention:
 
 * Append-only — every write path is an INSERT (INSERT OR IGNORE for
-  content-addressed rows). Nothing is ever DELETEd, and the single UPDATE in
-  the codebase is `finish_scan`'s write-once stats stamp, guarded by
-  `stats_json IS NULL` so it can never overwrite. Semantic history — the
-  observation log and everything derived from it — is INSERT-only without
-  exception.
+  content-addressed rows). Nothing is ever DELETEd. Two UPDATE shapes exist,
+  neither of which mutates semantic history: `finish_scan`'s write-once stats
+  stamp (guarded by `stats_json IS NULL`) and `_migrate_timestamp_width`'s
+  one-time representation canonicalization (the recorded instants are
+  unchanged; only their text width is). The observation log's CONTENT is
+  INSERT-only without exception.
 * Derived valid time — a definition's valid interval is never stored as a
   mutable column. It is computed at read time from the observation log: a
   fingerprint is live at a definition site from its first observation until
@@ -254,28 +255,64 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._readonly = False
         try:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=120000")
-            self._conn.executescript(SCHEMA)
-            self._migrate_timestamp_width()
-            self._conn.commit()
+            # Retried: the journal-mode CONVERSION during concurrent first
+            # creation raced a second scan and one died with a raw "database
+            # is locked" — the exact two-CI-jobs shape WAL exists to serve,
+            # unprotected only during the store's first moments.
+            for attempt in range(6):
+                try:
+                    self._conn.execute("PRAGMA busy_timeout=120000")
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                    self._conn.executescript(SCHEMA)
+                    self._migrate_timestamp_width()
+                    self._conn.commit()
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < 5:
+                        import time as _time
+                        _time.sleep(0.25 * (attempt + 1))
+                        continue
+                    raise
         except sqlite3.OperationalError as e:
-            if "readonly" not in str(e).lower() and "read-only" not in str(e).lower():
+            message = str(e).lower()
+            readonly = "readonly" in message or "read-only" in message
+            unopenable = "unable to open" in message
+            if not (readonly or unopenable):
                 raise
             # A store on a read-only mount (locked-down CI, a build artifact)
-            # must still OPEN for the read paths — mcp, asof, history, attest,
-            # verify all advertise read-only service. Running the schema
-            # script unconditionally crashed exactly those. Reconnect with an
-            # immutable read-only URI: a WAL-journal store cannot even be
-            # SELECTed from on a read-only filesystem otherwise (SQLite needs
-            # the -shm file), and a read-only mount guarantees no concurrent
-            # writer, which is the one thing immutable=1 assumes.
+            # must still OPEN for the read paths. Reconnect with mode=ro —
+            # which honors WAL recovery read-only where possible. NEVER
+            # immutable=1: it silently ignores an unapplied -wal tail, so a
+            # store from an unclean shutdown served SUPERSEDED state with no
+            # error from every read surface. If even mode=ro cannot open it
+            # (a WAL tail on a filesystem where the -shm cannot be created),
+            # refuse with the reason rather than serve stale data.
             self._readonly = True
             self._conn.close()
-            self._conn = sqlite3.connect(
-                f"file:{self.path}?immutable=1", uri=True, timeout=120.0
-            )
-            self._conn.row_factory = sqlite3.Row
+            try:
+                self._conn = sqlite3.connect(
+                    f"file:{self.path}?mode=ro", uri=True, timeout=120.0
+                )
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            except sqlite3.Error as ro_err:
+                # mode=ro needs the -shm for a WAL-journal store, which a
+                # read-only filesystem cannot create. immutable=1 avoids that
+                # but silently IGNORES an unapplied -wal tail — a store from
+                # an unclean shutdown served superseded state with no error.
+                # So immutable is used ONLY when no -wal exists (nothing to
+                # miss); with a tail present, refuse rather than serve stale.
+                if Path(f"{self.path}-wal").exists():
+                    raise ValueError(
+                        f"{self.path}: the store is on read-only storage and "
+                        f"carries an unapplied WAL tail that cannot be read "
+                        f"there ({ro_err}) — copy it to writable storage, open "
+                        f"it once, and retry"
+                    ) from ro_err
+                self._conn = sqlite3.connect(
+                    f"file:{self.path}?immutable=1", uri=True, timeout=120.0
+                )
+                self._conn.row_factory = sqlite3.Row
 
     def _migrate_timestamp_width(self) -> None:
         """One-time canonicalization of pre-millisecond timestamps.
@@ -591,11 +628,47 @@ class Store:
         )
 
     def artifact_states(self) -> dict[str, dict[str, bool]]:
-        """scan_id -> {artifact_key: readable}."""
+        """scan_id -> {artifact_key: readable}.
+
+        Memoized like scan_coverage, and for the same reason: history() runs
+        per concept per attest, and rebuilding this full-table map each call
+        kept read cost linear in ALL store history — attest latency doubled
+        with every doubling of accumulated scans, on the MCP answer path.
+        """
+        stamp = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM scan_artifact_state"
+        ).fetchone()
+        key = (stamp[0], stamp[1])
+        cached = getattr(self, "_states_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
         out: dict[str, dict[str, bool]] = {}
         for r in self._conn.execute("SELECT * FROM scan_artifact_state"):
             out.setdefault(r["scan_id"], {})[r["artifact_key"]] = bool(r["readable"])
+        self._states_cache = (key, out)
         return out
+
+    def _observation_rows(self) -> list:
+        """The fingerprint-observation join, memoized like its siblings —
+        history() re-ran it per concept per attest, the third of the three
+        full-history walks behind linear attest-latency growth."""
+        stamp = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM observations"
+        ).fetchone()
+        key = (stamp[0], stamp[1])
+        cached = getattr(self, "_obs_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        rows = self._conn.execute(
+            """SELECT o.scan_id, o.object_key, o.observed_at, o.ref_id,
+                      f.concept_candidate, f.semantic_hash, f.relation
+               FROM observations o
+               JOIN fingerprints f ON f.fingerprint_id = o.ref_id
+               WHERE o.kind = 'fingerprint'
+               ORDER BY o.object_key, o.observed_at, o.ref_id"""
+        ).fetchall()
+        self._obs_cache = (key, rows)
+        return rows
 
     def scan_coverage(self) -> list[tuple[str, str, set[str]]]:
         # Memoized per completed-scan count: history() calls this for every
@@ -761,14 +834,7 @@ class Store:
                     members.get("fingerprints", [])
                 )
         target = normalize_name(concept_label)
-        rows = self._conn.execute(
-            """SELECT o.scan_id, o.object_key, o.observed_at, o.ref_id,
-                      f.concept_candidate, f.semantic_hash, f.relation
-               FROM observations o
-               JOIN fingerprints f ON f.fingerprint_id = o.ref_id
-               WHERE o.kind = 'fingerprint'
-               ORDER BY o.object_key, o.observed_at, o.ref_id"""
-        ).fetchall()
+        rows = self._observation_rows()
 
         seen: dict[str, dict[str, sqlite3.Row]] = {}
         for r in rows:
@@ -975,8 +1041,10 @@ class Store:
             elif r["kind"] == "declared" and r["source"] not in edge["declared_sources"]:
                 edge["declared_sources"].append(r["source"])
 
+        # rowid tiebreak: two checks in the same millisecond otherwise pick a
+        # winner by unguaranteed scan order (latest_scan learned this first).
         checks = self._conn.execute(
-            "SELECT * FROM relationship_checks ORDER BY checked_at"
+            "SELECT * FROM relationship_checks ORDER BY checked_at, rowid"
         ).fetchall()
         for r in checks:  # later rows overwrite: latest check wins the read model
             edge = edges.get(r["edge_id"])
@@ -1002,6 +1070,14 @@ class Store:
         # definition produces a SIGNED "CERTIFIED" for a moment the store
         # itself records as contradicted — the receipt would be evidence for
         # exactly the wrong claim.
+        if self._readonly:
+            # Advertised as a read-only-store service, but attest SIGNS and
+            # PERSISTS a receipt (and mints a key on a never-attested store).
+            # Without this guard it died with a raw "attempt to write a
+            # readonly database" traceback.
+            raise ValueError(
+                "this store is read-only — attest signs and persists a receipt; "
+                "copy the store to writable storage to attest")
         scan = self.scan_as_of(as_of) if as_of else self.latest_scan()
         if scan is None:
             return None
@@ -1025,6 +1101,13 @@ class Store:
                     break
         if not verdicts:
             return None
+        # EVIDENCE must be gathered under the label of the concept whose
+        # verdicts we just resolved — the RECEIPT SCAN's label. Gathering it
+        # under the raw query name let a member-name query union membership
+        # ACROSS scans and concepts, so a receipt certified by one scan's
+        # verdicts bound a definition that scan never clustered into the
+        # attested concept — a signed CERTIFIED naming foreign evidence.
+        concept_label = verdicts[0]["concept_label"]
 
         # The status answers "can I trust this number", so precedence — not
         # raw severity — is the right order: CONTRADICTION always wins, then
@@ -1072,6 +1155,38 @@ class Store:
         ts = as_of or now
         future = normalize_ts(ts) > normalize_ts(now)
         live = self.as_of(concept_label, ts)
+
+        # For a CURRENT receipt, split "live" into sites the receipt's own
+        # scan actually OBSERVED and sites that are live only because absence
+        # could not be proven (the majority-overlap rule refuses to retire
+        # after a >50% estate shrink — deliberately, absence requires proof).
+        # Binding the unconfirmed ones into definition_version produced an
+        # internally contradictory signed receipt: "definition live at
+        # <deleted site>" beside "freshness: fresh" — the freshness check
+        # having just proven that very file absent. Unconfirmed sites move to
+        # a scope disclosure; as-of receipts keep full history semantics.
+        unconfirmed: list = []
+        if not as_of:
+            enumerated = {
+                f"{r['system']}:{r['object_id']}"
+                for r in self._conn.execute(
+                    """SELECT a.system, a.object_id FROM scan_artifacts sa
+                       JOIN artifacts a ON a.artifact_id = sa.artifact_id
+                       WHERE sa.scan_id = ?""",
+                    (scan["scan_id"],),
+                )
+            }
+            systems = {key.split(":", 1)[0] for key in enumerated}
+            confirmed = []
+            for iv in live:
+                artifact_key = _artifact_key(iv.object_key)
+                system = artifact_key.split(":", 1)[0]
+                if artifact_key in enumerated or system not in systems:
+                    confirmed.append(iv)
+                else:
+                    unconfirmed.append(iv)
+            live = confirmed
+
         definition_version = [
             {
                 "fingerprint_id": iv.ref_id,
@@ -1117,6 +1232,14 @@ class Store:
             "known_relevant": known_relevant,
             "relevance_determinable": bool(concept_sites),
         }
+        if unconfirmed:
+            scope["unconfirmed_sites"] = sorted(iv.object_key for iv in unconfirmed)
+            divergences = divergences + [
+                f"{len(unconfirmed)} historical definition site(s) were not observed "
+                f"by this receipt's scan and their absence could not be proven "
+                f"(scan overlap below majority): "
+                + ", ".join(sorted(iv.object_key for iv in unconfirmed))
+            ]
 
         # A receipt asserting verification must name what it verified. If the
         # evidence is empty, the assertion is unsupported no matter why —
@@ -1177,9 +1300,14 @@ class Store:
         # `scope`.
         fresh_status = (freshness or {}).get("status")
         if fresh_status in ("stale", "partial", "unknown"):
-            drift = {key: sorted((freshness or {})[key])
+            # check_freshness nests its lists under `estate_drift`; reading
+            # top-level keys made this a dead guard — `known_divergences`
+            # always said bare "freshness is stale" with no drift detail, and
+            # the blocking-by-drift term could never fire.
+            drift_src = (freshness or {}).get("estate_drift") or (freshness or {})
+            drift = {key: sorted(drift_src[key])
                      for key in ("removed", "changed", "added")
-                     if (freshness or {}).get(key)}
+                     if drift_src.get(key)}
             detail = [f"{key}: {', '.join(vals)}" for key, vals in drift.items()]
             note = f"freshness is {fresh_status}" + (
                 f" — {'; '.join(detail)}" if detail else "")

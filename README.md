@@ -109,7 +109,7 @@ SQLite; production custody is a KMS behind the same two functions.
   --dbt examples/acme/dbt_project --metrics examples/acme/metrics.yml
 ```
 
-Exposes `attest` / `asof` / `history` / `concepts` / `verify_receipt` as MCP tools —
+Exposes `attest` / `asof` / `history` / `concepts` / `relationships` / `verify_receipt` as MCP tools —
 the §6 answer-path check: an agent asked "what was net revenue in March" first learns
 the definition is CONTRADICTED and by how much, then answers with the receipt id.
 With estate sources configured (optional, same source flags as `attest`), every

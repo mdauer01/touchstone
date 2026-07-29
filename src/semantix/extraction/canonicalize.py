@@ -58,8 +58,38 @@ _ORDER_SENSITIVE = (
     "FIRST", "LAST", "ANY_VALUE", "ARG_MAX", "ARG_MIN", "ARBITRARY",
     "ARRAY_AGG", "STRING_AGG", "LISTAGG", "GROUP_CONCAT", "COLLECT_LIST",
     "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE",
+    # MODE tie-breaks on first-seen; ARRAY_CONCAT_AGG concatenates in input
+    # order per BigQuery's own docs. Each was a one-word omission from the
+    # table the previous round audited, and each certified a merged-away
+    # inner ORDER BY at proof grade.
+    "MODE", "ARRAY_CONCAT_AGG",
 )
 _ORDER_SENSITIVE_NORM = frozenset(n.replace("_", "") for n in _ORDER_SENSITIVE)
+
+# Wrappers that sit BETWEEN a window (or projection) and the function it
+# applies: `first_value(x IGNORE NULLS)` parses as IgnoreNulls(FirstValue).
+# Reading `window.this` directly saw "IGNORENULLS" — never in the table — so
+# the mainstream BigQuery/Snowflake navigation idiom defeated the gate.
+_FN_WRAPPERS = (exp.IgnoreNulls, exp.RespectNulls, exp.Filter)
+
+
+def _fn_name(fn: exp.Expression) -> str:
+    while isinstance(fn, _FN_WRAPPERS):
+        fn = fn.this
+    return (str(fn.this) if isinstance(fn, exp.Anonymous)
+            else type(fn).__name__).upper().replace("_", "")
+
+
+def _has_distinct_on(parsed: exp.Expression) -> bool:
+    """DISTINCT ON is an order-sensitive consumer that is NOT an aggregate:
+    its ORDER BY decides which row survives per key. It was invisible to both
+    consumer checks, so the deciding ordering was stripped and asc/desc
+    variants falsely certified — the canonical Postgres/DuckDB dedup idiom."""
+    for select in parsed.find_all(exp.Select):
+        distinct = select.args.get("distinct")
+        if isinstance(distinct, exp.Expression) and distinct.args.get("on"):
+            return True
+    return False
 
 
 def _order_sensitive_names(parsed: exp.Expression) -> set[str]:
@@ -91,10 +121,7 @@ def _window_gaps(parsed: exp.Expression) -> bool:
     for window in parsed.find_all(exp.Window):
         if window.args.get("order") is not None:
             continue
-        fn = window.this
-        name = (str(fn.this) if isinstance(fn, exp.Anonymous)
-                else type(fn).__name__).upper().replace("_", "")
-        if name in _ORDER_SENSITIVE_NORM:
+        if _fn_name(window.this) in _ORDER_SENSITIVE_NORM:
             return True
     return False
 
@@ -115,8 +142,24 @@ def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, .
     """
     if not _has_inner_order(parsed):
         return ()
-    if _order_sensitive_names(parsed) or _window_gaps(parsed):
-        return ("inner ORDER BY consumed by an order-sensitive aggregate",)
+    if not (_order_sensitive_names(parsed) or _window_gaps(parsed)):
+        return ()
+    # The gap fires only when an inner ORDER BY sits in a scope a consumer
+    # actually READS. The whole-AST test fired on a decorative ordering in an
+    # unrelated CTE whenever any consumer existed anywhere — the same
+    # coupling that made _strip_neutral fabricate differences. Preserved
+    # DISTINCT ON orderings do not gap: they survive stripping and are
+    # modelled into the core.
+    keep = _order_bearing_selects(parsed)
+    outermost = unwrap_select(parsed)
+    for select in parsed.find_all(exp.Select):
+        if select is outermost or select.args.get("order") is None:
+            continue
+        distinct = select.args.get("distinct")
+        if isinstance(distinct, exp.Expression) and distinct.args.get("on"):
+            continue
+        if id(select) in keep:
+            return ("inner ORDER BY consumed by an order-sensitive aggregate",)
     return ()
 
 
@@ -140,6 +183,7 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
     # Read what the optimizer is about to destroy, before it runs.
     pre_gaps = _pre_optimization_gaps(parsed, dialect)
 
+    _pin_short_references(parsed, schema)
     _strip_neutral(parsed)
     _resolve_group_ordinals(parsed)
 
@@ -172,6 +216,43 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
     return CanonResult(ast, level, error, pre_gaps)
 
 
+def _pin_short_references(ast: exp.Expression, schema) -> None:
+    """Pin references matching a SHORT catalog entry to the `_` home.
+
+    The registry stores a short entry (a two-part hand-catalog table in a
+    three-part estate) under `_` AND under a replica per observed database.
+    Without pinning, a short reference races the replicas and sqlglot
+    refuses as ambiguous the moment two databases exist; with pinning, short
+    references match the `_` home exactly while fully-qualified references
+    match their database's replica — both forms bind on multi-database
+    estates. The replicas are copies of ONE physical table, so the pin
+    changes nothing about meaning or lineage.
+    """
+    short = getattr(schema, "_semantix_short_entries", None)
+    if not short:
+        return
+    ctes = {cte.alias_or_name.lower() for cte in ast.find_all(exp.CTE)}
+    for table in ast.find_all(exp.Table):
+        if table.args.get("catalog"):
+            continue
+        name = table.name.lower()
+        if not table.args.get("db"):
+            if name in ctes:
+                continue
+            key: tuple[str, ...] = (name,)
+        else:
+            key = (table.args["db"].name.lower(), name)
+        pad = short.get(key)
+        if pad is None:
+            continue
+        if len(key) == 2 and pad >= 1:
+            table.set("catalog", exp.to_identifier("_"))
+        elif len(key) == 1 and pad >= 1:
+            table.set("db", exp.to_identifier("_"))
+            if pad >= 2:
+                table.set("catalog", exp.to_identifier("_"))
+
+
 def _strip_neutral(ast: exp.Expression) -> None:
     """Drop genuinely semantics-neutral constructs.
 
@@ -182,21 +263,84 @@ def _strip_neutral(ast: exp.Expression) -> None:
     stripped: they are semantic, and the completeness gate needs to see
     them. (Window-internal ordering lives on exp.Window, untouched here.)
     """
-    # Inner ORDER BY is load-bearing ONLY when an order-sensitive consumer
-    # exists (FIRST, LAST, ARRAY_AGG, a spec-less window over one) — there the
-    # pre-optimization gap fires and the ordering must survive for the digest.
-    # Otherwise an inner ORDER BY is as decorative as an outer one, and
-    # KEEPING it unconditionally fabricated a difference: a staging CTE with a
-    # cosmetic `order by 2` hashed differently from the same CTE without it,
-    # reporting a CONTRADICTION between equivalent models.
-    keep_inner = bool(_order_sensitive_names(ast)) or _window_gaps(ast)
+    # Inner ORDER BY is load-bearing ONLY for the scopes an order-sensitive
+    # consumer actually READS. A whole-AST boolean kept DECORATIVE orderings
+    # in unrelated CTEs whenever any consumer existed anywhere — a cosmetic
+    # `order by 2` in a lookup CTE fabricated a difference between models
+    # that compute identical numbers. The keep-set is the transitive closure
+    # of each consumer's sources.
+    keep = _order_bearing_selects(ast)
     outermost = unwrap_select(ast)
     for select in ast.find_all(exp.Select):
-        if keep_inner and select is not outermost:
+        if id(select) in keep and select is not outermost:
+            continue
+        distinct = select.args.get("distinct")
+        if isinstance(distinct, exp.Expression) and distinct.args.get("on"):
+            # DISTINCT ON's ORDER BY decides WHICH row survives per key — the
+            # canonical Postgres/DuckDB dedup idiom. Stripping it certified
+            # asc/desc variants as identical in both outer and inner
+            # positions.
             continue
         bounded = select.args.get("limit") is not None or select.args.get("offset") is not None
         if not bounded:
             select.set("order", None)
+
+
+def _order_bearing_selects(ast: exp.Expression) -> set[int]:
+    """ids of Selects whose ORDER BY an order-sensitive consumer can see."""
+    bodies: dict[str, exp.Expression] = {
+        cte.alias_or_name: cte.this for cte in ast.find_all(exp.CTE)
+    }
+
+    def consumer_selects() -> list[exp.Select]:
+        out = []
+        for node in ast.find_all(exp.AggFunc):
+            if (node.find_ancestor(exp.Window) is None
+                    and type(node).__name__.upper().replace("_", "")
+                    in _ORDER_SENSITIVE_NORM):
+                parent = node.find_ancestor(exp.Select)
+                if parent is not None:
+                    out.append(parent)
+        for window in ast.find_all(exp.Window):
+            if (window.args.get("order") is None
+                    and _fn_name(window.this) in _ORDER_SENSITIVE_NORM):
+                parent = window.find_ancestor(exp.Select)
+                if parent is not None:
+                    out.append(parent)
+        return out
+
+    keep: set[int] = set()
+
+    def absorb_chain(select: exp.Select, seen: set[str]) -> None:
+        """Follow SINGLE-source chains only. An aggregate over a JOIN has no
+        defined input order regardless of either side's inner ORDER BY, so
+        absorbing every referenced scope kept a decorative ordering in a
+        joined lookup CTE and fabricated a difference between models that
+        compute identical numbers."""
+        sources = list(scope_sources(select))
+        if len(sources) != 1:
+            return
+        source = sources[0]
+        if isinstance(source, exp.Table) and not source.args.get("db"):
+            name = source.name
+            if name in bodies and name not in seen:
+                seen.add(name)
+                body = bodies[name]
+                for inner in body.find_all(exp.Select):
+                    keep.add(id(inner))
+                inner_select = unwrap_select(body)
+                if inner_select is not None:
+                    absorb_chain(inner_select, seen)
+        elif isinstance(source, exp.Subquery):
+            for inner in source.find_all(exp.Select):
+                keep.add(id(inner))
+            inner_select = unwrap_select(source.this)
+            if inner_select is not None:
+                absorb_chain(inner_select, seen)
+
+    for consumer in consumer_selects():
+        absorb_chain(consumer, set())
+    return keep
 
 
 def _resolve_group_ordinals(ast: exp.Expression) -> None:
@@ -224,12 +368,28 @@ def _resolve_group_ordinals(ast: exp.Expression) -> None:
                 if isinstance(item, exp.Tuple):  # GROUPING SETS ((a, 1), ...)
                     resolve_items(list(item.expressions))
                     continue
+                if isinstance(item, exp.Paren):
+                    # A single-item grouping set parses as Paren, not Tuple:
+                    # `GROUPING SETS ((status), (2))` is [Paren, Paren]. The
+                    # Tuple-only descent left `(2)` unresolved, so two
+                    # different single-column breakdowns hashed identically
+                    # at proof grade — and single-column parenthesized sets
+                    # are the most common GROUPING SETS shape.
+                    resolve_items([item.this])
+                    continue
                 if not (isinstance(item, exp.Literal) and item.is_int):
                     continue
                 idx = int(item.this) - 1
                 if 0 <= idx < len(select.expressions):
                     target = select.expressions[idx]
                     target = target.this if isinstance(target, exp.Alias) else target
+                    if target.find(exp.AggFunc) is not None:
+                        # `GROUP BY 1` pointing at an aggregate projection is
+                        # SQL no warehouse executes; splicing the aggregate in
+                        # fabricated a proof-grade grain for an unrunnable
+                        # query. Leave the literal — the query fails
+                        # downstream where it should.
+                        continue
                     item.replace(target.copy())
 
         resolve_items(list(group.expressions))
@@ -304,19 +464,29 @@ def _canonical_table_aliases(ast: exp.Expression) -> exp.Expression:
         table.set("alias", exp.TableAlias(this=exp.to_identifier(new),
                                           **({"columns": columns} if columns else {})))
 
-    # Rename ONLY columns whose scope is the top select. The rename map covers
-    # the top scope's tables, but `ast.find_all(exp.Column)` descended into
-    # every scope — so a CTE body that happened to reuse a top-scope alias
-    # name (`raw.stg AS stg` in both places, dbt convention) had its columns
-    # rewritten to the OUTER t-alias: invalid SQL, stored at proof grade as
-    # the canonical form, and hash-unstable under pure renames. Correlated
-    # references from subqueries to the outer alias are also skipped — a
-    # missed rename degrades to a difference-hypothesis, the safe direction.
+    # Rename columns whose qualifier RESOLVES to a top-scope table: those in
+    # the top scope itself, and CORRELATED references from nested scopes whose
+    # qualifier is not shadowed by a local source of the same name. Renaming
+    # every scope blindly corrupted CTE bodies that reuse a top-scope alias
+    # name (dbt convention); renaming ONLY the top scope left correlated
+    # references on the AUTHOR's alias, so two authors' identical queries
+    # hashed differently at proof grade and the canonical text carried a
+    # dangling alias.
+    def resolves_to_top(column: exp.Column) -> bool:
+        scope = column.find_ancestor(exp.Select)
+        while scope is not None and scope is not select:
+            local = {s.alias_or_name for s in scope_sources(scope)}
+            local |= {cte.alias_or_name for cte in (scope.ctes or [])}
+            if column.table in local:
+                return False  # shadowed by a nested source — not correlated
+            scope = scope.find_ancestor(exp.Select)
+        return scope is select
+
     for column in ast.find_all(exp.Column):
         old = column.table
         if not old or old not in rename:
             continue
-        if column.find_ancestor(exp.Select) is not select:
+        if not resolves_to_top(column):
             continue
         column.set("table", exp.to_identifier(rename[old]))
 

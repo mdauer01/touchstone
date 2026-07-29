@@ -77,6 +77,11 @@ def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
             f"no {scheme}:// driver shipped yet — publish writes to a DuckDB "
             f"file (pass a path, or duckdb://path)")
     warehouse_path = warehouse_path.removeprefix("duckdb://")
+    if not warehouse_path.strip():
+        # A bare `duckdb://` connected to an IN-MEMORY database and reported
+        # success while writing nothing anywhere.
+        raise ValueError("duckdb:// carries no path — pass duckdb://<file> or "
+                         "a plain file path")
     try:
         import duckdb
     except ImportError as e:

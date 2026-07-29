@@ -427,7 +427,7 @@ def test_cli_mine_verify_relationships_roundtrip(acme, tmp_path, capsys):
                  "--dbt", str(acme / "dbt_project"), "--db", db]) == 0
     out = capsys.readouterr().out
     assert "checked 4 edge(s): 2 certified, 2 failed" in out
-    assert "orphan value(s) violate referential integrity" in out
+    assert "orphan row(s) violate referential integrity" in out
     assert "N:M" in out
 
     json_out = tmp_path / "graph.json"
@@ -483,6 +483,8 @@ def test_mcp_relationships_tool(acme, tmp_path):
 def test_mcp_relationships_without_data_is_an_error(tmp_path):
     from semantix.mcp import McpServer
 
+    # An MCP server on a nonexistent store must refuse, not create one.
+    Store(tmp_path / "bare.db")  # the store exists but holds nothing
     server = McpServer(str(tmp_path / "bare.db"))
     response = server.handle({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",

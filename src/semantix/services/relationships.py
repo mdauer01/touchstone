@@ -295,8 +295,17 @@ def verify_edges(
         broken = [r for r in (row["left_relation"], row["right_relation"])
                   if any(same_relation(r, u) for u in unbuilt)]
         if broken:
+            # Carry WHY the build failed when the warehouse recorded it — the
+            # append-only check history otherwise never says what broke.
+            causes = []
+            if isinstance(unbuilt, dict):
+                for r in broken:
+                    for u, why in unbuilt.items():
+                        if same_relation(r, u) and why:
+                            causes.append(f"{u}: {why}")
             evidence = {"unrunnable": True,
-                        "error": f"relation(s) failed to build: {', '.join(broken)}"}
+                        "error": f"relation(s) failed to build: {', '.join(broken)}"
+                                 + (f" ({'; '.join(causes)})" if causes else "")}
             # RECORD it. The sibling unrunnable branch below already does, for
             # the same reason: a check that cannot run must still supersede an
             # earlier CERTIFIED, or every later reader — the CLI, the MCP
@@ -546,7 +555,7 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
         if not (unique_l or unique_r):
             reasons.append("no unique side (N:M) — join semantics undefined")
         elif trusted_orphans and demonstrated:
-            reasons.append(f"{trusted_orphans} orphan value(s) violate referential integrity")
+            reasons.append(f"{trusted_orphans} orphan row(s) violate referential integrity")
         # Only say "nothing was demonstrated" when nothing WAS. Appending it
         # unconditionally produced a self-contradictory sentence: an orphan
         # count and "nothing was demonstrated" in one breath.

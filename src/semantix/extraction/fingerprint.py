@@ -62,7 +62,14 @@ def extract_fingerprints(
         # certify equal to an unkeyed one, and to a differently-keyed one.
         on = distinct.args.get("on") if isinstance(distinct, exp.Expression) else None
         if on is not None:
-            filter_list.append(f"SELECT DISTINCT ON ({render(on, dialect)})")
+            # The ORDER BY decides WHICH row survives per key, so it is part
+            # of the definition: asc/desc variants compute different rows and
+            # previously hashed identically at proof grade.
+            order = select.args.get("order")
+            ordering = (" ORDER BY " + ", ".join(render(e, dialect)
+                                                 for e in order.expressions)
+                        if order is not None else "")
+            filter_list.append(f"SELECT DISTINCT ON ({render(on, dialect)}){ordering}")
         else:
             filter_list.append("SELECT DISTINCT")
 
@@ -243,8 +250,16 @@ def _body_digests(bodies: dict[str, exp.Expression], dialect: str) -> dict[str, 
 
 
 def _cyclic_names(bodies: dict[str, exp.Expression]) -> set[str]:
-    """CTE names that participate in a cycle (i.e. recursive CTEs)."""
-    edges = {name: {t.name for t in body.find_all(exp.Table)} & set(bodies)
+    """CTE names that participate in a cycle (i.e. recursive CTEs).
+
+    Same no-db guard as the digest loop and the text replacement — this was
+    the THIRD place base names are matched, and the one the guard missed: a
+    CTE `stg` reading the physical `raw.stg` (dbt convention) read as a
+    self-edge, marking every CTE cyclic, fragmenting the memo by stack, and
+    restoring the exponential blowup (~600x at 30 CTEs).
+    """
+    edges = {name: {t.name for t in body.find_all(exp.Table)
+                    if not t.args.get("db")} & set(bodies)
              for name, body in bodies.items()}
     cyclic: set[str] = set()
     for start in bodies:

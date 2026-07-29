@@ -93,8 +93,24 @@ def load_sql_dir(root: str | Path, dialect: str = "duckdb") -> tuple[list[Comput
                             "reason": f"could not be read: {e}"})
             continue
         directive = _DIRECTIVE_RE.search(sql)
+        marker_present = "semantix:" in sql.lower() and "relation=" in sql.lower()
         if directive:
-            relation = directive.group(1).replace('"', "").replace("`", "")
+            declared = directive.group(1)
+            line = next((ln for ln in sql.splitlines() if "relation=" in ln.lower()), "")
+            tail = line.lower().split("relation=", 1)[1].strip() if "relation=" in line.lower() else ""
+            if tail and tail != declared.lower():
+                # The regex matched a PREFIX of a malformed declared identity
+                # (`"A"b`, a trailing dot) — binding a prefix of what the
+                # author wrote is neither "whole" nor "not at all".
+                skipped.append({"object_id": object_id, "path": str(path),
+                                "reason": f"malformed relation directive: {line.strip()!r}"})
+                continue
+            relation = declared.replace('"', "").replace("`", "")
+        elif marker_present:
+            skipped.append({"object_id": object_id, "path": str(path),
+                            "reason": "malformed `-- semantix: relation=` directive "
+                                      "— fix or remove it"})
+            continue
         else:
             rel_path = path.relative_to(rootp)
             schema = rel_path.parent.name or "public"
@@ -160,6 +176,12 @@ def load_views_file(path: str | Path,
             # remaining silent-loss channel in the non-dbt intake path.
             skipped.append({
                 "object_id": f"{relation}#{seen_at[relation]}", "path": str(p),
+                # INFORMATIONAL: the statement WAS read and its content is
+                # known — OR REPLACE means the end state is the truth. Routing
+                # this through the unreadable-artifact channel permanently
+                # un-certified the estate with a false reason ("could not be
+                # read") on a routine replay dump.
+                "informational": True,
                 "reason": (f"definition of {relation} at statement "
                            f"{seen_at[relation]} superseded by a later CREATE "
                            f"VIEW in the same dump — only the last definition "

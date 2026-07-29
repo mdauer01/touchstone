@@ -30,6 +30,9 @@ class SchemaRegistry:
         # core cannot make honestly — without this record, it produced a
         # sev-96 CONTRADICTION blaming the mart's own internals.
         self._agg_outputs: dict[str, set[str]] = {}
+        # Prefixes already seen by the incremental schema path, so a NEW head
+        # (first model in a second database) invalidates the cache.
+        self._known_prefixes: dict[int, set[tuple[str, ...]]] = {}
         # Cached per dialect: identifier normalization is dialect-specific
         # (Snowflake folds unquoted names to UPPER, most others to lower), so
         # one schema object cannot serve two dialects.
@@ -87,6 +90,10 @@ class SchemaRegistry:
                 # will record FAILED, which is the honest answer. Building the
                 # schema is not the place to end a run with a traceback.
                 schema = MappingSchema(self._nested())
+            # Carried on the schema object so canonicalize_sql — whose
+            # signature takes only (sql, schema, dialect) — can pin short
+            # references to the `_` home without a registry parameter.
+            schema._semantix_short_entries = self.short_entries()
             self._schema_cache[dialect] = schema
         return self._schema_cache[dialect]
 
@@ -124,20 +131,42 @@ class SchemaRegistry:
             if pad == 0:
                 insert(parts, cols)
                 continue
-            observed = prefixes.get(pad, set())
-            if observed:
-                # Replication ONLY — adding a `_` fallback beside a
-                # replicated entry gave a short reference two candidate
-                # homes, which sqlglot rightly refuses as ambiguous.
-                for prefix in observed:
-                    insert([*prefix, *parts], cols)
-            else:
-                # No full-depth entry to learn heads from: `_` is not a legal
-                # warehouse identifier here, so the placeholder can never
-                # collide with a real name, and short references still
-                # resolve by suffix.
-                insert(["_"] * pad + parts, cols)
+            # BOTH the `_` home and a replica under EVERY observed head.
+            #
+            # The two failure modes bracketing this: replicas alone make a
+            # SHORT reference ambiguous (two candidate homes) the moment two
+            # databases exist — sqlglot rightly refuses, and `from
+            # raw.orders` collapsed to `parsed`; the `_` pad alone never
+            # matches a FULLY-QUALIFIED reference, which left hand catalogs
+            # at 40% coverage; and first-seen-head replication silently bound
+            # only one database (70% on a PROD+DEV estate, per-column errors
+            # that never name the cause).
+            #
+            # The resolution is that short references never race the
+            # replicas: canonicalize_sql PINS any reference matching a short
+            # entry to the `_` home before optimizing (see
+            # _short_entry_homes), so short refs match `_` exactly and
+            # qualified refs match their database's replica. The replicas are
+            # copies of ONE physical table, so pinning loses nothing.
+            insert(["_"] * pad + parts, cols)
+            for prefix in prefixes.get(pad, set()):
+                insert([*prefix, *parts], cols)
         return nested
+
+    def short_entries(self) -> dict[tuple[str, ...], int]:
+        """Lowercased part-tuples of catalog entries SHORTER than the mapping
+        depth, mapped to how many parts `_`-padding adds. canonicalize_sql
+        uses this to pin matching references to the `_` home."""
+        known = {rel for rel, cols in self._types.items() if cols}
+        if not known:
+            return {}
+        depth = max(len(rel.split(".")) for rel in known)
+        out: dict[tuple[str, ...], int] = {}
+        for rel in known:
+            parts = rel.lower().split(".")
+            if len(parts) < depth:
+                out[tuple(parts)] = depth - len(parts)
+        return out
 
     def knows(self, relation: str) -> bool:
         return relation in self._types
@@ -189,8 +218,26 @@ class SchemaRegistry:
         self._add_to_cached_schemas(relation, cols, replaced=known_before)
 
     def aggregate_outputs(self, relation: str) -> set[str]:
-        """Output columns of a registered model that are aggregate-derived."""
-        return self._agg_outputs.get(relation, set())
+        """Output columns of a registered model that are aggregate-derived.
+
+        Resolved the way qualification resolves relations — case-insensitive,
+        suffix-tolerant — not by exact string. The exact-key lookup meant any
+        spelling variant of the model (`ANALYTICS.MARTS.MART_ORDERS` on
+        Snowflake, database-omitted `marts.mart_orders` in hand YAML)
+        bypassed the re-aggregation refusal, and the sev-96 metric-over-mart
+        noise the refusal exists to prevent came straight back.
+        """
+        if relation in self._agg_outputs:
+            return self._agg_outputs[relation]
+        want = [p for p in relation.lower().split(".") if p]
+        matches = []
+        for key, cols in self._agg_outputs.items():
+            have = key.lower().split(".")
+            n = min(len(want), len(have))
+            if n and want[-n:] == have[-n:]:
+                matches.append(cols)
+        # Ambiguous suffix (two different marts match) → refuse to guess.
+        return matches[0] if len(matches) == 1 else set()
 
     def _add_to_cached_schemas(self, relation: str, cols: dict[str, str],
                                replaced: bool) -> None:
@@ -207,9 +254,21 @@ class SchemaRegistry:
             self._schema_cache.clear()
             return
         parts = relation.split(".")
+        # A full-depth registration that introduces a NEW head changes what
+        # _nested would build (single-head replication may flip to `_`
+        # padding, or vice versa) — the incremental path cannot reproduce
+        # that, so resolution became a function of cache lifetime: identical
+        # scans produced different canon levels depending on whether the
+        # cache had been built before or after the new head appeared.
+        new_head = False
+        if len(parts) > 1:
+            for length in range(1, len(parts)):
+                if tuple(parts[:length]) not in self._known_prefixes.get(length, set()):
+                    new_head = True
+                self._known_prefixes.setdefault(length, set()).add(tuple(parts[:length]))
         for dialect, schema in list(self._schema_cache.items()):
             depth = schema.depth() or len(parts)
-            if len(parts) != depth:
+            if len(parts) != depth or new_head:
                 # A short entry pads by REPLICATION under observed heads
                 # (_nested), which the incremental path cannot reproduce —
                 # and a deeper entry re-pads everything. Both rebuild.

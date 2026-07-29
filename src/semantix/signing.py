@@ -157,12 +157,45 @@ def receipt_trust(receipt: dict) -> tuple[bool, list[str]]:
     if freshness is not None and not isinstance(freshness, dict):
         return False, [f"freshness block is malformed ({type(freshness).__name__}, "
                        "not an object) — cannot evaluate decay; re-attest"]
-    fresh_status = (freshness or {}).get("status")
-    if fresh_status in ("stale", "partial"):
-        warnings.append(
-            f"this receipt's own freshness block reports `{fresh_status}` — the "
-            "estate has drifted since it was issued; re-attest before relying on it")
-        return False, warnings
     if not isinstance(receipt.get("status"), str):
         return False, ["receipt carries no status field — it certifies nothing"]
+
+    # Trust mirrors what BLOCKS at issue time, or the two ends contradict:
+    # the first version distrusted any `partial`/`stale` unconditionally, so
+    # every receipt the issue-time rules sign as CERTIFIED-partial-no-drift
+    # was rejected seconds later by the same MCP server, with the false
+    # statement "the estate has drifted" (partial with empty drift means the
+    # re-checked half MATCHED) and the useless advice to re-attest — which
+    # reproduces the identical receipt. Supplying evidence must never yield
+    # a worse outcome than supplying none.
+    fresh_status = (freshness or {}).get("status")
+    drift = (freshness or {}).get("estate_drift") or {}
+    drifted = any(drift.get(k) for k in ("changed", "added", "removed")) or any(
+        (freshness or {}).get(k) for k in ("changed", "added", "removed"))
+    is_as_of = bool(receipt.get("as_of"))
+    if fresh_status == "stale" or (fresh_status == "partial" and drifted):
+        if is_as_of:
+            # An as-of receipt is ABOUT a past instant; current-estate drift
+            # is disclosure, not decay — "was certified at T, the estate has
+            # since moved" is precisely what an as-of receipt exists to say.
+            warnings.append(
+                f"freshness is `{fresh_status}` for the CURRENT estate; this "
+                f"receipt describes {receipt.get('as_of')} and remains valid "
+                f"for that instant")
+            return True, warnings
+        warnings.append(
+            f"this receipt's own freshness block reports `{fresh_status}` with "
+            "recorded drift — the estate has moved since it was issued; "
+            "re-attest before relying on it")
+        return False, warnings
+    if fresh_status == "unknown":
+        warnings.append("a freshness check was attempted and could not answer — "
+                        "re-attest with estate sources")
+        return False, warnings
+    if fresh_status == "partial":
+        warnings.append("freshness is `partial`: the re-checked systems matched; "
+                        "some scanned systems were not re-checked")
+    elif fresh_status == "unchecked":
+        warnings.append("the estate was NOT re-checked at attest time — the "
+                        "verdicts describe the estate as of verified_as_of")
     return True, warnings

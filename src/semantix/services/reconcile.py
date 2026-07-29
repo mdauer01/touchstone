@@ -119,8 +119,9 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
             # faithfully implements both) was never stated.
             if len(claim_hashes) > 1:
                 summary = (
-                    f"{len(expressible)} declared definitions of this concept "
-                    f"disagree with each other"
+                    f"{len(claim_hashes)} distinct declared definitions of this "
+                    f"concept disagree with each other (across "
+                    f"{len(expressible)} declarations)"
                     + (f", and the estate computes {len(core_hashes)} distinct "
                        f"definition(s) across {len(fps)} site(s)"
                        if len(core_hashes) > 1 else
@@ -198,6 +199,8 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                         "Declared definition is not machine-expressible; static "
                         "verification impossible — requires the dynamic execution "
                         "harness (Phase 1)."
+                        + ((" Reason: " + (inexpressible[0].error or "")[:160])
+                           if inexpressible and inexpressible[0].error else "")
                     ),
                     evidence=base_evidence,
                 )
@@ -387,17 +390,16 @@ def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:
     model, say. The old text sent the reader to fix canonicalization while
     the gap sat named in `claim.error`, unreachable from the verdict.
     """
-    site_of = _site_names(fps)
+    sites = _site_names(fps)
     parts: list[str] = []
-    for fp in fps:
+    for fp, site in zip(fps, sites):
         if fp.canon_level in PROOF_LEVELS:
             continue
         if fp.gaps:
-            parts.append(f"{site_of[fp.short_id]} uses unmodelled constructs: "
-                         + ", ".join(fp.gaps))
+            parts.append(f"{site} uses unmodelled constructs: "
+                         + ", ".join(fp.gaps[:3]))
         else:
-            parts.append(f"{site_of[fp.short_id]} canonicalized only to "
-                         f"{fp.canon_level}")
+            parts.append(f"{site} canonicalized only to {fp.canon_level}")
     for claim in expressible:
         if claim.canon_level in PROOF_LEVELS:
             continue
@@ -408,31 +410,37 @@ def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:
             parts.append(f"{label}: {claim.error}")
         else:
             parts.append(f"{label} canonicalized only to {claim.canon_level}")
+    # Bounded like every sibling clause: 500 below-grade sites once built an
+    # 84 KiB single sentence, stored in the DB and dropped into a PR comment.
+    if len(parts) > 3:
+        parts = parts[:3] + [f"(+{len(parts) - 3} more)"]
     return "; ".join(parts) or "cause unrecorded"
 
 
-def _site_names(fps: list[Fingerprint]) -> dict[str, str]:
-    """fingerprint short_id -> unique human site name.
+def _site_names(fps: list[Fingerprint]) -> list[str]:
+    """Per-member human site names, aligned with `fps` by POSITION.
 
     Sites were named by RELATION, which is exactly what is non-unique in an
-    estate that defines a relation twice — so the round-four
+    estate that defines a relation twice — the round-four
     "matches-and-diverges" self-contradictory sentence recurred verbatim
-    there: "Declared definition matches analytics.net_revenue;
-    analytics.net_revenue diverges: ...". When two members share a relation,
-    the provenance object_id disambiguates them.
+    there. And the first fix keyed the map on short_id, which is CONTENT-
+    addressed: two models at different relations computing the identical
+    measure share a short_id, so the dict collapsed them and stamped one
+    team's relation on the other team's member — misattribution in the
+    verdict evidence itself. Positional alignment has neither problem.
     """
     counts: dict[str, int] = {}
     for fp in fps:
         counts[fp.relation] = counts.get(fp.relation, 0) + 1
-    return {
-        fp.short_id: (f"{fp.relation} [{fp.provenance.object_id}]"
-                      if counts[fp.relation] > 1 else fp.relation)
+    return [
+        (f"{fp.relation} [{fp.provenance.object_id}]"
+         if counts[fp.relation] > 1 else fp.relation)
         for fp in fps
-    }
+    ]
 
 
 def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) -> list[dict]:
-    site_of = _site_names(fps)
+    sites = _site_names(fps)
     members = []
     for claim in expressible_claims:
         members.append(
@@ -451,13 +459,13 @@ def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) ->
                 "components": claim.core.components(),
             }
         )
-    for fp in fps:
+    for fp, site in zip(fps, sites):
         members.append(
             {
                 "member_id": fp.short_id,
                 "kind": "computed",
                 "name": fp.concept_candidate,
-                "where": site_of[fp.short_id],
+                "where": site,
                 "system": fp.provenance.system,
                 "path": fp.provenance.path,
                 "canon_level": fp.canon_level,
@@ -516,11 +524,11 @@ def _split_by_claim(
     fps: list[Fingerprint], expressible_claims: list[Claim]
 ) -> tuple[list[str], list[str]]:
     claim_hashes = {c.core.hash() for c in expressible_claims}
-    site_of = _site_names(fps)
+    sites = _site_names(fps)
     matching, diverging = [], []
-    for fp in fps:
+    for fp, site in zip(fps, sites):
         target = matching if fp.core.hash() in claim_hashes else diverging
-        target.append(f"{site_of[fp.short_id]} ({fp.provenance.system})")
+        target.append(f"{site} ({fp.provenance.system})")
     return matching, diverging
 
 
@@ -566,9 +574,13 @@ def _ambiguity_clause(fps: list[Fingerprint]) -> str:
             clauses.append(f"{', '.join(multi_use)} "
                            f"{'names' if len(multi_use) == 1 else 'name'} more than "
                            f"one computation")
-        else:
-            clauses.append(f"{', '.join(spellings)} are treated as the same name "
-                           f"and denote different computations")
+        # NOT elif: a key can have BOTH properties (one spelling used twice
+        # AND a second spelling normalizing in) — first-wins told the reader
+        # only half of why the concept grew.
+        if len(spellings) > 1:
+            clauses.append(
+                f"{', '.join(spellings)} are treated as the same name"
+                + ("" if multi_use else " and denote different computations"))
     return (f" These are grouped because {'; and because '.join(clauses)}, "
             f"which links every definition the name spans.")
 

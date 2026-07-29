@@ -93,7 +93,14 @@ def _lookml_expr(row: dict[str, Any]) -> tuple[str | None, list[str]]:
     handed a non-aggregate on as if it were a measure. Both reached proof
     grade as definitions nobody wrote.
     """
-    raw_sql = str(row.get("sql") or "")
+    raw = row.get("sql")
+    if raw is not None and not isinstance(raw, str):
+        # str()-coercing a dict produced `sum({'dialect': 'x'})` — a VALID
+        # DuckDB struct literal, so an export object canonicalized cleanly at
+        # proof grade as a definition nobody wrote.
+        return None, [f"sql is not a string ({type(raw).__name__}) — a shape "
+                      f"this adapter cannot read"]
+    raw_sql = str(raw or "")
     sql = _lookml_sql(raw_sql)
     mtype = str(row.get("type") or "").lower()
     untranslatable: list[str] = []
@@ -223,23 +230,48 @@ def _lookml_filters(raw: str | None) -> tuple[list[str], list[str]]:
 
     pairs: list[tuple[str, str]] = []
     untranslatable_extra: list[str] = []
-    if _LOOKML_LEGACY_MARKER.search(raw):
+
+    def outside_quotes(position: int) -> bool:
+        # The legacy machinery must never fire INSIDE a quoted modern value:
+        # `[docs: "use { field: status, value: "x" } form"]` had a legacy-
+        # shaped substring extracted from inside the quotes as a real filter,
+        # plus the carved-out host mangled into a second predicate — two
+        # fabrications, no disclosure.
+        return raw.count('"', 0, position) % 2 == 0
+
+    legacy_markers = [m for m in _LOOKML_LEGACY_MARKER.finditer(raw)
+                      if outside_quotes(m.start())]
+    if legacy_markers:
         # Consume the legacy blocks, then process the REMAINDER with the
         # modern regex. Routing the whole string down one path silently
-        # dropped every filter outside the matched blocks — an exporter that
-        # concatenates a measure's multiple `filters:` parameters produced
-        # `{ field: region, value: "US" } [status: "completed"]`, and the
-        # declared status filter vanished without a trace: a proof-grade
-        # claim missing a declared filter, the exact failure `untranslatable`
-        # exists to prevent.
-        pairs += _LOOKML_LEGACY_BLOCK.findall(raw)
-        remainder = _LOOKML_LEGACY_BLOCK.sub(" ", raw)
-        for block in _LOOKML_BRACE_BLOCK.findall(remainder):
-            if block.strip():
+        # dropped every filter outside the blocks (exporters concatenate a
+        # measure's multiple `filters:` parameters).
+        consumed = []
+        for m in _LOOKML_LEGACY_BLOCK.finditer(raw):
+            if outside_quotes(m.start()):
+                pairs.append((m.group(1), m.group(2)))
+                consumed.append((m.start(), m.end()))
+        remainder = raw
+        for start, end in reversed(consumed):
+            remainder = remainder[:start] + " " + remainder[end:]
+        for m in _LOOKML_BRACE_BLOCK.finditer(remainder):
+            if m.group(0).strip() and outside_quotes(m.start()):
                 untranslatable_extra.append(
-                    f"{block} (legacy `filters: {{ field: ..., value: ... }}` "
+                    f"{m.group(0)} (legacy `filters: {{ field: ..., value: ... }}` "
                     f"block in a shape this adapter cannot read)")
         remainder = _LOOKML_BRACE_BLOCK.sub(" ", remainder)
+        # An UNBALANCED legacy block — no closing brace, the shape a filters
+        # string truncated at an export's VARCHAR limit produces — matched
+        # neither regex and fell straight through to the modern parser, which
+        # matched the `value: "US"` sub-token: the round-four `value`-column
+        # fabrication resurrected through the round-five remainder path, at
+        # proof grade, convicting correct code with a top-band CONTRADICTION.
+        # A remainder still carrying the marker is unreadable; refuse it.
+        if _LOOKML_LEGACY_MARKER.search(remainder):
+            untranslatable_extra.append(
+                f"{remainder.strip()} (unterminated legacy filters block — "
+                f"possibly truncated by the export)")
+            remainder = ""
         pairs += _LOOKML_FILTER_RE.findall(remainder)
         if not pairs and not untranslatable_extra:
             return [], [f"{raw} (legacy filters block in a shape this adapter "
@@ -279,9 +311,16 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
     specs: list[DeclaredSpec] = []
 
     datasets = {str(r.get("name")): r for r in tables.get("osi_dataset", [])}
-    for row in tables.get("osi_metric", []):
-        if not row.get("name"):
-            continue
+    for index, row in enumerate(tables.get("osi_metric", [])):
+        name = row.get("name")
+        if not name or not isinstance(name, str):
+            # Silent `continue` dropped falsy-named declarations without a
+            # trace, and a dict name became the junk identity "{'nested':...}"
+            # — the same silent-drop metrics_yaml was made to refuse.
+            raise ValueError(
+                f"osi_metric[{index}]: `name` is missing or not a string "
+                f"({name!r}) — a nameless declaration cannot be reconciled and "
+                f"would be silently dropped")
         dataset = datasets.get(str(row.get("dataset_name") or ""))
         # An OSI metric row may carry qualifiers beyond its expression. Reading
         # only `expression` recorded an UNFILTERED metric for a declaration
@@ -321,9 +360,13 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
         ))
 
     views = {str(r.get("name")): r for r in tables.get("lookml_view", [])}
-    for row in tables.get("lookml_measure", []):
-        if not row.get("measure_name"):
-            continue
+    for index, row in enumerate(tables.get("lookml_measure", [])):
+        m_name = row.get("measure_name")
+        if not m_name or not isinstance(m_name, str):
+            raise ValueError(
+                f"lookml_measure[{index}]: `measure_name` is missing or not a "
+                f"string ({m_name!r}) — a nameless declaration cannot be "
+                f"reconciled and would be silently dropped")
         view = views.get(str(row.get("view_name") or ""))
         model = str(view["sql_table_name"]) if view and view.get("sql_table_name") else None
         raw_filters = row.get("filters")

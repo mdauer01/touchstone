@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import asdict
+import pathlib
 from typing import Any, Callable, IO
 
 from semantix import __version__
@@ -45,7 +46,9 @@ TOOLS = [
         "the metric's definition is CERTIFIED, CONTRADICTED, or unverifiable, "
         "which definition versions are live, their physical lineage, and every "
         "known divergence. Its `freshness` block says whether the estate still "
-        "matches what the verdicts were computed from (fresh/partial/stale/unknown) — "
+        "matches what the verdicts were computed from "
+        "(fresh/partial/stale/unknown/unchecked — `unchecked` means no estate "
+        "sources were configured, so nothing was re-checked) — "
         "treat a stale receipt as needing a rescan, not as truth. Quote the "
         "receipt_id alongside the number.",
         {"concept": {"type": "string", "description": "metric/concept name, e.g. net_revenue"},
@@ -102,6 +105,15 @@ TOOLS = [
 
 class McpServer:
     def __init__(self, db_path: str, estate: dict | None = None):
+        # The round-five typo'd-`--db` guard covered all nine CLI read
+        # commands and missed this one — the agent-facing entrypoint, where a
+        # path typo silently created an empty store and every tool call then
+        # answered "no scans recorded": a data-problem answer to a path
+        # problem, on the surface least able to notice.
+        if not pathlib.Path(db_path).exists():
+            raise ValueError(
+                f"no store at {db_path} — the MCP server serves an existing "
+                f"store and will not create one")
         self.store = Store(db_path)
         # Estate sources (services.freshness kwargs). When configured, every
         # attest re-checks the live estate so receipts decay honestly.

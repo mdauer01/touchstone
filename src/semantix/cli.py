@@ -368,7 +368,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                   "yielded a measure — nothing in this estate was verified",
                   file=sys.stderr)
             return 1
-        unread = len(result.skipped)
+        unread = len([s for s in result.skipped if not s.get("informational")])
         if unread and args.fail_on == "any":
             print(f"\nFAILED: {unread} artifact(s) could not be read, so this scan "
                   "cannot speak for the whole estate", file=sys.stderr)
