@@ -92,8 +92,9 @@ answering:
 
 Statuses: `fresh` (everything re-checked matches), `partial` (checked systems clean,
 some scanned systems not re-checked — never claims more than was verified), `stale`
-(the estate drifted; the receipt says exactly where), `unknown` (no sources passed, or
-the scan predates snapshots). The freshness block is embedded **before signing**, so
+(the estate drifted; the receipt says exactly where), `unknown` (a check was attempted
+and could not answer — blocks certification), `unchecked` (no sources passed — disclosed,
+does not block). The freshness block is embedded **before signing**, so
 "fresh as of T" is itself tamper-evident. A stale CERTIFIED receipt is a rescan
 demand, not a truth claim.
 
@@ -297,6 +298,11 @@ proof of sameness; canonical difference is only a hypothesis. Phase 0 verdicts t
 carry `method: static-canonical-diff` and name exactly which components diverge
 (expression / filters / grain / join graph / physical lineage). The Phase 1 execution
 harness upgrades hypotheses to measured numeric divergence.
+
+**Terminal triage.** `--min-severity N` and `--top N` bound what the terminal
+prints on a large estate (a first scan can emit one SHADOW_METRIC per
+undeclared measure); every verdict is still stored, in the report, and in
+`--json`.
 
 **Degradation ladder, never hard failure.** optimized → qualified → parsed → failed,
 plus `incomplete` — the completeness gate's verdict on SQL we parsed but cannot

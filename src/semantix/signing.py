@@ -123,6 +123,11 @@ def verify_receipt_dict(receipt_dict: dict[str, Any],
     if pinned and not public_key_b64.strip():
         return False, ("a pinned public key was requested but is empty — refusing to "
                        "fall back to the key embedded in the receipt")
+    # Stripped before comparison: a pin with a trailing newline — the shape a
+    # `pubkey > key.txt` round-trip produces — failed as "signer key does not
+    # match", which reads as tampering when the pin is merely unstripped.
+    if pinned:
+        public_key_b64 = public_key_b64.strip()
     key_b64 = public_key_b64 or sig_block.get("public_key", "")
     if pinned and sig_block.get("public_key") not in (None, key_b64):
         return False, "signer key does not match the pinned public key"
@@ -134,3 +139,30 @@ def verify_receipt_dict(receipt_dict: dict[str, Any],
         return False, "signature INVALID — receipt content does not match"
     basis = "pinned public key" if pinned else "embedded public key (tamper-evidence only)"
     return True, f"signature valid against {basis}"
+
+
+def receipt_trust(receipt: dict) -> tuple[bool, list[str]]:
+    """(trustworthy, warnings) for a SIGNATURE-VALID receipt.
+
+    A valid signature is not a valid status: the receipt carries
+    `verified_as_of` and a freshness block precisely so verification can
+    decay. This lives here so every verification surface — the CLI and the
+    agent-facing MCP tool — applies the same decay; the first version was
+    CLI-only, so the surface agents actually use kept trusting stale
+    certificates. Never raises: malformed fields are distrust with a reason,
+    on exactly the arbitrary-JSON input class verification exists for.
+    """
+    warnings: list[str] = []
+    freshness = receipt.get("freshness")
+    if freshness is not None and not isinstance(freshness, dict):
+        return False, [f"freshness block is malformed ({type(freshness).__name__}, "
+                       "not an object) — cannot evaluate decay; re-attest"]
+    fresh_status = (freshness or {}).get("status")
+    if fresh_status in ("stale", "partial"):
+        warnings.append(
+            f"this receipt's own freshness block reports `{fresh_status}` — the "
+            "estate has drifted since it was issued; re-attest before relying on it")
+        return False, warnings
+    if not isinstance(receipt.get("status"), str):
+        return False, ["receipt carries no status field — it certifies nothing"]
+    return True, warnings

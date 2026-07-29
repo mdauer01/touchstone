@@ -80,7 +80,8 @@ def load_dbt_detailed(
                 "relation": relation_of[uid],
                 "path": node.get("original_file_path"),
                 "reason": ("unrendered Jinja and no compiled SQL — run `dbt compile`"
-                           if "{{" in raw else "no compiled SQL in manifest or target/"),
+                           if ("{{" in raw or "{%" in raw)
+                           else "no compiled SQL in manifest or target/"),
             })
             continue
         depends = sorted(
@@ -209,22 +210,30 @@ def _metric_expression(metric: dict, model_relation: dict[str, str],
     # proof-grade `SUM(x)` claim for a measure that is explicitly not additive
     # — the same failure `_where_filters` exists to prevent: a claim missing a
     # semantic qualifier is a different claim, not a weaker one.
-    for field, note in (
-        ("non_additive_dimension", "semi-additive measure"),
-        ("agg_time_dimension", None),
-    ):
-        if field == "agg_time_dimension":
-            continue  # names a time column; does not change the aggregation
-        if measure.get(field):
-            untranslatable.append(
-                f"measure {measure_name} declares {field} ({note}): "
-                f"{measure[field]}")
-            return None, model, untranslatable
-    if isinstance(measure_ref, dict) and measure_ref.get("fill_nulls_with") is not None:
+    # (`agg_time_dimension` names a time column and does not change the
+    # aggregation for a simple metric; cumulative metrics — where it would —
+    # are refused as non-simple above.)
+    if measure.get("non_additive_dimension"):
         untranslatable.append(
-            f"metric declares fill_nulls_with={measure_ref['fill_nulls_with']}, "
-            f"which changes the measure's value for missing periods")
+            f"measure {measure_name} declares non_additive_dimension "
+            f"(semi-additive measure): {measure['non_additive_dimension']}")
         return None, model, untranslatable
+    if isinstance(measure_ref, dict):
+        if measure_ref.get("fill_nulls_with") is not None:
+            untranslatable.append(
+                f"metric declares fill_nulls_with={measure_ref['fill_nulls_with']}, "
+                f"which changes the measure's value for missing periods")
+            return None, model, untranslatable
+        # dbt serializes join_to_timespine on the MEASURE REFERENCE
+        # (`type_params.measure.join_to_timespine`), not on type_params —
+        # the first version guarded a location that does not exist in dbt's
+        # MetricInputMeasure schema, so the refusal never fired on real
+        # manifests and a timespine-joined metric reached proof grade
+        # missing the qualifier that changes its row universe.
+        if measure_ref.get("join_to_timespine"):
+            untranslatable.append(
+                "metric declares join_to_timespine, which changes the row universe")
+            return None, model, untranslatable
     if isinstance(type_params, dict) and type_params.get("join_to_timespine"):
         untranslatable.append(
             "metric declares join_to_timespine, which changes the row universe")
@@ -271,10 +280,18 @@ def _render_agg(agg: str, expr: str, measure: dict) -> str | None:
 
 
 def _find_manifest(root: Path) -> Path:
-    for candidate in (root / "manifest.json", root / "target" / "manifest.json"):
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(f"no manifest.json under {root}")
+    """The manifest dbt most recently wrote.
+
+    When BOTH exist, prefer the NEWER by mtime: `dbt compile` writes only
+    `target/manifest.json`, so a committed copy at the project root (docs/CI
+    artifact) plus a fresh local compile meant the adapter verified the
+    previous run's SQL while the current manifest sat unread in target/.
+    """
+    candidates = [p for p in (root / "manifest.json",
+                              root / "target" / "manifest.json") if p.is_file()]
+    if not candidates:
+        raise FileNotFoundError(f"no manifest.json under {root}")
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _relation(node: dict) -> str:
@@ -323,7 +340,12 @@ def _compiled_sql(root: Path, node: dict) -> tuple[str | None, str | None]:
             except (OSError, UnicodeDecodeError):
                 pass
     raw_code = node.get("raw_code")
-    if raw_code and "{{" not in raw_code:
+    # `{%` too: a raw_code carrying only Jinja STATEMENTS (`{% if ... %}`)
+    # passed the `{{`-only check, became an artifact of template text, then
+    # failed to parse — misclassified as unparseable SQL instead of the
+    # actionable "run `dbt compile`", with the template recorded as the
+    # model's definition.
+    if raw_code and "{{" not in raw_code and "{%" not in raw_code:
         return raw_code, node.get("original_file_path")
     return None, None
 

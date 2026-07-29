@@ -195,7 +195,14 @@ def _body_digests(bodies: dict[str, exp.Expression], dialect: str) -> dict[str, 
         nested: list[str] = []
         saw_cycle = False
         sub_digests: dict[str, str] = {}
-        for ref in sorted({t.name for t in body.find_all(exp.Table)} & set(bodies)):
+        # Only UNQUALIFIED references can point at a CTE — the same guard the
+        # text-replacement below applies. Without it, a body reading the
+        # PHYSICAL `raw.stg` had the unrelated CTE `stg`'s digest folded in
+        # because the base names matched, so renaming that CTE changed this
+        # body's digest and fabricated a CONTRADICTION on a pure refactor.
+        # dbt convention makes `stg`-style base-name collisions routine.
+        for ref in sorted({t.name for t in body.find_all(exp.Table)
+                           if not t.args.get("db")} & set(bodies)):
             if ref in stack:  # recursive CTE — do not fold it into itself
                 saw_cycle = True
                 continue

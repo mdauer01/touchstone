@@ -79,8 +79,9 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                     concept,
                     severity=5,
                     summary=(
-                        f"Declared definition and {len(fps)} computed "
-                        f"definition{'s' if len(fps) != 1 else ''} are canonically identical."
+                        f"{_declared_phrase(claims).capitalize()} and {len(fps)} "
+                        f"computed definition{'s' if len(fps) != 1 else ''} are "
+                        f"canonically identical."
                     ),
                     evidence=base_evidence,
                 )
@@ -97,9 +98,10 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                     concept,
                     severity=40,
                     summary=(
-                        "Definitions differ, but at least one could not be canonicalized "
-                        "to proof grade, so the difference may be an artefact of what "
-                        "could not be resolved rather than a real disagreement."
+                        "Definitions differ, but at least one is below proof grade "
+                        f"({_proof_blockers(fps, expressible)}), so the difference "
+                        "may be an artefact of what could not be resolved rather "
+                        "than a real disagreement."
                     ),
                     evidence=base_evidence,
                 )
@@ -211,7 +213,8 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
             reasons = []
             if not proof_grade:
                 reasons.append(
-                    "at least one definition could not be canonicalized to proof grade"
+                    "at least one definition is below proof grade "
+                    f"({_proof_blockers(fps, expressible)})"
                 )
             if not fully_expressible:
                 reasons.append(
@@ -238,8 +241,9 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                 concept,
                 severity=40,
                 summary=(
-                    f"{len(fps)} computed definitions differ, but at least one could "
-                    "not be canonicalized to proof grade — the difference is unproven."
+                    f"{len(fps)} computed definitions differ, but at least one is "
+                    f"below proof grade ({_proof_blockers(fps, [])}) — the "
+                    "difference is unproven."
                 ),
                 evidence=base_evidence,
             )
@@ -273,11 +277,34 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                     concept,
                     severity=80,
                     summary=(
-                        f"{len(expressible)} declared definitions of this concept "
-                        f"disagree, and nothing in the estate computes it. "
+                        f"{len(declared_hashes)} distinct declared definitions of "
+                        f"this concept disagree (across {len(expressible)} "
+                        f"declarations), and nothing in the estate computes it. "
                         f"{_blame_clause(blame, members)}"
                     ),
                     evidence={**base_evidence, "blame": blame},
+                )
+            )
+        elif len(declared_hashes) > 1:
+            # The same proof-grade gate as every sibling branch — but with an
+            # UNRESOLVED voice, not silence. Gating alone meant a disagreement
+            # between two PROOF-GRADE ontology declarations was swallowed
+            # whenever an unrelated third declaration was merely incomplete:
+            # the concept's only verdict became ORPHAN_CLAIM, with no mention
+            # anywhere that the human-written declarations differ.
+            verdicts.append(
+                _verdict(
+                    VerdictType.UNRESOLVED,
+                    concept,
+                    severity=40,
+                    summary=(
+                        f"{len(declared_hashes)} distinct declared definitions of "
+                        "this concept appear to disagree, but at least one "
+                        "declaration is below proof grade "
+                        f"({_proof_blockers(fps, expressible)}) — the disagreement "
+                        "is unproven. Nothing in the estate computes it."
+                    ),
+                    evidence=base_evidence,
                 )
             )
         verdicts.append(
@@ -307,6 +334,10 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
         )
 
     for alias_names in _alias_groups(fps):
+        # Count NORMALIZED names, print raw spellings: `GMV`/`gmv`/
+        # `gross_merchandise_value` is two names in three spellings, and
+        # "3 different names" overcounted the aliasing.
+        distinct = len({normalize_name(n) for n in alias_names})
         verdicts.append(
             _verdict(
                 VerdictType.ALIASING,
@@ -314,7 +345,7 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                 severity=30,
                 summary=(
                     "Identical canonical definition computed under "
-                    f"{len(alias_names)} different names: {', '.join(sorted(alias_names))}."
+                    f"{distinct} different names: {', '.join(sorted(alias_names))}."
                 ),
                 evidence=base_evidence,
             )
@@ -347,7 +378,61 @@ def _verdict(vt: VerdictType, concept: Concept, severity: int, summary: str, evi
     )
 
 
+def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:
+    """Name each below-proof-grade member with its ACTUAL cause.
+
+    "Could not be canonicalized to proof grade" was asserted for every
+    blocker, but CanonLevel.INCOMPLETE means canonicalization WORKED and the
+    SemanticCore does not model a construct — a TABLESAMPLE in the declared
+    model, say. The old text sent the reader to fix canonicalization while
+    the gap sat named in `claim.error`, unreachable from the verdict.
+    """
+    site_of = _site_names(fps)
+    parts: list[str] = []
+    for fp in fps:
+        if fp.canon_level in PROOF_LEVELS:
+            continue
+        if fp.gaps:
+            parts.append(f"{site_of[fp.short_id]} uses unmodelled constructs: "
+                         + ", ".join(fp.gaps))
+        else:
+            parts.append(f"{site_of[fp.short_id]} canonicalized only to "
+                         f"{fp.canon_level}")
+    for claim in expressible:
+        if claim.canon_level in PROOF_LEVELS:
+            continue
+        label = f"the {claim.provenance.system} declaration of {claim.name}"
+        if claim.gaps:
+            parts.append(f"{label} uses unmodelled constructs: " + ", ".join(claim.gaps))
+        elif claim.error:
+            parts.append(f"{label}: {claim.error}")
+        else:
+            parts.append(f"{label} canonicalized only to {claim.canon_level}")
+    return "; ".join(parts) or "cause unrecorded"
+
+
+def _site_names(fps: list[Fingerprint]) -> dict[str, str]:
+    """fingerprint short_id -> unique human site name.
+
+    Sites were named by RELATION, which is exactly what is non-unique in an
+    estate that defines a relation twice — so the round-four
+    "matches-and-diverges" self-contradictory sentence recurred verbatim
+    there: "Declared definition matches analytics.net_revenue;
+    analytics.net_revenue diverges: ...". When two members share a relation,
+    the provenance object_id disambiguates them.
+    """
+    counts: dict[str, int] = {}
+    for fp in fps:
+        counts[fp.relation] = counts.get(fp.relation, 0) + 1
+    return {
+        fp.short_id: (f"{fp.relation} [{fp.provenance.object_id}]"
+                      if counts[fp.relation] > 1 else fp.relation)
+        for fp in fps
+    }
+
+
 def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) -> list[dict]:
+    site_of = _site_names(fps)
     members = []
     for claim in expressible_claims:
         members.append(
@@ -372,7 +457,7 @@ def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) ->
                 "member_id": fp.short_id,
                 "kind": "computed",
                 "name": fp.concept_candidate,
-                "where": fp.relation,
+                "where": site_of[fp.short_id],
                 "system": fp.provenance.system,
                 "path": fp.provenance.path,
                 "canon_level": fp.canon_level,
@@ -431,10 +516,11 @@ def _split_by_claim(
     fps: list[Fingerprint], expressible_claims: list[Claim]
 ) -> tuple[list[str], list[str]]:
     claim_hashes = {c.core.hash() for c in expressible_claims}
+    site_of = _site_names(fps)
     matching, diverging = [], []
     for fp in fps:
         target = matching if fp.core.hash() in claim_hashes else diverging
-        target.append(f"{fp.relation} ({fp.provenance.system})")
+        target.append(f"{site_of[fp.short_id]} ({fp.provenance.system})")
     return matching, diverging
 
 
@@ -464,11 +550,27 @@ def _ambiguity_clause(fps: list[Fingerprint]) -> str:
     ambiguous = sorted(n for n, hashes in by_name.items() if len(hashes) > 1)
     if not ambiguous:
         return ""
-    spelled = sorted({name for n in ambiguous for name in raw[n]})
-    joined = ", ".join(spelled)
-    verb = "name" if len(spelled) > 1 else "names"
-    return (f" These are grouped because {joined} {verb} more than one "
-            f"computation, which links every definition it spans.")
+    # TWO different stated reasons, because two different things happen. A
+    # single spelling used for two computations genuinely "names more than
+    # one computation". Two DIFFERENT spellings that normalize together
+    # (`orders.count` / `orders_count`) each name exactly one — asserting
+    # otherwise sent a reader grepping for a multi-use name that has one use.
+    # The true reason there is the normalization collision itself.
+    clauses = []
+    for key in ambiguous:
+        spellings = sorted(raw[key])
+        per_spelling = {sp: {fp.core.hash() for fp in fps
+                             if fp.concept_candidate == sp} for sp in spellings}
+        multi_use = sorted(sp for sp, hashes in per_spelling.items() if len(hashes) > 1)
+        if multi_use:
+            clauses.append(f"{', '.join(multi_use)} "
+                           f"{'names' if len(multi_use) == 1 else 'name'} more than "
+                           f"one computation")
+        else:
+            clauses.append(f"{', '.join(spellings)} are treated as the same name "
+                           f"and denote different computations")
+    return (f" These are grouped because {'; and because '.join(clauses)}, "
+            f"which links every definition the name spans.")
 
 
 def _blame_clause(blame: dict, members: list[dict]) -> str:

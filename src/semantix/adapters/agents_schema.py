@@ -53,7 +53,14 @@ _LOOKML_FILTER_RE = re.compile(r'([\w.]+)\s*:\s*"([^"]*)"')
 # plenty of fact tables — while dropping the real `status` filter entirely.
 _LOOKML_LEGACY_BLOCK = re.compile(
     r"\{\s*field\s*:\s*([\w.]+)\s*,\s*value\s*:\s*\"([^\"]*)\"\s*\}", re.IGNORECASE)
-_LOOKML_LEGACY_MARKER = re.compile(r"\bfield\s*:", re.IGNORECASE)
+# `{`-anchored: the bare `\bfield\s*:` marker false-positived on a MODERN
+# filter over a field literally named `field` (`[field: "webinar"]`) and on
+# the token inside an ordinary value (`[category: "field: hockey"]`),
+# refusing ordinary declarations as unreadable legacy blocks.
+_LOOKML_LEGACY_MARKER = re.compile(r"\{\s*field\s*:", re.IGNORECASE)
+# Any brace block the legacy regex did NOT consume — a legacy block in a
+# shape we cannot read must be reported, not dropped.
+_LOOKML_BRACE_BLOCK = re.compile(r"\{[^{}]*\}")
 
 
 def _sql_literal(value: str) -> str:
@@ -214,21 +221,36 @@ def _lookml_filters(raw: str | None) -> tuple[list[str], list[str]]:
     if not raw:
         return [], []
 
+    pairs: list[tuple[str, str]] = []
+    untranslatable_extra: list[str] = []
     if _LOOKML_LEGACY_MARKER.search(raw):
-        pairs = _LOOKML_LEGACY_BLOCK.findall(raw)
-        if not pairs:
-            # It announces itself as the legacy form but does not match the
-            # shape we know. Guessing here is how a filter on `value` got
-            # invented; refuse and say so.
-            return [], [f"{raw} (legacy `filters: {{ field: ..., value: ... }}` "
-                        f"block in a shape this adapter cannot read)"]
+        # Consume the legacy blocks, then process the REMAINDER with the
+        # modern regex. Routing the whole string down one path silently
+        # dropped every filter outside the matched blocks — an exporter that
+        # concatenates a measure's multiple `filters:` parameters produced
+        # `{ field: region, value: "US" } [status: "completed"]`, and the
+        # declared status filter vanished without a trace: a proof-grade
+        # claim missing a declared filter, the exact failure `untranslatable`
+        # exists to prevent.
+        pairs += _LOOKML_LEGACY_BLOCK.findall(raw)
+        remainder = _LOOKML_LEGACY_BLOCK.sub(" ", raw)
+        for block in _LOOKML_BRACE_BLOCK.findall(remainder):
+            if block.strip():
+                untranslatable_extra.append(
+                    f"{block} (legacy `filters: {{ field: ..., value: ... }}` "
+                    f"block in a shape this adapter cannot read)")
+        remainder = _LOOKML_BRACE_BLOCK.sub(" ", remainder)
+        pairs += _LOOKML_FILTER_RE.findall(remainder)
+        if not pairs and not untranslatable_extra:
+            return [], [f"{raw} (legacy filters block in a shape this adapter "
+                        f"cannot read)"]
     else:
         pairs = _LOOKML_FILTER_RE.findall(raw)
         if not pairs:
             return [], [str(raw)]
 
     predicates: list[str] = []
-    untranslatable: list[str] = []
+    untranslatable: list[str] = list(untranslatable_extra)
     for field_name, value in pairs:
         negated = value.startswith("-")
         literal = value[1:] if negated else value
@@ -272,14 +294,28 @@ def claims_from_tables(tables: dict[str, list[dict[str, Any]]],
                           "window", "non_additive_dimension")
             if row.get(field)
         ]
+        # Third-party JSON: `expression`/`description` need not be strings. A
+        # dict there reached SQLite as a bind parameter and killed the whole
+        # scan mid-write with a raw type error — the exact defect fixed for
+        # metrics_yaml scalars, never applied here. A non-string expression is
+        # a shape this adapter does not read; refuse it, do not crash on it.
+        expr = row.get("expression")
+        if expr is not None and not isinstance(expr, str):
+            osi_untranslatable.append(
+                f"expression is not a string ({type(expr).__name__}) — a shape "
+                f"this adapter cannot read")
+            expr = None
+        description = row.get("description") or row.get("ai_context")
+        if description is not None and not isinstance(description, str):
+            description = str(description)
         specs.append(DeclaredSpec(
             system="agents_osi",
             name=str(row["name"]),
-            description=row.get("description") or row.get("ai_context"),
+            description=description,
             # OSI metrics carry no model unless the export resolves the
             # dataset; without one the claim is honestly inexpressible.
             model=str(dataset["source_table"]) if dataset and dataset.get("source_table") else None,
-            expr=row.get("expression"),
+            expr=expr,
             untranslatable=osi_untranslatable,
             path=path,
         ))
@@ -315,6 +351,17 @@ def load_agents_schema(path: str | Path) -> list[DeclaredSpec]:
     p = Path(path)
     if p.suffix.lower() == ".json":
         data = load_json(p)
+        # A KNOWN table whose value is not a list of rows is a malformed
+        # export, and filtering it out silently dropped every declaration in
+        # it — the estate looked smaller than it is. Unknown keys still pass
+        # through quietly (providers publish extras).
+        malformed = [k for k, v in data.items()
+                     if k.lower() in AGENTS_TABLES and not isinstance(v, list)]
+        if malformed:
+            raise ValueError(
+                f"{p}: table(s) {', '.join(sorted(malformed))} are not lists of "
+                f"rows — this export is malformed and its declarations would be "
+                f"silently lost")
         tables = {k.lower(): v for k, v in data.items() if isinstance(v, list)}
         return claims_from_tables(tables, path=str(p))
 

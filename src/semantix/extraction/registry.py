@@ -24,6 +24,12 @@ class SchemaRegistry:
         # relation -> {column: physical terminal columns}
         self._terminals: dict[str, dict[str, tuple[str, ...]]] = {}
         self.physical: set[str] = set(catalog)
+        # Output columns that are AGGREGATE-derived, per registered model. A
+        # declared metric that re-aggregates one of these (`sum(mart.revenue)`
+        # where the mart already sums) is a cross-LEVEL comparison the static
+        # core cannot make honestly — without this record, it produced a
+        # sev-96 CONTRADICTION blaming the mart's own internals.
+        self._agg_outputs: dict[str, set[str]] = {}
         # Cached per dialect: identifier normalization is dialect-specific
         # (Snowflake folds unquoted names to UPPER, most others to lower), so
         # one schema object cannot serve two dialects.
@@ -47,10 +53,12 @@ class SchemaRegistry:
            real estate always mixes: dbt emits `database.schema.model` while a
            hand-written catalog is usually `schema.table`. Whichever arity was
            seen first won and every relation at the other arity silently
-           failed to resolve. Short names are therefore PADDED to the deepest
-           arity present. Padding is safe because sqlglot resolves references
-           by SUFFIX — a two-part `raw.orders` still matches a three-part
-           entry, and vice versa — so nothing is lost and nothing is invented.
+           failed to resolve. Short entries are therefore REPLICATED under
+           every head the full-depth entries actually use (see _nested) —
+           suffix matching alone handles a short REFERENCE against a deep
+           entry, but a fully-qualified reference never matches a
+           placeholder-padded entry, which left hand catalogs at 40%
+           coverage on three-part estates.
 
         3. `database.schema.table` is THREE levels, not a two-level dict with
            a dotted key. Splitting on the last dot only produced
@@ -87,18 +95,48 @@ class SchemaRegistry:
         if not known:
             return {}
         depth = max(len(rel.split(".")) for rel in known)
-        nested: dict[str, dict] = {}
-        for rel, cols in known.items():
+        # Heads observed on FULL-depth entries, e.g. every database name the
+        # estate actually uses. A short entry is REPLICATED under each of
+        # them, not only under the `_` placeholder: sqlglot matches a
+        # fully-qualified reference (`ANALYTICS.RAW.ORDERS`) against the
+        # entry's head part, and `_` never equals `ANALYTICS` — so a
+        # two-part hand catalog against three-part SQL bound nothing and
+        # coverage sat at 40% while the docstring claimed "and vice versa".
+        # A short entry means "wherever this lives", which is exactly what
+        # replication expresses; setdefault keeps real entries authoritative.
+        prefixes: dict[int, set[tuple[str, ...]]] = {}
+        for rel in known:
             parts = rel.split(".")
-            # `_` is not a legal warehouse identifier in the position it
-            # occupies here, so a padded entry can never collide with a real
-            # one; and because lookup is by suffix, the placeholder is never
-            # what a query has to match.
-            parts = ["_"] * (depth - len(parts)) + parts
+            if len(parts) == depth:
+                for length in range(1, depth):
+                    prefixes.setdefault(length, set()).add(tuple(parts[:length]))
+        nested: dict[str, dict] = {}
+
+        def insert(parts: list[str], cols: dict[str, str]) -> None:
             node = nested
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
-            node[parts[-1]] = {c: (t or "text") for c, t in cols.items()}
+            node.setdefault(parts[-1], {c: (t or "text") for c, t in cols.items()})
+
+        for rel, cols in known.items():
+            parts = rel.split(".")
+            pad = depth - len(parts)
+            if pad == 0:
+                insert(parts, cols)
+                continue
+            observed = prefixes.get(pad, set())
+            if observed:
+                # Replication ONLY — adding a `_` fallback beside a
+                # replicated entry gave a short reference two candidate
+                # homes, which sqlglot rightly refuses as ambiguous.
+                for prefix in observed:
+                    insert([*prefix, *parts], cols)
+            else:
+                # No full-depth entry to learn heads from: `_` is not a legal
+                # warehouse identifier here, so the placeholder can never
+                # collide with a real name, and short references still
+                # resolve by suffix.
+                insert(["_"] * pad + parts, cols)
         return nested
 
     def knows(self, relation: str) -> bool:
@@ -119,6 +157,7 @@ class SchemaRegistry:
         already resolvable."""
         cols: dict[str, str] = {}
         terms: dict[str, tuple[str, ...]] = {}
+        agg_outputs: set[str] = set()
         select = unwrap_select(canon_ast)
         if select is not None:
             amap = table_map(select)
@@ -129,6 +168,9 @@ class SchemaRegistry:
                     continue
                 cols[name] = self._projection_type(proj)
                 inner = proj.this if isinstance(proj, exp.Alias) else proj
+                if any(a.find_ancestor(exp.Window) is None
+                       for a in inner.find_all(exp.AggFunc)):
+                    agg_outputs.add(name)
                 terminal_set: set[str] = set()
                 for col in inner.find_all(exp.Column):
                     src = amap.get(col.table) or single or col.table or "<unknown>"
@@ -143,7 +185,12 @@ class SchemaRegistry:
         known_before = relation in self._types and bool(self._types[relation])
         self._types[relation] = cols
         self._terminals[relation] = terms
+        self._agg_outputs[relation] = agg_outputs
         self._add_to_cached_schemas(relation, cols, replaced=known_before)
+
+    def aggregate_outputs(self, relation: str) -> set[str]:
+        """Output columns of a registered model that are aggregate-derived."""
+        return self._agg_outputs.get(relation, set())
 
     def _add_to_cached_schemas(self, relation: str, cols: dict[str, str],
                                replaced: bool) -> None:
@@ -162,13 +209,16 @@ class SchemaRegistry:
         parts = relation.split(".")
         for dialect, schema in list(self._schema_cache.items()):
             depth = schema.depth() or len(parts)
-            if len(parts) > depth:
-                del self._schema_cache[dialect]  # re-pad everything on next read
+            if len(parts) != depth:
+                # A short entry pads by REPLICATION under observed heads
+                # (_nested), which the incremental path cannot reproduce —
+                # and a deeper entry re-pads everything. Both rebuild.
+                del self._schema_cache[dialect]
                 continue
-            padded = ".".join(["_"] * (depth - len(parts)) + parts)
             try:
                 schema.add_table(
-                    padded, {c: (t or "text") for c, t in cols.items()}, dialect=dialect
+                    relation, {c: (t or "text") for c, t in cols.items()},
+                    dialect=dialect,
                 )
             except Exception:  # noqa: BLE001 — fall back to a full rebuild
                 del self._schema_cache[dialect]

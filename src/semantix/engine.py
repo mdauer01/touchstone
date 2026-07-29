@@ -133,9 +133,17 @@ def run_scan(
     unparseable: list[str] = []
     canon_levels: Counter = Counter()
 
+    # Content per duplicated relation, so the ambiguity qualifier can tell a
+    # GENUINE conflict (two different definitions racing for one name) from a
+    # vendored identical copy, which is noise.
+    dupe_content: dict[str, set[str]] = {rel: set() for rel in dupes}
+
     for artifact in artifacts:
         canon = canonicalize_sql(artifact.sql, registry.sqlglot_schema(dialect), dialect)
         canon_levels[canon.level.value] += 1
+        if artifact.relation in dupe_content:
+            rendered = canon.ast.sql(dialect=dialect) if canon.ast is not None else artifact.sql
+            dupe_content[artifact.relation].add(rendered)
         registry.register_model(artifact.relation, canon.ast)
         store.record_artifact(
             kind="computed",
@@ -221,7 +229,9 @@ def run_scan(
             concepts, verdicts, artifacts, execute_seed, dialect
         )
     _qualify_for_unreadable(verdicts, unread)
-    _qualify_for_ambiguous_relations(verdicts, dupes)
+    contested = {rel: dupes[rel] for rel, contents in dupe_content.items()
+                 if len(contents) > 1}
+    _qualify_for_ambiguous_relations(verdicts, concepts, contested)
     _qualify_for_untranslated_claims(verdicts, concepts)
     store.save_results(scan_id, concepts, verdicts)
 
@@ -264,48 +274,97 @@ def _qualify_for_untranslated_claims(verdicts: list[Verdict],
     }
     for verdict in verdicts:
         untranslated = blocked.get(verdict.concept_id) or []
-        if not untranslated:
+        if not untranslated or "untranslated_claims" in verdict.evidence:
             continue
-        if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+        was_certifying = verdict.verdict_type in (VerdictType.CERTIFIED,
+                                                  VerdictType.ALIASING)
+        # ALSO annotate a verdict another qualifier already downgraded.
+        # Skipping it meant a concept blocked by BOTH an unreadable artifact
+        # and an untranslated declaration recorded only the first reason —
+        # fixing the named blocker would reveal a second one the scan had
+        # already seen and not recorded.
+        already_downgraded = (
+            verdict.verdict_type is VerdictType.UNRESOLVED
+            and ("unread_estate" in verdict.evidence
+                 or "ambiguous_relations" in verdict.evidence)
+        )
+        if not (was_certifying or already_downgraded):
             continue
         names = ", ".join(f"{c.name} ({c.provenance.system})" for c in untranslated)
-        verdict.verdict_type = VerdictType.UNRESOLVED
-        verdict.severity = max(verdict.severity, 45)
-        verdict.summary = (
-            f"Cannot certify: {len(untranslated)} declaration(s) of this concept "
-            f"could not be translated and were never compared ({names}). "
-            + verdict.summary
-        )
-        verdict.evidence = {**verdict.evidence,
-                            "untranslated_claims": [c.error for c in untranslated]}
+        note = (f"{len(untranslated)} declaration(s) of this concept could not "
+                f"be translated and were never compared ({names}).")
+        if was_certifying:
+            verdict.verdict_type = VerdictType.UNRESOLVED
+            verdict.severity = max(verdict.severity, 45)
+            verdict.summary = f"Cannot certify: {note} {verdict.summary}"
+        else:
+            verdict.summary = f"{verdict.summary} Additionally: {note}"
+        verdict.evidence = {
+            **verdict.evidence,
+            "untranslated_claims": [
+                c.error or "no machine-readable expression was declared"
+                for c in untranslated
+            ],
+        }
 
 
-def _qualify_for_ambiguous_relations(verdicts: list[Verdict], dupes: dict) -> None:
-    """No certification over a relation the estate defines twice.
+def _qualify_for_ambiguous_relations(verdicts: list[Verdict],
+                                     concepts: list[Concept],
+                                     contested: dict[str, list[str]]) -> None:
+    """No certification over a relation the estate GENUINELY defines twice.
 
-    Two artifacts producing the same relation is a conflict the scan cannot
-    resolve: `registry.register_model` is last-write-wins, so the certified
-    core — and the physical lineage signed into the receipt — is decided by
-    registration order. The same estate certified two DIFFERENT lineages
-    depending on file name ordering, with `scope.complete: true` both times.
-    `duplicate_relations` was computed, reported in stats, and then discarded.
+    Two artifacts producing the same relation with DIFFERENT content is a
+    conflict the scan cannot resolve: `registry.register_model` is
+    last-write-wins, so the certified core — and the physical lineage signed
+    into the receipt — is decided by registration order.
+
+    Two refinements over the first version, which downgraded every
+    certification estate-wide for any duplicate:
+
+    * IDENTICAL duplicates (a vendored copy of the same file) are excluded by
+      the caller before this runs — "what they mean is decided by scan order"
+      is false when both mean the same thing at proof grade.
+    * The downgrade is SCOPED to concepts whose members actually touch a
+      contested relation. Unlike an unreadable artifact — which may define
+      ANY concept — a duplicated relation's blast radius is knowable: both
+      duplicates were read and canonicalized, so a concept whose lineage
+      never meets the collision keeps its certificate. One vendored widget
+      file must not un-certify an estate's revenue.
     """
-    if not dupes:
+    if not contested:
         return
-    names = ", ".join(sorted(dupes)[:3])
-    more = f" (+{len(dupes) - 3} more)" if len(dupes) > 3 else ""
+
+    def touches(concept: Concept) -> list[str]:
+        hit = set()
+        for fp in concept.fingerprints:
+            for relation in contested:
+                if fp.relation == relation or relation in fp.core.join_nodes or any(
+                    col.startswith(relation + ".") for col in fp.core.source_columns
+                ):
+                    hit.add(relation)
+        for claim in concept.claims:
+            if claim.model and claim.model in contested:
+                hit.add(claim.model)
+        return sorted(hit)
+
+    by_id = {c.concept_id: c for c in concepts}
     for verdict in verdicts:
         if verdict.verdict_type not in (VerdictType.CERTIFIED, VerdictType.ALIASING):
             continue
+        concept = by_id.get(verdict.concept_id)
+        hit = touches(concept) if concept else []
+        if not hit:
+            continue
+        names = ", ".join(hit[:3]) + (f" (+{len(hit) - 3} more)" if len(hit) > 3 else "")
         verdict.verdict_type = VerdictType.UNRESOLVED
         verdict.severity = max(verdict.severity, 45)
         verdict.summary = (
-            f"Cannot certify: {len(dupes)} relation(s) are defined by more than "
-            f"one artifact ({names}{more}), so what they mean is decided by scan "
-            f"order rather than by the estate. {verdict.summary}"
+            f"Cannot certify: this concept reads relation(s) defined by more than "
+            f"one artifact with differing content ({names}), so what they mean is "
+            f"decided by scan order rather than by the estate. {verdict.summary}"
         )
         verdict.evidence = {**verdict.evidence,
-                            "ambiguous_relations": {k: sorted(v) for k, v in dupes.items()}}
+                            "ambiguous_relations": {k: contested[k] for k in hit}}
 
 
 def _qualify_for_unreadable(verdicts: list[Verdict], unread: list[str]) -> None:
@@ -374,6 +433,29 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
         )
         return claim
 
+    # A declaration that RE-AGGREGATES a model's aggregate output —
+    # `sum(revenue)` over a mart that already sums — is a cross-LEVEL claim
+    # the static comparison cannot make honestly: the mart's fingerprint is
+    # over its sources, the claim is over the mart, and comparing them
+    # produced a sev-96 CONTRADICTION blaming the mart's own internals for
+    # faithfully restating itself. This is the standard metric-over-mart
+    # pattern, so on a pilot's first scan the flagship report was mostly
+    # top-severity noise. Refuse with the real reason; through-model
+    # resolution is the Phase 1 fix.
+    if spec.model and spec.expr:
+        agg_cols = registry.aggregate_outputs(spec.model)
+        if agg_cols:
+            referenced = _columns_in_expr(spec.expr) & {c.lower() for c in agg_cols}
+            if referenced and _is_aggregate_expr(spec.expr):
+                claim.error = (
+                    f"declares an aggregate over {', '.join(sorted(referenced))}, "
+                    f"which {spec.model} already aggregates — a re-aggregation "
+                    f"the static core cannot compare against the model's own "
+                    f"definition; will not blame the model's internals "
+                    f"(through-model resolution is Phase 1)"
+                )
+                return claim
+
     sql = _synthesize_claim_sql(spec)
     canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
     claim.canon_level = canon.level.value
@@ -405,6 +487,29 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
         claim.error = ("declaration uses constructs the semantic core cannot "
                        "represent: " + "; ".join(fps[0].gaps))
     return claim
+
+
+def _columns_in_expr(expr: str) -> set[str]:
+    """Lowercased column names a declared expression references."""
+    import sqlglot
+    from sqlglot import exp as _exp
+
+    try:
+        node = sqlglot.parse_one(expr)
+    except Exception:  # noqa: BLE001 — arbitrary declared text
+        return set()
+    return {c.name.lower() for c in node.find_all(_exp.Column)}
+
+
+def _is_aggregate_expr(expr: str) -> bool:
+    import sqlglot
+    from sqlglot import exp as _exp
+
+    try:
+        node = sqlglot.parse_one(expr)
+    except Exception:  # noqa: BLE001
+        return False
+    return node.find(_exp.AggFunc) is not None
 
 
 def _synthesize_claim_sql(spec: DeclaredSpec) -> str:

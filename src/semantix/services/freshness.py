@@ -42,7 +42,13 @@ def _sha(text: str) -> str:
 # source declares "I re-checked these systems", including when the source now
 # yields zero artifacts (an emptied file is drift, not an unchecked system).
 SOURCE_SYSTEMS: dict[str, frozenset[str]] = {
-    "dbt_path": frozenset({"dbt"}),
+    # dbt_metrics too: the manifest carries BOTH the models and the Semantic
+    # Layer declarations. Mapping dbt_path to {"dbt"} alone meant declaration
+    # drift in the manifest was PERMANENTLY invisible — no flag existed that
+    # could ever re-check `dbt_metrics`, so a receipt kept verifying after the
+    # declared metric's meaning changed, "partial" forever, from a file the
+    # checker itself had just re-opened.
+    "dbt_path": frozenset({"dbt", "dbt_metrics"}),
     "sql_dir": frozenset({"sql"}),
     "views_path": frozenset({"views"}),
     "metrics_path": frozenset({"metrics_yaml"}),
@@ -78,6 +84,9 @@ def current_estate_shas(
         shas.setdefault((artifact.system, artifact.object_id), set()).add(_sha(artifact.sql))
 
     specs = []
+    if dbt_path:
+        from semantix.adapters.dbt import load_dbt_metrics
+        specs += load_dbt_metrics(dbt_path)
     if metrics_path:
         specs += load_metrics(metrics_path)
     if agents_schema_path:

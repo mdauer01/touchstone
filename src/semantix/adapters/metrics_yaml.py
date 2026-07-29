@@ -49,17 +49,26 @@ def _sql_terms(value, label: str) -> tuple[list[str], list[str]]:
 def load_metrics(path: str | Path) -> list[DeclaredSpec]:
     p = Path(path)
     data = load_yaml(p)
-    if isinstance(data, list):          # a bare list of metrics, no wrapper key
-        entries = data
-    elif isinstance(data, dict):
-        entries = data.get("metrics") or []
-    else:
-        return []
+    entries = data.get("metrics") or []
+    # A wrong-shape `metrics:` — a string, a mapping — was silently ignored:
+    # the scan ran green with `claims 0`, dropping every declaration in the
+    # ONE file the customer authors by hand. Silent ontology loss is the
+    # cardinal sin; a shape error must name the file and the shape.
+    if not isinstance(entries, list):
+        raise ValueError(
+            f"{p}: `metrics` must be a list of metric entries, found "
+            f"{type(entries).__name__} — no declarations were read")
 
     specs = []
-    for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("name"):
-            continue
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{p}: metrics[{index}] must be a mapping, found "
+                f"{type(entry).__name__}: {entry!r}")
+        if not entry.get("name"):
+            raise ValueError(
+                f"{p}: metrics[{index}] has no `name` — a nameless declaration "
+                f"cannot be reconciled and would be silently dropped")
         filters, bad_filters = _sql_terms(entry.get("filters"), "filters")
         group_by, bad_group = _sql_terms(entry.get("group_by"), "group_by")
 

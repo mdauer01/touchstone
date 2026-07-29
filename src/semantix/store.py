@@ -200,6 +200,16 @@ CREATE TABLE IF NOT EXISTS relationship_checks (
     passed        INTEGER NOT NULL,
     evidence_json TEXT NOT NULL
 );
+
+-- Read-path indexes. history()/issue_receipt() walk observations and concepts
+-- on every call; without these, read cost grows with ALL store history per
+-- query (measured: attest 66ms at 30 scans -> 216ms at 120) and publish is
+-- concepts x receipts. Indexes are representation, not history.
+CREATE INDEX IF NOT EXISTS idx_observations_kind ON observations (kind, object_key, observed_at);
+CREATE INDEX IF NOT EXISTS idx_concepts_scan ON concepts (scan_id);
+CREATE INDEX IF NOT EXISTS idx_verdicts_scan ON verdicts (scan_id);
+CREATE INDEX IF NOT EXISTS idx_scan_artifacts_scan ON scan_artifacts (scan_id);
+CREATE INDEX IF NOT EXISTS idx_rel_checks_edge ON relationship_checks (edge_id, checked_at);
 """
 
 
@@ -242,13 +252,62 @@ class Store:
         # failing instantly.
         self._conn = sqlite3.connect(self.path, timeout=120.0)
         self._conn.row_factory = sqlite3.Row
+        self._readonly = False
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.Error:
-            pass  # some filesystems (network mounts) refuse WAL; not fatal
-        self._conn.execute("PRAGMA busy_timeout=120000")
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+            self._conn.execute("PRAGMA busy_timeout=120000")
+            self._conn.executescript(SCHEMA)
+            self._migrate_timestamp_width()
+            self._conn.commit()
+        except sqlite3.OperationalError as e:
+            if "readonly" not in str(e).lower() and "read-only" not in str(e).lower():
+                raise
+            # A store on a read-only mount (locked-down CI, a build artifact)
+            # must still OPEN for the read paths — mcp, asof, history, attest,
+            # verify all advertise read-only service. Running the schema
+            # script unconditionally crashed exactly those. Reconnect with an
+            # immutable read-only URI: a WAL-journal store cannot even be
+            # SELECTed from on a read-only filesystem otherwise (SQLite needs
+            # the -shm file), and a read-only mount guarantees no concurrent
+            # writer, which is the one thing immutable=1 assumes.
+            self._readonly = True
+            self._conn.close()
+            self._conn = sqlite3.connect(
+                f"file:{self.path}?immutable=1", uri=True, timeout=120.0
+            )
+            self._conn.row_factory = sqlite3.Row
+
+    def _migrate_timestamp_width(self) -> None:
+        """One-time canonicalization of pre-millisecond timestamps.
+
+        The millisecond form does NOT text-order against the whole-second
+        rows already in existing stores: '…:00Z' sorts AFTER '…:00.500Z' of
+        the same second ('Z' = 0x5A > '.' = 0x2E) — the OPPOSITE of what the
+        first version of this change claimed. On any store written before the
+        change, `as_of` at a recorded instant returned the superseded
+        definition, `attest --as-of` signed the previous scan's verdict for
+        the whole transition second, and `restatement_check` missed recorded
+        restatements. Comparisons happen as TEXT in SQL and Python alike, so
+        the only sound state is ONE width everywhere.
+
+        This rewrites REPRESENTATION, not history: the instant each row
+        records is unchanged, so the append-only doctrine (no semantic
+        mutation) holds. Receipt payload_json is deliberately untouched —
+        receipts are signed bytes.
+        """
+        for table, column in (
+            ("scans", "started_at"),
+            ("observations", "observed_at"),
+            ("verdicts", "created_at"),
+            ("receipts", "issued_at"),
+            ("relationship_observations", "observed_at"),
+            ("relationship_checks", "checked_at"),
+            ("signing_keys", "created_at"),
+        ):
+            self._conn.execute(
+                f"UPDATE {table} SET {column} = substr({column}, 1, 19) || '.000Z' "
+                f"WHERE length({column}) = 20"
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -300,9 +359,16 @@ class Store:
 
     def scan_as_of(self, ts: str) -> dict | None:
         """The scan that was current at `ts` — the one whose verdicts described
-        the estate at that instant. None if the store had not yet scanned."""
+        the estate at that instant. None if the store had not yet scanned.
+
+        Completed scans only, like `latest_scan`: an interrupted begin-and-die
+        row describes nothing, and serving it made `attest --as-of` refuse
+        with a message that was itself false ("no verdicts recorded") while
+        the completed scan's verdicts sat one row earlier.
+        """
         row = self._conn.execute(
-            "SELECT * FROM scans WHERE started_at <= ? ORDER BY rowid DESC LIMIT 1",
+            "SELECT * FROM scans WHERE started_at <= ? AND stats_json IS NOT NULL "
+            "ORDER BY started_at DESC, rowid DESC LIMIT 1",
             (normalize_ts(ts),),
         ).fetchone()
         return dict(row) if row else None
@@ -532,6 +598,23 @@ class Store:
         return out
 
     def scan_coverage(self) -> list[tuple[str, str, set[str]]]:
+        # Memoized per completed-scan count: history() calls this for every
+        # concept, and rebuilding the full scans x artifacts map each time made
+        # read cost grow with all store history per query. A new scan (or a
+        # write from another process observed on re-read) changes the count
+        # and invalidates.
+        stamp = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM scan_artifacts"
+        ).fetchone()
+        key = (stamp[0], stamp[1])
+        cached = getattr(self, "_coverage_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        result = self._scan_coverage_uncached()
+        self._coverage_cache = (key, result)
+        return result
+
+    def _scan_coverage_uncached(self) -> list[tuple[str, str, set[str]]]:
         """[(scan_id, started_at, OBJECT KEYS this scan actually read)], oldest
         first.
 
@@ -621,9 +704,17 @@ class Store:
         }
         if not matched_labels:
             # Fall back to membership: the caller may have named a member.
+            # The recorded `names` list carries EVERY name the concept goes by
+            # — including claim-only names. Deriving names from fingerprint
+            # candidates alone missed exactly those, so after an alias rename
+            # `history`/`asof` went dark for the estate's own declared metric
+            # name while `issue_receipt` (which had its own fallback) signed a
+            # receipt asserting "no definition was live" — a false statement
+            # about a concept with two live definitions.
             for r in rows:
                 members = json.loads(r["members_json"] or "{}")
-                names = self._names_for(members.get("fingerprints", []))
+                names = set(members.get("names") or []) \
+                    or self._names_for(members.get("fingerprints", []))
                 if any(normalize_name(n) == target for n in names):
                     matched_labels.add(r["label"])
 
@@ -728,13 +819,23 @@ class Store:
                     # only the metrics YAML overlaps on the claims side while
                     # having examined no dbt model at all, which is precisely
                     # the `dbt --select` case that must say nothing.
+                    # MAJORITY overlap, not any-overlap. Boolean overlap made
+                    # ONE shared artifact turn a foreign scan into absence-
+                    # proof for everything it never enumerated: two teams
+                    # syncing a single staging model into both repos retired
+                    # each other's estates on every CI run. A scan is speaking
+                    # about the same estate only if it re-read MOST of what
+                    # the last-seen scan read (same system). The cost is that
+                    # deleting half of a two-model estate is unprovable and
+                    # stays live — absence requires proof, and 50% overlap is
+                    # not proof.
                     prefix = f"{system}:"
                     def _same_system(keys, _p=prefix):
                         return {k for k in keys if k.startswith(_p)}
-                    covers_same_estate = bool(
-                        last_seen_scan
-                        and (_same_system(enumerated)
-                             & _same_system(covered_by.get(last_seen_scan, set())))
+                    cohort = _same_system(covered_by.get(last_seen_scan, set())) \
+                        if last_seen_scan else set()
+                    covers_same_estate = bool(cohort) and (
+                        len(_same_system(enumerated) & cohort) * 2 > len(cohort)
                     )
                     if not (covers_same_estate and runs and runs[-1].valid_to is None):
                         continue
@@ -942,12 +1043,24 @@ class Store:
         # The freshness block was computed against a specific scan; if another
         # scan landed since, its claim no longer describes this receipt's
         # verdicts — degrade rather than attach a stale freshness claim.
-        if freshness and freshness.get("scan_id") not in (None, scan["scan_id"]):
+        # ONLY for a current-instant receipt: an as-of receipt is issued
+        # against a PAST scan by construction, and this check used to fire on
+        # every historical attest with a factually false note ("a new scan
+        # landed" when nothing had landed).
+        if (freshness and not as_of
+                and freshness.get("scan_id") not in (None, scan["scan_id"])):
             freshness = {
                 **freshness,
                 "status": "unknown",
                 "note": "a new scan landed between the freshness check and "
                         "receipt issuance — re-attest",
+            }
+        elif (freshness and as_of
+                and freshness.get("scan_id") not in (None, scan["scan_id"])):
+            freshness = {
+                **freshness,
+                "note": "freshness describes the CURRENT estate, not the "
+                        "as-of instant this receipt is about",
             }
 
         # An `as_of` in the FUTURE is not a question we can answer. `attest X
@@ -1064,15 +1177,29 @@ class Store:
         # `scope`.
         fresh_status = (freshness or {}).get("status")
         if fresh_status in ("stale", "partial", "unknown"):
-            detail = []
-            for key in ("removed", "changed", "added"):
-                if (freshness or {}).get(key):
-                    detail.append(f"{key}: {', '.join(sorted((freshness or {})[key]))}")
+            drift = {key: sorted((freshness or {})[key])
+                     for key in ("removed", "changed", "added")
+                     if (freshness or {}).get(key)}
+            detail = [f"{key}: {', '.join(vals)}" for key, vals in drift.items()]
             note = f"freshness is {fresh_status}" + (
                 f" — {'; '.join(detail)}" if detail else "")
             divergences = divergences + [note]
             scope = {**scope, "freshness": fresh_status}
-            if status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+            # What actually blocks certification:
+            #   stale             — the estate demonstrably drifted;
+            #   unknown           — a check was ATTEMPTED and could not answer;
+            #   partial + drift   — the re-checked half demonstrably drifted.
+            # `partial` with NO drift found used to downgrade too, which
+            # punished the operator for supplying evidence: passing --dbt
+            # yielded a strictly worse receipt than passing nothing. And an
+            # as-of receipt is never downgraded by CURRENT-estate freshness —
+            # "was certified at T; the estate has since drifted" is precisely
+            # what an as-of receipt exists to say, with the drift disclosed
+            # above and the vintage carried in verified_as_of.
+            blocking = fresh_status in ("stale", "unknown") or bool(drift)
+            if (blocking and not as_of
+                    and status in (VerdictType.CERTIFIED.value,
+                                   VerdictType.ALIASING.value)):
                 status = VerdictType.UNRESOLVED.value
 
         # The emitted verdict list must agree with the status. Leaving a
@@ -1103,9 +1230,14 @@ class Store:
             issued_at=utcnow(),
             scan_id=scan["scan_id"],
             verified_as_of=scan["started_at"],
+            # "unchecked", not "unknown": no check was ATTEMPTED. A checked-
+            # but-inconclusive result ("unknown") blocks certification; the
+            # plain `attest <concept>` flow — no estate sources — must not,
+            # or the documented default workflow always refuses. The
+            # distinction is disclosed either way.
             freshness=freshness
             or {
-                "status": "unknown",
+                "status": "unchecked",
                 "note": "estate not re-checked at attest time — pass estate "
                         "sources to attest to enable the freshness check",
             },
@@ -1157,9 +1289,8 @@ def normalize_ts(ts: str) -> str:
         ) from e
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc)
-    # Millisecond precision, matching utcnow. Fixed width and zero-padded, so
-    # text comparison still orders correctly against whole-second timestamps
-    # already written by earlier versions ('...:00Z' < '...:00.000Z' is the
-    # only ordering subtlety, and it puts the older form first, which is the
-    # correct reading of an interval that began before sub-second stamping).
+    # Millisecond precision, matching utcnow. Text ordering is only sound at
+    # ONE width — '…:00Z' sorts AFTER '…:00.500Z' of the same second, NOT
+    # before as an earlier comment claimed — so stores written before this
+    # change are migrated to this width on open (_migrate_timestamp_width).
     return parsed.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"

@@ -29,7 +29,17 @@ from sqlglot import exp
 from semantix.adapters.base import ComputedArtifact, topo_sort
 from semantix.extraction.sqlutil import table_fqname
 
-_DIRECTIVE_RE = re.compile(r"--\s*semantix:\s*relation=([\w.\"]+)", re.IGNORECASE)
+# Each dotted part may be double-quoted, backtick-quoted, or bare. The old
+# character-class regex stopped a quoted name at its first SPACE — so
+# `relation="MY DB".analytics.orders` bound the artifact to a relation named
+# `MY` (a fabricated identity), and a backtick-quoted name silently fell back
+# to the path-derived default. An explicitly declared identity must be read
+# whole or not at all.
+_DIRECTIVE_PART = r'(?:"[^"]+"|`[^`]+`|[\w$]+)'
+_DIRECTIVE_RE = re.compile(
+    rf"--\s*semantix:\s*relation=({_DIRECTIVE_PART}(?:\.{_DIRECTIVE_PART})*)",
+    re.IGNORECASE,
+)
 
 
 def _referenced_relations(sql: str, dialect: str) -> list[str]:
@@ -84,7 +94,7 @@ def load_sql_dir(root: str | Path, dialect: str = "duckdb") -> tuple[list[Comput
             continue
         directive = _DIRECTIVE_RE.search(sql)
         if directive:
-            relation = directive.group(1).replace('"', "")
+            relation = directive.group(1).replace('"', "").replace("`", "")
         else:
             rel_path = path.relative_to(rootp)
             schema = rel_path.parent.name or "public"
@@ -123,6 +133,7 @@ def load_views_file(path: str | Path,
 
     artifacts: list[ComputedArtifact] = []
     skipped: list[dict] = []
+    seen_at: dict[str, int] = {}
     for index, stmt in enumerate(statements):
         if stmt is None:
             continue
@@ -139,6 +150,22 @@ def load_views_file(path: str | Path,
             skipped.append({"object_id": relation, "path": str(p),
                             "reason": "CREATE VIEW carries no body"})
             continue
+        if relation in seen_at:
+            # Later wins — that is what OR REPLACE means, and a replay-shaped
+            # dump's end state is its truth. But the supersession must be
+            # REPORTED: both statements share (system, object_id), so
+            # topo_sort's keyed dedup collapsed them before
+            # duplicate_relations could ever see the collision, and the
+            # superseded contradictor vanished without a trace — the one
+            # remaining silent-loss channel in the non-dbt intake path.
+            skipped.append({
+                "object_id": f"{relation}#{seen_at[relation]}", "path": str(p),
+                "reason": (f"definition of {relation} at statement "
+                           f"{seen_at[relation]} superseded by a later CREATE "
+                           f"VIEW in the same dump — only the last definition "
+                           f"was scanned"),
+            })
+        seen_at[relation] = index
         body_sql = body.sql(dialect=dialect)
         artifacts.append(
             ComputedArtifact(

@@ -473,6 +473,19 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
     else:
         blocking_orphans = None  # N:M fails on cardinality alone
 
+    # Orphans whose DIRECTION rests on non-trivial uniqueness. Uniqueness over
+    # a single value is trivially true, and counting orphans INTO such a side
+    # produced a false accusation on the most ordinary shape there is: a
+    # brand-new fact table with one order made the estate "1:1", after which
+    # every customer without an order yet was a "violation" and the edge
+    # FAILED — telling agents a healthy join is known broken. Only a side that
+    # demonstrated uniqueness over >= 2 values can anchor a violation.
+    trusted_orphans = 0
+    if unique_l and l_total >= 2:
+        trusted_orphans += orphans_r
+    if unique_r and r_total >= 2:
+        trusted_orphans += orphans_l
+
     passed = (unique_l or unique_r) and (blocking_orphans == 0) and no_evidence is None
     parent = (f"{rel_l}.{col_l}" if unique_l else f"{rel_r}.{col_r}") \
         if (unique_l or unique_r) else None
@@ -523,7 +536,7 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
     demonstrated = (
         bool(pk_violations)
         or not (unique_l or unique_r)
-        or bool(blocking_orphans and not empty_sides)
+        or bool(trusted_orphans and not empty_sides)
     )
     if no_evidence and not demonstrated:
         out["inconclusive"] = True
@@ -532,8 +545,8 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
         reasons = []
         if not (unique_l or unique_r):
             reasons.append("no unique side (N:M) — join semantics undefined")
-        elif blocking_orphans and demonstrated:
-            reasons.append(f"{blocking_orphans} orphan value(s) violate referential integrity")
+        elif trusted_orphans and demonstrated:
+            reasons.append(f"{trusted_orphans} orphan value(s) violate referential integrity")
         # Only say "nothing was demonstrated" when nothing WAS. Appending it
         # unconditionally produced a self-contradictory sentence: an orphan
         # count and "nothing was demonstrated" in one breath.
@@ -554,11 +567,20 @@ def same_relation(a: str, b: str) -> bool:
     `PROD.ANALYTICS.FCT_ORDERS` from a dbt manifest matches
     `analytics.fct_orders` from a catalog YAML. Never a substring test:
     `raw.orders` must not match `raw.orders_backup`.
+
+    Suffix tolerance is for QUALIFICATION, not for bare names — mined edges
+    CAN be bare (an unqualified `orders` in query history over an uncataloged
+    registry), and matching that against a failed `analytics.orders` in some
+    other schema de-certified a healthy, fully checkable edge and recorded
+    "orders failed to build" — a false statement — in the append-only check
+    history. Both sides need at least a schema, mirroring execute.py's twin.
     """
     pa = [p for p in a.lower().split(".") if p]
     pb = [p for p in b.lower().split(".") if p]
     n = min(len(pa), len(pb))
-    return bool(n) and pa[-n:] == pb[-n:]
+    if n < 2:
+        return pa == pb
+    return pa[-n:] == pb[-n:]
 
 
 def qcol(column: str) -> str:

@@ -48,10 +48,55 @@ class CanonResult:
 
 # Aggregates whose result depends on the order of the rows they consume. If
 # one of these is present, an ORDER BY in an inner scope is NOT decoration.
+# Compared with underscores stripped: sqlglot's CLASS names have none
+# (ArrayAgg, GroupConcat, AnyValue), while the SQL spellings do — comparing
+# the raw class name meant nine of these eleven entries could NEVER match, so
+# `array_agg`/`string_agg`/`any_value` over a merged-away inner ORDER BY
+# falsely certified. Only FIRST and LAST — the two the round-four test used —
+# happened to match.
 _ORDER_SENSITIVE = (
     "FIRST", "LAST", "ANY_VALUE", "ARG_MAX", "ARG_MIN", "ARBITRARY",
     "ARRAY_AGG", "STRING_AGG", "LISTAGG", "GROUP_CONCAT", "COLLECT_LIST",
+    "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE",
 )
+_ORDER_SENSITIVE_NORM = frozenset(n.replace("_", "") for n in _ORDER_SENSITIVE)
+
+
+def _order_sensitive_names(parsed: exp.Expression) -> set[str]:
+    """Normalized names of order-sensitive functions used OUTSIDE windows.
+
+    A function inside an OVER clause takes its ordering from the window spec,
+    not from the input rows, and is handled by _window_gaps below.
+    """
+    names: set[str] = set()
+    for node in parsed.find_all(exp.AggFunc):
+        if node.find_ancestor(exp.Window) is None:
+            names.add(type(node).__name__.upper().replace("_", ""))
+    for node in parsed.find_all(exp.Anonymous):
+        if node.find_ancestor(exp.Window) is None:
+            names.add(str(node.this).upper().replace("_", ""))
+    return names & _ORDER_SENSITIVE_NORM
+
+
+def _window_gaps(parsed: exp.Expression) -> bool:
+    """Does any window depend on INPUT order rather than its own spec?
+
+    A blanket `parsed.find(exp.Window)` made ANY window function plus ANY
+    inner ORDER BY fire the gap — so mainstream ranked-summary SQL
+    (`rank() over (order by sum(x))` over an ordered staging CTE) could never
+    certify, and the gap text asserted a consumer that does not exist. A
+    window with its OWN ORDER BY is self-specified; only an order-sensitive
+    function over a spec WITHOUT one actually consumes input order.
+    """
+    for window in parsed.find_all(exp.Window):
+        if window.args.get("order") is not None:
+            continue
+        fn = window.this
+        name = (str(fn.this) if isinstance(fn, exp.Anonymous)
+                else type(fn).__name__).upper().replace("_", "")
+        if name in _ORDER_SENSITIVE_NORM:
+            return True
+    return False
 
 
 def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, ...]:
@@ -68,19 +113,19 @@ def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, .
     a staging model is otherwise genuinely neutral, and gating every one of
     them would make ordinary dbt SQL uncertifiable.
     """
+    if not _has_inner_order(parsed):
+        return ()
+    if _order_sensitive_names(parsed) or _window_gaps(parsed):
+        return ("inner ORDER BY consumed by an order-sensitive aggregate",)
+    return ()
+
+
+def _has_inner_order(parsed: exp.Expression) -> bool:
     outermost = unwrap_select(parsed)
-    inner_ordered = any(
+    return any(
         select is not outermost and select.args.get("order") is not None
         for select in parsed.find_all(exp.Select)
     )
-    if not inner_ordered:
-        return ()
-    has_window = parsed.find(exp.Window) is not None
-    consumers = {type(node).__name__.upper() for node in parsed.find_all(exp.AggFunc)}
-    consumers |= {str(node.this).upper() for node in parsed.find_all(exp.Anonymous)}
-    if has_window or consumers & set(_ORDER_SENSITIVE):
-        return ("inner ORDER BY consumed by an order-sensitive aggregate",)
-    return ()
 
 
 def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
@@ -137,15 +182,17 @@ def _strip_neutral(ast: exp.Expression) -> None:
     stripped: they are semantic, and the completeness gate needs to see
     them. (Window-internal ordering lives on exp.Window, untouched here.)
     """
-    # Only the OUTERMOST select's ordering is neutral. Inside a CTE or derived
-    # table, ORDER BY is load-bearing for order-sensitive aggregates in the
-    # scope above — FIRST, LAST, ANY_VALUE, ARG_MAX, ARRAY_AGG — so stripping
-    # it made a staging CTE ordered ASC hash identically to the same CTE
-    # ordered DESC, which computes different numbers. Stripping happens before
-    # CTE bodies are digested, so the digest could not recover it either.
+    # Inner ORDER BY is load-bearing ONLY when an order-sensitive consumer
+    # exists (FIRST, LAST, ARRAY_AGG, a spec-less window over one) — there the
+    # pre-optimization gap fires and the ordering must survive for the digest.
+    # Otherwise an inner ORDER BY is as decorative as an outer one, and
+    # KEEPING it unconditionally fabricated a difference: a staging CTE with a
+    # cosmetic `order by 2` hashed differently from the same CTE without it,
+    # reporting a CONTRADICTION between equivalent models.
+    keep_inner = bool(_order_sensitive_names(ast)) or _window_gaps(ast)
     outermost = unwrap_select(ast)
     for select in ast.find_all(exp.Select):
-        if select is not outermost:
+        if keep_inner and select is not outermost:
             continue
         bounded = select.args.get("limit") is not None or select.args.get("offset") is not None
         if not bounded:
@@ -165,19 +212,31 @@ def _resolve_group_ordinals(ast: exp.Expression) -> None:
         # non-empty but content-free — `rollup(1,2)` over (status, channel)
         # hashed identically to `rollup(1,2)` over (channel, status), which
         # are different breakdowns with different subtotal rows.
-        containers: list[exp.Expression] = [group]
-        for construct in ("rollup", "cube", "grouping_sets"):
-            containers += [n for n in (group.args.get(construct) or [])
-                           if isinstance(n, exp.Expression)]
-        for container in containers:
-            for item in list(container.find_all(exp.Literal)):
-                if not item.is_int:
+        # ONLY a literal that is itself a grouping ITEM is an ordinal. The
+        # previous `container.find_all(exp.Literal)` descended into arbitrary
+        # expressions, so the `2` in `GROUP BY status, customer_id % 2` was
+        # "resolved" to the second projection — splicing a SUM into the middle
+        # of a grouping expression. Two different hash-bucket groupings
+        # (`% 2` vs `% 3`, both pointing at identical projections) then
+        # collapsed to the same garbage grain and FALSELY CERTIFIED.
+        def resolve_items(items: list) -> None:
+            for item in items:
+                if isinstance(item, exp.Tuple):  # GROUPING SETS ((a, 1), ...)
+                    resolve_items(list(item.expressions))
+                    continue
+                if not (isinstance(item, exp.Literal) and item.is_int):
                     continue
                 idx = int(item.this) - 1
                 if 0 <= idx < len(select.expressions):
                     target = select.expressions[idx]
                     target = target.this if isinstance(target, exp.Alias) else target
                     item.replace(target.copy())
+
+        resolve_items(list(group.expressions))
+        for construct in ("rollup", "cube", "grouping_sets"):
+            for node in group.args.get(construct) or []:
+                if isinstance(node, exp.Expression):
+                    resolve_items(list(node.expressions))
 
 
 def normalize_scope(ast: exp.Expression, dialect: str) -> exp.Expression:
@@ -245,10 +304,21 @@ def _canonical_table_aliases(ast: exp.Expression) -> exp.Expression:
         table.set("alias", exp.TableAlias(this=exp.to_identifier(new),
                                           **({"columns": columns} if columns else {})))
 
+    # Rename ONLY columns whose scope is the top select. The rename map covers
+    # the top scope's tables, but `ast.find_all(exp.Column)` descended into
+    # every scope — so a CTE body that happened to reuse a top-scope alias
+    # name (`raw.stg AS stg` in both places, dbt convention) had its columns
+    # rewritten to the OUTER t-alias: invalid SQL, stored at proof grade as
+    # the canonical form, and hash-unstable under pure renames. Correlated
+    # references from subqueries to the outer alias are also skipped — a
+    # missed rename degrades to a difference-hypothesis, the safe direction.
     for column in ast.find_all(exp.Column):
         old = column.table
-        if old and old in rename:
-            column.set("table", exp.to_identifier(rename[old]))
+        if not old or old not in rename:
+            continue
+        if column.find_ancestor(exp.Select) is not select:
+            continue
+        column.set("table", exp.to_identifier(rename[old]))
 
     return ast
 

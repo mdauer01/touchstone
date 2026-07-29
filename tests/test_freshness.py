@@ -101,7 +101,10 @@ def test_unknown_without_sources_or_snapshot(acme, tmp_path):
     assert "predates" in fr["note"]
 
     receipt = store.issue_receipt("net_revenue")  # no freshness passed
-    assert receipt.freshness["status"] == "unknown"
+    # "unchecked", not "unknown": no check was ATTEMPTED. Checked-but-
+    # inconclusive ("unknown") blocks certification; the plain attest flow
+    # must not, or the documented default workflow always refuses.
+    assert receipt.freshness["status"] == "unchecked"
 
 
 def test_freshness_is_inside_the_signature(acme, tmp_path):

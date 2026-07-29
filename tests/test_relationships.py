@@ -441,6 +441,16 @@ def test_cli_requires_a_source(tmp_path, capsys):
     db = str(tmp_path / "empty.db")
     assert main(["mine-relationships", "--db", db]) == 2
     assert "needs --history-file" in capsys.readouterr().err
+
+    # Read commands refuse a nonexistent store rather than silently creating
+    # one — a typo'd --db used to leave a stray empty .db behind and make the
+    # error look like a data problem instead of a path problem.
+    missing = str(tmp_path / "typo.db")
+    assert main(["relationships", "--db", missing]) == 2
+    assert "no store at" in capsys.readouterr().err
+    assert not (tmp_path / "typo.db").exists()
+
+    Store(db)  # now the store exists but holds nothing
     assert main(["verify-relationships", "--db", db]) == 2
     assert "needs --warehouse" in capsys.readouterr().err
     assert main(["relationships", "--db", db]) == 2

@@ -81,6 +81,7 @@ def annotate_with_execution(
     summary["failed_relations"] = sorted(failed)
 
     by_id = {c.concept_id: c for c in concepts}
+    measured_cache: dict[str, dict | None] = {}
     for verdict in verdicts:
         # CONTRADICTION is measured to QUANTIFY a difference we already
         # suspect. CERTIFIED and ALIASING are measured for the opposite and
@@ -96,12 +97,23 @@ def annotate_with_execution(
         concept = by_id.get(verdict.concept_id)
         if concept is None:
             continue
-        measured = _measure_concept(con, concept, verdict, failed, dialect)
+        # ONE measurement per concept, shared across its verdicts. Measuring
+        # per VERDICT ran _measure_concept twice for a concept holding
+        # CONTRADICTION + ALIASING and counted `measured: 2` for one concept.
+        if concept.concept_id in measured_cache:
+            measured = measured_cache[concept.concept_id]
+        else:
+            measured = _measure_concept(con, concept, verdict, failed, dialect)
+            measured_cache[concept.concept_id] = measured
+            if measured is not None and measured.get("measured"):
+                summary["measured"] += 1
         if measured is None:
             continue
         verdict.evidence["measured"] = measured
         if not measured.get("measured"):
-            summary["declined"].append(f"{verdict.concept_label}: {measured['reason']}")
+            decline = f"{verdict.concept_label}: {measured['reason']}"
+            if decline not in summary["declined"]:
+                summary["declined"].append(decline)
             continue
 
         # A falsified canonical equality outranks any divergence figure: it
@@ -127,14 +139,26 @@ def annotate_with_execution(
                 "proved canonically identical compute different values on the "
                 "same data. " + verdict.summary)
 
-        worst = measured.get("max_divergence")
-        if worst:
-            pct = f" ({worst['pct']:+.1f}%)" if worst["pct"] is not None else ""
+        # The divergence suffix belongs ONLY on CONTRADICTION. The measurement
+        # is concept-wide, so the "worst divergence" can be claim-vs-code —
+        # stamping it onto an ALIASING verdict produced an equivalence claim
+        # that reads as self-falsified ("computed under 2 names ... totals
+        # 290 vs baseline 800 (-63.8%)") while the aliases themselves measured
+        # equal. Certifying verdicts get the falsification check (collisions
+        # above) and a disclosure of what could not be measured; the number
+        # that quantifies a DISAGREEMENT goes on the verdict about it.
+        if verdict.verdict_type is VerdictType.CONTRADICTION:
+            worst = measured.get("max_divergence")
+            if worst:
+                pct = f" ({worst['pct']:+.1f}%)" if worst["pct"] is not None else ""
+                verdict.summary += (
+                    f" Measured on seed data: {worst['vs']} totals "
+                    f"{worst['actual']:,.0f} vs baseline {worst['baseline']:,.0f}"
+                    f"{pct}.")
+        elif measured.get("unmeasured_members"):
             verdict.summary += (
-                f" Measured on seed data: {worst['vs']} totals "
-                f"{worst['actual']:,.0f} vs baseline {worst['baseline']:,.0f}"
-                f"{pct}.")
-        summary["measured"] += 1
+                " (execution could not measure "
+                + ", ".join(measured["unmeasured_members"]) + ".)")
     return summary
 
 
@@ -182,12 +206,25 @@ def _relations_read(sql: str, dialect: str) -> set[str] | None:
 
 
 def _visible_ctes(node: exp.Expression) -> set[str]:
-    """CTE aliases in scope at `node`, walking outward from it."""
+    """CTE aliases in scope at `node`, walking outward from it.
+
+    Walks the raw parent chain, not `parent_select`: a WITH attached to a SET
+    OPERATION (`with x as (...) select ... union all select ...`) hangs off
+    the Union node, which `parent_select` skips — so `x` was reported as a
+    physical relation, and a bare-named failed artifact could then falsely
+    taint the measurement.
+    """
     names: set[str] = set()
-    scope = node.parent_select
+    scope = node.parent
     while scope is not None:
-        names |= {cte.alias_or_name.lower() for cte in (scope.ctes or [])}
-        scope = scope.parent_select
+        if isinstance(scope, exp.Expression):
+            # sqlglot spells this arg "with_" (v30) or "with" depending on
+            # version; missing one of them silently reported every CTE
+            # reference as a physical relation.
+            ctes = scope.args.get("with_") or scope.args.get("with")
+            if ctes is not None:
+                names |= {cte.alias_or_name.lower() for cte in ctes.expressions}
+        scope = scope.parent
     return names
 
 
@@ -246,9 +283,14 @@ def _is_additive(measure_expr: str) -> bool:
     # additive. Scaling by a constant is additive too.
     if isinstance(node, (exp.Add, exp.Sub)):
         return _is_additive_node(node.this) and _is_additive_node(node.expression)
-    if isinstance(node, (exp.Mul, exp.Div)):
+    if isinstance(node, exp.Mul):
         additive = [s for s in (node.this, node.expression) if not _is_literal(s)]
         return len(additive) == 1 and _is_additive_node(additive[0])
+    if isinstance(node, exp.Div):
+        # A literal is a scale factor only as the DENOMINATOR. `1000/SUM(x)`
+        # is a reciprocal — summing per-group reciprocals produced a number
+        # with no interpretation, published as measured evidence.
+        return _is_literal(node.expression) and _is_additive_node(node.this)
     return _is_additive_node(node)
 
 
@@ -294,7 +336,7 @@ def _output_is_not_summable(sql: str, dialect: str) -> bool:
     return False
 
 
-def _diverges(a: float, b: float, rel: float = 1e-9) -> bool:
+def _diverges(a: float, b: float, rel: float = 1e-12) -> bool:
     """Do two totals of the SAME canonical definition genuinely disagree?
 
     Compared relatively, not absolutely: an absolute 1e-9 epsilon is tighter
@@ -303,14 +345,18 @@ def _diverges(a: float, b: float, rel: float = 1e-9) -> bool:
     falsified canonical equality — the loudest alarm the engine has.
 
     A flat 1e-9 was calibrated to float64 SUMMATION noise, but warehouse
-    DECIMAL arithmetic is exact and float64 resolution near 5e9 is ~1e-6 —
-    so on a $2bn book the check went blind six orders of magnitude above
-    actual noise and a deterministic $1.50 difference read as sound. The
-    tolerance is now the larger of the relative term and one float ULP at the
-    magnitude being compared, which is the real noise floor.
+    DECIMAL arithmetic is exact — so on a $2bn book the check went blind six
+    orders of magnitude above actual noise and a deterministic $1.50
+    difference read as sound. The first attempt at fixing this WIDENED the
+    tolerance (`max(scale*1e-9, ulp*4)` — a max can only widen, and the ULP
+    term is ~1e-16 relative, so it never won): mathematically dead code that
+    left behavior bit-identical to the bug. The relative term itself must
+    SHRINK. 1e-12 still tolerates a single float64 conversion (~2e-16) and
+    accumulated DOUBLE summation noise over millions of rows (~sqrt(n)·ulp ≈
+    2e-13), while $1.50 on $2bn (7.5e-10) now correctly diverges.
     """
     scale = max(abs(a), abs(b), 1.0)
-    return abs(a - b) > max(scale * rel, math.ulp(scale) * 4)
+    return abs(a - b) > max(scale * rel, math.ulp(scale) * 8)
 
 
 def _total(con, canonical_sql: str, column: str) -> tuple[float | None, str | None]:
@@ -341,11 +387,33 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
                             "column": claim.name, "sql": claim.canonical_sql,
                             "core_hash": claim.core.hash(),
                             "measure_expr": claim.core.measure_expr})
+    branch_only: list[str] = []
     for fp in concept.fingerprints:
+        # A set-operation fingerprint's canonical_sql IS one branch of the
+        # union, by construction (extract_fingerprints descends into
+        # branches[0]). Measuring it publishes a number that describes
+        # NEITHER the model nor anything else — the round-four fix parsed
+        # canonical_sql looking for a Union node it can never contain, so a
+        # `us UNION ALL eu` model still measured 100 instead of 1,900 and
+        # manufactured a +1800% divergence between definitions that agree to
+        # the cent. The one signal that knows is the fingerprint's GAPS.
+        if any("set operation" in g for g in fp.gaps):
+            branch_only.append(fp.relation)
+            continue
         members.append({"where": fp.relation, "kind": "computed",
                         "column": fp.concept_candidate, "sql": fp.canonical_sql,
                         "core_hash": fp.core.hash(),
                         "measure_expr": fp.core.measure_expr})
+    if branch_only and len(members) >= 2:
+        pass  # measurable members remain; the exclusion is disclosed below
+    elif branch_only:
+        return {
+            "method": "duckdb-seed-execution",
+            "measured": False,
+            "reason": ("the stored canonical SQL for a set-operation model is one "
+                       "branch of the union, so any total would describe neither "
+                       "definition: " + ", ".join(sorted(branch_only))),
+        }
     if len(members) < 2:
         return None
 
@@ -479,6 +547,13 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
                             if base_total else None),
                 }
 
+    # Disclose what execution could NOT compare. A certificate over three
+    # definitions where one errored at runtime (or was a branch-only set-op)
+    # was reported `measured: true` with no caveat — the scope of the
+    # certificate exceeded what was actually compared, silently.
+    unmeasured = sorted(
+        {t["where"] for t in totals if t["total"] is None} | set(branch_only)
+    )
     return {
         "method": "duckdb-seed-execution",
         "measured": True,
@@ -486,4 +561,5 @@ def _measure_concept(con, concept: Concept, verdict: Verdict,
         "totals": totals,
         "max_divergence": worst,
         **({"collision_falsified": collisions} if collisions else {}),
+        **({"unmeasured_members": unmeasured} if unmeasured else {}),
     }

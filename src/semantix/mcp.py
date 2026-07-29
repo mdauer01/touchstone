@@ -22,7 +22,7 @@ from dataclasses import asdict
 from typing import Any, Callable, IO
 
 from semantix import __version__
-from semantix.signing import verify_receipt_dict
+from semantix.signing import receipt_trust, verify_receipt_dict
 from semantix.store import Store
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -186,6 +186,20 @@ class McpServer:
         result = {"valid": ok, "detail": message}
         if not ok:
             result["error"] = f"receipt did not verify: {message}"
+            return result
+        # A valid SIGNATURE is not a valid STATUS. This tool is documented as
+        # "check a receipt before trusting its status", and it evaluated bytes
+        # only — the decay check existed solely on the CLI, so the surface
+        # agents actually use kept trusting receipts whose OWN freshness block
+        # says the estate has drifted.
+        trusted, warnings = receipt_trust(args["receipt"])
+        result["trusted"] = trusted
+        if warnings:
+            result["warnings"] = warnings
+        if not trusted:
+            result["valid"] = False
+            result["error"] = ("signature is valid but the receipt cannot be "
+                               "relied on: " + "; ".join(warnings))
         return result
 
     # ---------------------------------------------------------------- rpc core

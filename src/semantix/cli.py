@@ -376,7 +376,13 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         bad = {VerdictType.CONTRADICTION}
         if args.fail_on == "any":
             bad |= {VerdictType.ORPHAN_CLAIM, VerdictType.SHADOW_METRIC, VerdictType.UNRESOLVED}
-        if any(v.verdict_type in bad for v in result.verdicts):
+        failing = [v for v in result.verdicts if v.verdict_type in bad]
+        if failing:
+            # Exiting 1 with no closing line left a CI log that just ends —
+            # the reason must be the last thing printed.
+            kinds = sorted({v.verdict_type.value for v in failing})
+            print(f"\nFAILED --fail-on {args.fail_on}: {len(failing)} verdict(s) "
+                  f"of kind {', '.join(kinds)}", file=sys.stderr)
             return 1
     return 0
 
@@ -384,7 +390,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 def _cmd_diff(args: argparse.Namespace) -> int:
     from semantix.services.diff import diff_verdicts, markdown_comment
 
-    store = Store(args.db)
+    store = _open_existing(args.db)
     diff = diff_verdicts(store, scan_id=args.scan, baseline_scan_id=args.baseline)
     if diff is None:
         print("need two scans in the store to diff (this looks like the first)",
@@ -416,8 +422,21 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_existing(db: str) -> Store:
+    """Open a store that must already exist.
+
+    Read commands used to CREATE an empty .db on a typo'd --db path and then
+    report "no scans recorded" — leaving a stray store behind and making the
+    error look like a data problem rather than a path problem.
+    """
+    if not Path(db).exists():
+        raise ValueError(f"no store at {db} — this command reads an existing "
+                         f"store and will not create one")
+    return Store(db)
+
+
 def _cmd_concepts(args: argparse.Namespace) -> int:
-    store = Store(args.db)
+    store = _open_existing(args.db)
     scan = store.latest_scan()
     if scan is None:
         print("no scans recorded", file=sys.stderr)
@@ -429,7 +448,7 @@ def _cmd_concepts(args: argparse.Namespace) -> int:
 
 
 def _cmd_history(args: argparse.Namespace) -> int:
-    store = Store(args.db)
+    store = _open_existing(args.db)
     intervals = store.history(args.concept)
     if not intervals:
         print(f"no recorded definitions for '{args.concept}'", file=sys.stderr)
@@ -449,7 +468,7 @@ def _cmd_history(args: argparse.Namespace) -> int:
 
 
 def _cmd_asof(args: argparse.Namespace) -> int:
-    store = Store(args.db)
+    store = _open_existing(args.db)
     try:
         live = store.as_of(args.concept, args.at)
     except ValueError as e:
@@ -467,7 +486,7 @@ def _cmd_asof(args: argparse.Namespace) -> int:
 
 
 def _cmd_attest(args: argparse.Namespace) -> int:
-    store = Store(args.db)
+    store = _open_existing(args.db)
     freshness = None
     estate = _estate_kwargs(args)
     if estate is not None:
@@ -506,29 +525,27 @@ def _cmd_verify_receipt(args: argparse.Namespace) -> int:
     except json.JSONDecodeError as e:
         raise ValueError(f"{args.receipt}: is not valid JSON — {e}") from e
 
+    from semantix.signing import receipt_trust
+
     ok, message = verify_receipt_dict(receipt, args.public_key)
     print(message)
     if not ok:
         return 1
 
-    # A valid SIGNATURE is not a valid STATUS. This command is documented to
-    # agents as "check a receipt before trusting its status", and it evaluated
-    # bytes only: a years-old receipt whose own freshness block says `stale`
-    # verified with exit 0 and no qualification at all. The receipt carries
-    # `verified_as_of` and a freshness block precisely so verification can
-    # decay; report both, and refuse to call a stale certificate good.
+    # A valid SIGNATURE is not a valid STATUS — decay lives in receipt_trust,
+    # shared with the MCP tool so both surfaces refuse a stale certificate.
     verified_as_of = receipt.get("verified_as_of")
-    freshness = (receipt.get("freshness") or {}).get("status")
-    status = receipt.get("status")
+    freshness = receipt.get("freshness")
+    fresh_status = freshness.get("status") if isinstance(freshness, dict) else None
     if verified_as_of:
-        print(f"  status {status} · verified as of {verified_as_of}"
-              + (f" · freshness {freshness}" if freshness else ""))
-    if freshness in ("stale", "partial"):
-        print(f"  WARNING: this receipt's own freshness block reports "
-              f"`{freshness}` — the estate has drifted since it was issued; "
-              f"re-attest before relying on it", file=sys.stderr)
-        return 1
-    return 0
+        print(f"  status {receipt.get('status')} · verified as of {verified_as_of}"
+              + (f" · freshness {fresh_status}" if fresh_status else ""))
+    trusted, warnings = receipt_trust(receipt)
+    for warning in warnings:
+        print(f"  WARNING: {warning}", file=sys.stderr)
+    if not trusted and not warnings:
+        print("  WARNING: receipt failed the trust evaluation", file=sys.stderr)
+    return 0 if trusted else 1
 
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
@@ -541,7 +558,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     from semantix.services.writeback import publish_receipts
 
     try:
-        summary = publish_receipts(Store(args.db), args.warehouse)
+        summary = publish_receipts(_open_existing(args.db), args.warehouse)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -688,7 +705,7 @@ def _cmd_verify_relationships(args: argparse.Namespace) -> int:
 
         declared_pks = load_primary_keys(args.catalog)
 
-    store = Store(args.db)
+    store = _open_existing(args.db)
     try:
         results = verify_edges(store, warehouse, top=args.top, declared_pks=declared_pks)
     finally:
@@ -710,7 +727,7 @@ def _cmd_verify_relationships(args: argparse.Namespace) -> int:
 def _cmd_relationships(args: argparse.Namespace) -> int:
     from semantix.services.relationships import graph_with_status
 
-    store = Store(args.db)
+    store = _open_existing(args.db)
     rows = graph_with_status(store, table=args.table)
     if not rows:
         print("no relationships recorded — run mine-relationships first",
@@ -737,6 +754,12 @@ def _print_graph(rows: list[dict]) -> None:
             ev = check["evidence"]
             if ev.get("error"):
                 detail = f"\n      ! {ev['error']}"
+            elif r.get("status") == "unverified":
+                # An inconclusive check's cardinality and parent key were
+                # computed from 0/1-value trivia — the agent view already
+                # nulls them; printing "1:1, parent key ..." here presented
+                # the same two fabricated measurements as facts.
+                detail = f"\n      — {ev.get('reason', 'nothing was demonstrated')}"
             else:
                 detail = f"\n      {ev.get('cardinality', '?')}"
                 if ev.get("parent"):

@@ -52,11 +52,14 @@ _MODELLED_SELECT_ARGS = frozenset({
     "limit", "offset", "order",  # -> a tagged BOUND entry in filters
     "with_", "with",  # CTE bodies folded into join_nodes as a body digest
     "distinct",      # -> a tagged entry in filters, including DISTINCT ON keys
-    "kind",          # SELECT kind marker, not semantic on its own
-    "operation_modifiers",  # rendered into the measure text by sqlglot
+    # NOT modelled, deliberately: "kind" (BigQuery SELECT AS STRUCT changes
+    # the output shape and hashed identically to a plain SELECT) and
+    # Table "joins" (never read by the core; listing it asserted a fold that
+    # does not exist). Deny-by-default means absence here IS the gate.
+    "operation_modifiers",  # MySQL execution hints; result-neutral, unread
     "hint",          # optimizer hints do not change results
 })
-_MODELLED_TABLE_ARGS = frozenset({"this", "db", "catalog", "alias", "joins"})
+_MODELLED_TABLE_ARGS = frozenset({"this", "db", "catalog", "alias"})
 _MODELLED_JOIN_ARGS = frozenset({"this", "on", "side", "kind", "method",
                                  "match_condition", "using"})
 _MODELLED_GROUP_ARGS = frozenset({"expressions", "rollup", "cube",

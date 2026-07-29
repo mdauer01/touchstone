@@ -17,7 +17,10 @@ def _scan(acme, db, **kw):
 def test_contradiction_carries_measured_divergence(acme, tmp_path):
     result, store = _scan(acme, tmp_path / "x.db",
                           execute_seed=str(acme / "seed.sql"))
-    assert result.execution["measured"] == 3   # contradictions AND certifications
+    # CONCEPTS measured, not verdicts: gmv (CERTIFIED + ALIASING) is one
+    # measurement, not two — counting verdicts ran the same concept twice and
+    # reported `measured: 2` for it.
+    assert result.execution["measured"] == 2   # net_revenue + gmv
     assert result.execution["errors"] == []
     # Nothing the engine certified was falsified by the data — the point of
     # measuring certifications at all.

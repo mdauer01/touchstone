@@ -68,6 +68,15 @@ DOC_CONTENT = (
 def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
     """Publish signed receipts for every concept in the latest scan into the
     warehouse's AGENTS.ROOT. Returns a summary of what was written."""
+    # Every other warehouse entry point refuses an unsupported scheme by name;
+    # publish treated any string as a DuckDB path, so `--warehouse
+    # postgres://host/db` died in a raw duckdb IOException.
+    if "://" in warehouse_path and not warehouse_path.startswith("duckdb://"):
+        scheme = warehouse_path.split("://", 1)[0]
+        raise ValueError(
+            f"no {scheme}:// driver shipped yet — publish writes to a DuckDB "
+            f"file (pass a path, or duckdb://path)")
+    warehouse_path = warehouse_path.removeprefix("duckdb://")
     try:
         import duckdb
     except ImportError as e:
