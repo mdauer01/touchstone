@@ -18,6 +18,7 @@ from semantix.adapters.base import (
 from semantix.adapters.catalog import load_catalog
 from semantix.adapters.dbt import load_dbt_detailed, load_dbt_metrics
 from semantix.adapters.metrics_yaml import load_metrics
+from semantix.adapters.ossie import load_ossie
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.extraction.canonicalize import canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
@@ -97,6 +98,7 @@ def run_scan(
     sql_dir: str | None = None,
     views_path: str | None = None,
     agents_schema_path: str | None = None,
+    osi_path: str | None = None,
 ) -> tuple[ScanResult, Store]:
     if not (dbt_path or sql_dir or views_path):
         raise ValueError("no computed-SQL source: pass dbt_path, sql_dir, or views_path")
@@ -201,6 +203,19 @@ def run_scan(
         specs += load_metrics(metrics_path)
     if agents_schema_path:
         specs += load_agents_schema(agents_schema_path)
+    if osi_path:
+        ossie_specs, ossie_skipped = load_ossie(osi_path, dialect)
+        specs += ossie_specs
+        # This runs AFTER the record_artifact_state loop above, so any
+        # non-informational entry is recorded here explicitly — otherwise an
+        # unread Ossie object would be absent from artifact state and a later
+        # scan could read its disappearance as a deletion with proof.
+        for s in ossie_skipped:
+            entry = {**s, "system": "ossie"}
+            skipped.append(entry)
+            if not entry.get("informational"):
+                store.record_artifact_state(scan_id, "ossie",
+                                            entry["object_id"], readable=False)
 
     claims: list[Claim] = []
     for spec in specs:
@@ -478,18 +493,21 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
         filters_raw=tuple(spec.filters),
         group_by_raw=tuple(spec.group_by),
     )
-    if not spec.expr or not spec.model:
-        claim.error = "no expr/model declared — not machine-expressible"
-        return claim
-
     # A claim the adapter could only PARTLY translate is not a weaker claim,
     # it is a different one. Reconciling it would certify or contradict a
     # definition nobody wrote, so it stays inexpressible and says why.
+    # Checked BEFORE the expr/model check: most adapter refusals ship
+    # expr=None, and the generic "no expr/model declared" was masking the
+    # actual reason the adapter took care to write down.
     if spec.untranslatable:
         claim.error = (
             "could not translate part of the declaration, so it cannot be "
             "verified without inventing it: " + "; ".join(spec.untranslatable)
         )
+        return claim
+
+    if not spec.expr or not spec.model:
+        claim.error = "no expr/model declared — not machine-expressible"
         return claim
 
     # A declaration that RE-AGGREGATES a model's aggregate output —

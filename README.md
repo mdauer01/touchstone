@@ -78,7 +78,7 @@ canonical payload**, so it verifies offline:
 **Verification decays honestly.** A verdict describes the estate *at scan time*, so
 every receipt carries `verified_as_of` plus a `freshness` block. Pass the estate's
 sources to `attest` (`--dbt` / `--sql-dir` / `--views` / `--metrics` /
-`--agents-schema`) and it re-hashes them against the scan's recorded snapshot before
+`--agents-schema` / `--osi`) and it re-hashes them against the scan's recorded snapshot before
 answering:
 
 ```bash
@@ -213,6 +213,38 @@ canonicalization rather than guessing. Positioning in one line: **Agents Schema
 tells the agent what a metric means; semantix tells it whether that meaning is
 true — in the same tables, over the same SQL.**
 
+### Apache Ossie: the interchange format, verified
+
+[Apache Ossie](https://github.com/apache/ossie) (incubating; formerly Open
+Semantic Interchange) is the vendor-neutral spec for exchanging semantic
+models, and dbt Core v1.12+ both reads `osi/` documents and emits
+`target/osi_document.json`. Interchange is exactly where definitions drift, so
+Ossie documents are a first-class claims source:
+
+```bash
+.venv/bin/semantix scan --dbt my_project \
+  --osi my_project/osi \        # or my_project/target/osi_document.json
+  --catalog catalog.yml --db out/semantix.db
+```
+
+Spec versions 0.1.0/0.1.1 (the released line dbt accepts) in JSON or YAML.
+Three behaviors are specific to this adapter:
+
+* **Cross-dialect variants are compared, not trusted.** An Ossie metric may
+  carry one expression per dialect (`ANSI_SQL`, `SNOWFLAKE`, `DATABRICKS`,
+  `BIGQUERY`). Each SQL variant is parsed under its own grammar and becomes a
+  sibling claim on the same concept, so the Snowflake text quietly diverging
+  from the ANSI text surfaces as a CONTRADICTION naming the difference.
+  Non-SQL variants (`MDX`/`TABLEAU`/`MAQL`) become inexpressible claims that
+  block certification — a variant nobody read is not a variant that agrees.
+* **Deny by default.** Unmodelled keys anywhere above a metric taint it;
+  `custom_extensions` on a metric (where a vendor round-trip stashes what the
+  spec cannot say) make it inexpressible with the vendor named. Relationships
+  and key declarations are disclosed as unverified rather than dropped.
+* **What dbt drops, we report.** dbt skips unsupported Ossie constructs with
+  a log warning (event `I078`); reading the source documents directly turns
+  those into refusals with reasons in the report.
+
 ### Prove the prover — across dialects
 
 ```bash
@@ -269,7 +301,8 @@ than the name). A gate that never lifts is just a refusal to verify.
 ```
 src/semantix/
   adapters/         L1  dbt manifest+compiled SQL, raw-SQL dirs, view-DDL dumps,
-                        metrics YAML, catalog + declared keys/relationships    (§2)
+                        metrics YAML, Agents Schema, Apache Ossie documents,
+                        catalog + declared keys/relationships                  (§2)
   extraction/       L2  SQLGlot canonicalization ladder, fingerprint builder,
                         schema registry with physical-lineage terminals        (§3)
   store.py          L3  bitemporal, append-only fingerprint store + signing keys,
@@ -341,9 +374,12 @@ windows, and cost controls is still Phase 1) · the CI bot's core (`semantix dif
 attestation MCP server (was Phase 2; receipt schema unchanged) · signed receipts ·
 write-back certification into Agents Schema (`semantix publish`; DuckDB target now,
 Snowflake connector remains) · an Agents Schema claims adapter (second-platform
-declared source: OSI + LookML).
+declared source: OSI + LookML) · an Apache Ossie document adapter (`scan --osi`;
+per-dialect variants as sibling claims, cross-dialect drift as contradictions).
 
-**Still open:** warehouse query-history adapter · telemetry-driven severity ·
+**Still open:** Ossie export (`publish` emitting Ossie documents stamped with the
+receipt hash + `verified_as_of`) · applying Ossie's declared join graph so
+cross-dataset metrics translate · warehouse query-history adapter · telemetry-driven severity ·
 concept-resolution overrides (lineage-overlap clustering first; embedding similarity
 only as candidate generation — consensus signals must never decide a verdict, that is
 the failure mode this engine exists to correct) · IN-list operand normalization (the

@@ -2,7 +2,8 @@
 
     semantix scan (--dbt <dir> | --sql-dir <dir> | --views <dump.sql>)
                   [--metrics m.yml] [--agents-schema export.json|agents.duckdb]
-                  [--catalog c.yml] [--execute seed.sql]
+                  [--osi osi/|osi_document.json] [--catalog c.yml]
+                  [--execute seed.sql]
                   [--db semantix.db] [--report out.html] [--json out.json]
                   [--dialect duckdb] [--label "..."] [--fail-on contradiction]
     semantix publish   --db semantix.db --warehouse agents.duckdb
@@ -12,7 +13,7 @@
     semantix asof      --db semantix.db <concept> --at 2026-03-01T00:00:00Z
     semantix attest    --db semantix.db <concept> [--as-of TS]
                        [--dbt <dir> | --sql-dir <dir> | --views <dump.sql>]
-                       [--metrics m.yml] [--agents-schema ...]   # freshness check
+                       [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
     semantix bench     [--dialects duckdb,databricks,snowflake,bigquery]
 """
 
@@ -48,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
         help="AGENTS.* claims source: a .json export or a DuckDB file with the "
              "AGENTS schema (OSI metrics, LookML measures)",
     )
+    p_scan.add_argument(
+        "--osi", dest="osi_path",
+        help="Apache Ossie documents: an osi/ directory, one document, or "
+             "dbt's target/osi_document.json")
     p_scan.add_argument("--catalog", help="physical catalog YAML (schema.table.column: type)")
     p_scan.add_argument("--db", default="semantix.db")
     p_scan.add_argument("--dialect", default="duckdb")
@@ -239,6 +244,9 @@ def _add_estate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--metrics", help="declared metrics YAML")
     parser.add_argument("--agents-schema", dest="agents_schema_path",
                         help="AGENTS.* claims source (.json or DuckDB file)")
+    parser.add_argument("--osi", dest="osi_path",
+                        help="Apache Ossie documents (osi/ dir, one document, "
+                             "or dbt's target/osi_document.json)")
     parser.add_argument("--dialect", default="duckdb")
 
 
@@ -250,6 +258,7 @@ def _estate_kwargs(args: argparse.Namespace) -> dict | None:
         "views_path": args.views_path,
         "metrics_path": args.metrics,
         "agents_schema_path": args.agents_schema_path,
+        "osi_path": args.osi_path,
     }
     if not any(estate.values()):
         return None
@@ -273,6 +282,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         sql_dir=args.sql_dir,
         views_path=args.views_path,
         agents_schema_path=args.agents_schema_path,
+        osi_path=args.osi_path,
     )
     stats = result.stats()
     print(f"scan {result.scan_id} · {result.observed_at}")

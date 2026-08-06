@@ -53,6 +53,7 @@ SOURCE_SYSTEMS: dict[str, frozenset[str]] = {
     "views_path": frozenset({"views"}),
     "metrics_path": frozenset({"metrics_yaml"}),
     "agents_schema_path": frozenset({"agents_osi", "agents_lookml"}),
+    "osi_path": frozenset({"ossie"}),
 }
 
 
@@ -62,6 +63,7 @@ def current_estate_shas(
     views_path: str | None = None,
     metrics_path: str | None = None,
     agents_schema_path: str | None = None,
+    osi_path: str | None = None,
     dialect: str = "duckdb",
 ) -> dict[tuple[str, str], set[str]]:
     """(system, object_id) -> content shas for the estate as it is right now.
@@ -91,6 +93,9 @@ def current_estate_shas(
         specs += load_metrics(metrics_path)
     if agents_schema_path:
         specs += load_agents_schema(agents_schema_path)
+    if osi_path:
+        from semantix.adapters.ossie import load_ossie
+        specs += load_ossie(osi_path, dialect)[0]
     for spec in specs:
         shas.setdefault((spec.system, spec.name), set()).add(_sha(spec_content_text(spec)))
 
@@ -104,6 +109,7 @@ def check_freshness(
     views_path: str | None = None,
     metrics_path: str | None = None,
     agents_schema_path: str | None = None,
+    osi_path: str | None = None,
     dialect: str | None = None,
 ) -> dict:
     """Freshness block for a receipt issued against the store's latest scan.
@@ -136,6 +142,7 @@ def check_freshness(
         "views_path": views_path,
         "metrics_path": metrics_path,
         "agents_schema_path": agents_schema_path,
+        "osi_path": osi_path,
     }
     checked_systems: set[str] = set()
     for source, value in sources.items():
