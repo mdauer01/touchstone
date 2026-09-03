@@ -182,6 +182,31 @@ seam, and unsupported schemes say so instead of silently degrading.
 introduced* verdicts (plus what the change resolved) — per spec §6, the bot is never
 the messenger for pre-existing debt. `scan --fail-on` remains the absolute gate.
 
+### Monitor: alt definitions in the query stream
+
+The scan verifies the governed estate. `monitor` reads the other one — the
+query stream, where BI tools and analysts compute metrics registered nowhere:
+
+```bash
+.venv/bin/semantix monitor --db out/semantix.db \
+  --history-file history.sql \      # or --warehouse url --history-query "SELECT statement_text FROM system.query.history ..."
+  --dbt my_project --catalog catalog.yml [--min-runs 2] [--fail-on-alt]
+```
+
+Every executed statement is canonicalized through the same registry the scan
+used and fingerprinted; recurring cores (`--min-runs` gates exploration from
+definition) are matched against the latest scan's certified reference set.
+Exact core equality → CONSISTENT USE. Same name, different math → NAMED ALT
+with the component diff ("missing filter `status = 'completed'`"). Same
+measure over the same columns under a different name → CANDIDATE ALT, ranked
+lower because it is a hypothesis — similarity nominates, only equality
+decides, and monitoring accuses a named person's dashboard. Recurring
+measures absent from the estate → UNREGISTERED. Queries below proof grade
+are counted and described, never compared — a blind spot must not anchor an
+accusation. Client-side math (spreadsheet pivots, non-pushdown calculated
+fields) never reaches the warehouse and is explicitly out of scope. v1 is
+read-only: findings are reported, not recorded.
+
 ### Agents Schema: claims in, receipts out
 
 [Agents Schema](https://www.opendatainfrastructure.com/agents-schema) publishes

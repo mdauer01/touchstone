@@ -15,6 +15,9 @@
                        [--dbt <dir> | --sql-dir <dir> | --views <dump.sql>]
                        [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
     semantix bench     [--dialects duckdb,databricks,snowflake,bigquery]
+    semantix monitor   --db semantix.db --history-file history.sql
+                       [--dbt <dir>] [--catalog c.yml] [--min-runs 2]
+                       [--fail-on-alt]        # alt definitions in the query stream
 """
 
 from __future__ import annotations
@@ -207,6 +210,31 @@ def main(argv: list[str] | None = None) -> int:
     p_rel.add_argument("--json", dest="json_out", help="write full graph JSON here")
     p_rel.add_argument("--db", default="semantix.db")
 
+    p_mon = sub.add_parser(
+        "monitor",
+        help="mine executed SQL for alternative definitions of scanned concepts")
+    p_mon.add_argument("--history-file", dest="history_file",
+                       help="file of executed SQL (one statement per execution)")
+    p_mon.add_argument("--warehouse", dest="warehouse_url",
+                       help="warehouse URL to pull history from")
+    p_mon.add_argument("--history-query", dest="history_query",
+                       help="query returning one executed statement per row")
+    p_mon.add_argument("--dbt", help="dbt project dir — rebuilds the scan's "
+                                     "registry so observed columns resolve "
+                                     "to the same terminals")
+    p_mon.add_argument("--sql-dir", dest="sql_dir", help="directory of .sql files")
+    p_mon.add_argument("--views", dest="views_path",
+                       help="file of CREATE VIEW statements")
+    p_mon.add_argument("--catalog", help="catalog YAML (column resolution)")
+    p_mon.add_argument("--dialect", help="history dialect (default: the scan's)")
+    p_mon.add_argument("--min-runs", dest="min_runs", type=int, default=2,
+                       help="occurrences before a recurring measure counts as "
+                            "a definition in use (default 2)")
+    p_mon.add_argument("--json", dest="json_out", help="write full findings JSON here")
+    p_mon.add_argument("--fail-on-alt", dest="fail_on_alt", action="store_true",
+                       help="exit 1 when a named or candidate alt definition is found")
+    p_mon.add_argument("--db", default="semantix.db")
+
     args = parser.parse_args(argv)
     handler = {
         "scan": _cmd_scan,
@@ -223,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         "mine-relationships": _cmd_mine_relationships,
         "verify-relationships": _cmd_verify_relationships,
         "relationships": _cmd_relationships,
+        "monitor": _cmd_monitor,
     }[args.command]
     try:
         return handler(args)
@@ -781,6 +810,106 @@ def _print_graph(rows: list[dict]) -> None:
         print(f"  [{r['status'].upper():<10}] {r['usage']:<14} {r['label']}  · {used}"
               + ("  · competing keys" if r.get("competing_keys") else "")
               + detail)
+
+
+def _cmd_monitor(args: argparse.Namespace) -> int:
+    from semantix.adapters.catalog import load_catalog
+    from semantix.services.monitor import build_registry, monitor_history
+
+    if not args.history_file and not (args.warehouse_url and args.history_query):
+        print("monitor needs --history-file, or --warehouse with "
+              "--history-query", file=sys.stderr)
+        return 2
+    store = _open_existing(args.db)
+    scan = store.latest_scan()
+    if scan is None:
+        print("semantix: no scans recorded — monitor compares the query "
+              "stream against a scan's reference set; run `semantix scan` "
+              "first", file=sys.stderr)
+        return 2
+    dialect = args.dialect or scan.get("dialect") or "duckdb"
+
+    if args.history_file:
+        text = Path(args.history_file).read_text(encoding="utf-8-sig")
+    else:
+        from semantix.warehouse import connect_warehouse
+
+        wh = connect_warehouse(args.warehouse_url)
+        try:
+            rows = wh.query(args.history_query)
+        finally:
+            wh.close()
+        text = ";\n".join(str(r[0]) for r in rows if r and r[0])
+
+    # The observed side must resolve through the SAME registry shape the scan
+    # used — models registered, columns resolved to raw terminals — or its
+    # cores could never equal the reference cores and every consistent use
+    # would misreport as unregistered.
+    artifacts = []
+    if args.dbt:
+        from semantix.adapters.dbt import load_dbt
+        artifacts += load_dbt(args.dbt)
+    if args.sql_dir:
+        from semantix.adapters.sql_dir import load_sql_dir
+        artifacts += load_sql_dir(args.sql_dir, dialect)[0]
+    if args.views_path:
+        from semantix.adapters.sql_dir import load_views_file
+        artifacts += load_views_file(args.views_path, dialect)[0]
+    catalog = load_catalog(args.catalog) if args.catalog else {}
+    registry = build_registry(catalog, artifacts, dialect)
+    if not artifacts and not catalog:
+        print("  ! no estate sources or catalog passed — observed queries "
+              "resolve columns without the scan's registry, so matches "
+              "against models' definitions may misreport as unregistered")
+
+    result = monitor_history(store, text, registry, dialect,
+                             min_runs=args.min_runs)
+    ref = result["reference"]
+    print(f"monitor · against scan {result['scan_id']} · reference "
+          f"{ref['definitions']} definition(s) across {ref['concepts']} "
+          f"concept(s)"
+          + (f" ({ref['excluded_below_proof']} below proof grade excluded)"
+             if ref["excluded_below_proof"] else ""))
+    parts = []
+    for key, label in (("skipped_statements", "unparseable"),
+                       ("non_query_statements", "non-query"),
+                       ("unreadable_statements", "unreadable"),
+                       ("statements_without_measures", "no measure")):
+        if result[key]:
+            parts.append(f"{result[key]} {label}")
+    print(f"history: {result['statements']} statement(s)"
+          + (f" ({', '.join(parts)})" if parts else ""))
+    print(f"observed: {result['observed_definitions']} distinct measure "
+          f"definition(s) · {result['recurring_definitions']} recurring "
+          f"(≥{result['min_runs']} run(s)) · {result['below_min_runs']} "
+          f"below the threshold")
+    print()
+    tags = {"consistent_use": "CONSISTENT", "named_alt_definition": "NAMED ALT",
+            "candidate_alt_definition": "CANDIDATE ALT",
+            "unregistered_recurring_measure": "UNREGISTERED",
+            "unverifiable": "UNVERIFIABLE"}
+    for f in result["findings"]:
+        sev = f" sev {f['severity']:>3}" if f["severity"] else "        "
+        names = ", ".join(f["names_used"]) or "(unnamed)"
+        print(f"  [{tags[f['kind']]:<13}]{sev}  uses {f['uses']:>4}  "
+              f"{names}: {f['summary']}")
+        for component, sides in (f.get("diff") or {}).items():
+            print(f"      {component}: certified {sides['reference']} · "
+                  f"observed {sides['observed']}")
+    if not result["findings"]:
+        print("  no recurring measures met the threshold")
+    print("\n  note: monitor is read-only — findings are reported, not "
+          "recorded in the store")
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(result, indent=2))
+        print(f"  findings JSON: {args.json_out}")
+    alts = [f for f in result["findings"]
+            if f["kind"] in ("named_alt_definition", "candidate_alt_definition")]
+    if args.fail_on_alt and alts:
+        print(f"\nsemantix monitor: FAILED — {len(alts)} alternative "
+              f"definition(s) in use", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_pubkey(args: argparse.Namespace) -> int:

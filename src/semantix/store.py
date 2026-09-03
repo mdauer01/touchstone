@@ -594,6 +594,27 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
+    def claim_row(self, claim_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def concepts_for_scan(self, scan_id: str) -> list[dict]:
+        """Every concept one scan resolved, members parsed. The monitor's
+        reference set: which definitions the estate is known to hold."""
+        rows = self._conn.execute(
+            "SELECT concept_id, label, members_json FROM concepts "
+            "WHERE scan_id = ? ORDER BY label",
+            (scan_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["members"] = json.loads(d.pop("members_json") or "{}")
+            out.append(d)
+        return out
+
     # ------------------------------------------------------------ valid time
 
     def concepts_touching_artifact(self, system: str, object_id: str) -> set[str]:
