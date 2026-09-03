@@ -8,7 +8,6 @@ observed, a clean bill of health read out of a scan that never finished.
 """
 
 import json
-import pathlib
 import shutil
 
 import pytest

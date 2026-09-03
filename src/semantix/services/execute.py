@@ -17,7 +17,6 @@ the evidence, never a failed scan and never a fabricated number.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 

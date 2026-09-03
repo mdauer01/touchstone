@@ -31,12 +31,13 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import sqlglot
 import yaml
 from sqlglot import exp
 
+from semantix.extraction.sqlutil import requalify_columns
 from semantix.models import SemanticCore
 
 FORMATS = ("metrics", "ossie", "uc-metrics")
@@ -51,25 +52,10 @@ _PLAIN_IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
 class Emitted:
     format: str
     text: str
-    model: str
-    expr: str
-    filters: list[str] = field(default_factory=list)
-    group_by: list[str] = field(default_factory=list)
 
     @property
     def suffix(self) -> str:
         return ".json" if self.format == "ossie" else ".yml"
-
-
-def core_from_row(row: dict) -> SemanticCore:
-    """A SemanticCore from a fingerprints/claims table row."""
-    def js(key: str) -> tuple:
-        return tuple(json.loads(row.get(key) or "[]"))
-    return SemanticCore(
-        measure_expr=row.get("measure_expr") or "",
-        filters=js("filters_json"), grain=js("grain_json"),
-        join_nodes=js("join_nodes_json"), join_edges=js("join_edges_json"),
-        source_columns=js("source_columns_json"))
 
 
 def emit_declaration(name: str, core: SemanticCore, dialect: str, fmt: str
@@ -139,18 +125,15 @@ def emit_declaration(name: str, core: SemanticCore, dialect: str, fmt: str
             }],
         }
         text = json.dumps(doc, indent=2) + "\n"
-    return Emitted(format=fmt, text=text, model=model, expr=expr,
-                   filters=filters, group_by=group_by), []
+    return Emitted(format=fmt, text=text), []
 
 
 def _rewrite(text: str, read: str, write: str | None, qualifier: str | None) -> str:
     """Canonical `t0."col"` references -> bare (or dataset-qualified) columns,
     unquoted where the identifier is plain, rendered for the target dialect."""
     node = sqlglot.parse_one(text, read=read)
+    requalify_columns(node, qualifier, only_qualified=False)
     for col in node.find_all(exp.Column):
-        col.set("catalog", None)
-        col.set("db", None)
-        col.set("table", exp.to_identifier(qualifier) if qualifier else None)
         ident = col.this
         if isinstance(ident, exp.Identifier) and _PLAIN_IDENT.match(ident.name):
             ident.set("quoted", False)
@@ -158,5 +141,6 @@ def _rewrite(text: str, read: str, write: str | None, qualifier: str | None) -> 
 
 
 def _field_name(expr_text: str, index: int) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", expr_text.lower()).strip("_")
-    return slug[:48] or f"grain_{index}"
+    from semantix.services.resolution import normalize_name
+
+    return normalize_name(expr_text)[:48] or f"grain_{index}"

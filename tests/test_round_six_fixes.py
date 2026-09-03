@@ -4,8 +4,6 @@ regressions of the previous round's fixes.
 2026-07-29. Six reviewers on 7482163. Every test here failed before its fix.
 """
 
-import json
-import pathlib
 
 import pytest
 

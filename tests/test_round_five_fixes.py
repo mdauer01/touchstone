@@ -12,7 +12,6 @@ Every test here failed before its fix.
 import json
 import pathlib
 import shutil
-import sqlite3
 
 import pytest
 

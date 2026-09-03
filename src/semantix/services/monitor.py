@@ -36,7 +36,6 @@ estate sources, not just the history text.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 
 from sqlglot import exp
@@ -45,16 +44,18 @@ from semantix.extraction.canonicalize import canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.extraction.sqlutil import table_fqname
-from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
+from semantix.models import (
+    PROOF_LEVELS,
+    CanonLevel,
+    Provenance,
+    SemanticCore,
+    core_components,
+    core_diff,
+)
 from semantix.services.relationships import _parse_statements  # same package: one
 # statement-salvage behavior for every history consumer, not two drifting ones.
 from semantix.services.resolution import normalize_name
 from semantix.store import Store
-
-# Core components in evidence order — the same names Verdict evidence uses,
-# so a monitor diff reads like a reconcile diff.
-_COMPONENTS = ("expression", "filters", "grain", "join graph", "physical lineage")
-
 
 @dataclass
 class _RefDef:
@@ -154,10 +155,7 @@ def monitor_history(
             obs.names.add(fp.concept_candidate)
             obs.relations.update(reads)
             obs.statements.add(stmt_id)
-            obs.components = _components(
-                fp.core.measure_expr, fp.core.filters, fp.core.grain,
-                list(fp.core.join_nodes) + list(fp.core.join_edges),
-                fp.core.source_columns)
+            obs.components = core_components(fp.core)
             if fp.canon_level not in PROOF_LEVELS or fp.gaps:
                 obs.proof_grade = False
                 obs.gaps.update(fp.gaps)
@@ -204,7 +202,7 @@ def _reference(store: Store, scan_id: str) -> tuple[list[_RefDef], dict]:
                 concept_label=concept["label"], kind="computed",
                 name=row["concept_candidate"], where=row["relation"],
                 semantic_hash=row["semantic_hash"],
-                components=_components_from_row(row)))
+                components=core_components(SemanticCore.from_row(row))))
         for claim_id in members.get("claims") or []:
             row = store.claim_row(claim_id)
             if row is None:
@@ -217,36 +215,13 @@ def _reference(store: Store, scan_id: str) -> tuple[list[_RefDef], dict]:
                 concept_label=concept["label"], kind="declared",
                 name=row["name"], where=row["model"],
                 semantic_hash=row["semantic_hash"],
-                components=_components_from_row(row)))
+                components=core_components(SemanticCore.from_row(row))))
     return refs, {"concepts": len(concepts), "definitions": len(refs),
                   "excluded_below_proof": excluded}
 
 
-def _components_from_row(row: dict) -> dict:
-    def js(key: str) -> list:
-        return json.loads(row.get(key) or "[]")
-    return _components(row.get("measure_expr") or "", js("filters_json"),
-                       js("grain_json"),
-                       js("join_nodes_json") + js("join_edges_json"),
-                       js("source_columns_json"))
-
-
-def _components(expr: str, filters, grain, join, lineage) -> dict:
-    return {
-        "expression": expr,
-        "filters": sorted(filters),
-        "grain": sorted(grain),
-        "join graph": sorted(join),
-        "physical lineage": sorted(lineage),
-    }
-
-
 def _diff(reference: dict, observed: dict) -> dict:
-    return {
-        key: {"reference": reference[key], "observed": observed[key]}
-        for key in _COMPONENTS
-        if reference[key] != observed[key]
-    }
+    return core_diff(reference, observed, "reference", "observed")
 
 
 def _closest(refs: list[_RefDef], observed: _Observed) -> tuple[_RefDef, dict]:

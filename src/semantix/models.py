@@ -96,6 +96,34 @@ class SemanticCore:
             "physical lineage": list(self.source_columns),
         }
 
+    @classmethod
+    def from_row(cls, row: dict) -> "SemanticCore":
+        """Rehydrate from a fingerprints/claims store row (the *_json columns)."""
+        def js(key: str) -> tuple:
+            return tuple(json.loads(row.get(key) or "[]"))
+        return cls(
+            measure_expr=row.get("measure_expr") or "",
+            filters=js("filters_json"), grain=js("grain_json"),
+            join_nodes=js("join_nodes_json"), join_edges=js("join_edges_json"),
+            source_columns=js("source_columns_json"))
+
+
+COMPONENT_ORDER = ("expression", "filters", "grain", "join graph", "physical lineage")
+
+
+def core_components(core: SemanticCore) -> dict[str, object]:
+    """components() with list members sorted — the order-insensitive view
+    the monitor and proposal diffs compare on."""
+    return {k: (sorted(v) if isinstance(v, list) else v)
+            for k, v in core.components().items()}
+
+
+def core_diff(left: dict, right: dict, left_label: str, right_label: str) -> dict:
+    """Per-component differences between two core_components() views,
+    labelled for whoever reads them (reference/observed, declared/computed)."""
+    return {k: {left_label: left[k], right_label: right[k]}
+            for k in COMPONENT_ORDER if left[k] != right[k]}
+
 
 @dataclass(frozen=True)
 class Provenance:

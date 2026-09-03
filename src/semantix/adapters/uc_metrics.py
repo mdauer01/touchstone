@@ -39,8 +39,9 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from semantix.adapters.base import DeclaredSpec
+from semantix.adapters.base import DeclaredSpec, informational_skip as _info
 from semantix.adapters.loadutil import load_yaml
+from semantix.extraction.sqlutil import requalify_columns
 
 SUPPORTED_VERSIONS = ("1", "1.0", "1.1")
 
@@ -101,11 +102,6 @@ def load_uc_metrics(path: str | Path, dialect: str = "duckdb"
             f"{root}: no metric view definitions found — {len(files)} "
             f"file(s) inspected, none carried `source`")
     return specs, skipped
-
-
-def _info(object_id: str, path: str, reason: str) -> dict:
-    return {"object_id": object_id, "relation": None, "path": path,
-            "reason": reason, "informational": True}
 
 
 def _read_view(f: Path, view: dict, dialect: str,
@@ -283,9 +279,5 @@ def _translate(text: str, tail: str, join_names: set[str], params: set[str],
     if reasons:
         return None, sorted(set(reasons))
 
-    for col in node.find_all(exp.Column):
-        if col.table:
-            col.set("catalog", None)
-            col.set("db", None)
-            col.set("table", exp.to_identifier(tail))
+    requalify_columns(node, tail)
     return node.sql(dialect=dialect), []

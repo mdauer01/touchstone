@@ -26,14 +26,12 @@ meaning, which is the failure it exists to catch.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
-from semantix.models import PROOF_LEVELS
-from semantix.services.emit import Emitted, core_from_row, emit_declaration
+from semantix.models import PROOF_LEVELS, SemanticCore, core_components, core_diff
+from semantix.services.emit import Emitted, emit_declaration
+from semantix.services.resolution import normalize_name
 from semantix.store import Store
-
-_COMPONENTS = ("expression", "filters", "grain", "join graph", "physical lineage")
 
 
 def build_proposals(store: Store, fmt: str = "metrics",
@@ -75,7 +73,8 @@ def build_proposals(store: Store, fmt: str = "metrics",
                 # What the CODE would have to change to match each declaration.
                 "code_changes": [
                     {"declared_by": d["name"], "system": d["system"],
-                     "diff": _diff(d["components"], definition["components"])}
+                     "diff": core_diff(d["components"], definition["components"],
+                                       "declared", "computed")}
                     for d in declared
                 ],
             })
@@ -105,7 +104,8 @@ def write_proposals(result: dict, out_dir: str | Path) -> dict:
             if emitted is None:
                 continue
             site = cand["sites"][0].split(".")[-1] if cand["sites"] else "computed"
-            path = decl_dir / f"{_slug(p['concept'])}__{_slug(site)}{emitted.suffix}"
+            path = decl_dir / (f"{normalize_name(p['concept'])}__"
+                               f"{normalize_name(site)}{emitted.suffix}")
             path.write_text(emitted.text, encoding="utf-8")
             cand["file"] = str(path)
             written.append(str(path))
@@ -183,10 +183,11 @@ def _computed_definitions(store: Store, members: dict) -> list[dict]:
         row = store.fingerprint_row(fp_id)
         if row is None or row["canon_level"] not in PROOF_LEVELS:
             continue
+        core = SemanticCore.from_row(row)
         entry = by_hash.setdefault(row["semantic_hash"], {
-            "hash": row["semantic_hash"], "core": core_from_row(row),
+            "hash": row["semantic_hash"], "core": core,
             "dialect": row.get("dialect") or "duckdb", "sites": [],
-            "components": _components(core_from_row(row))})
+            "components": core_components(core)})
         if row.get("relation"):
             entry["sites"].append(row["relation"])
     for entry in by_hash.values():
@@ -203,21 +204,5 @@ def _declared_definitions(store: Store, members: dict) -> list[dict]:
         prov = json.loads(row.get("provenance_json") or "{}")
         out.append({"name": row["name"], "system": prov.get("system", "?"),
                     "model": row.get("model"),
-                    "components": _components(core_from_row(row))})
+                    "components": core_components(SemanticCore.from_row(row))})
     return out
-
-
-def _components(core) -> dict:
-    return {"expression": core.measure_expr,
-            "filters": sorted(core.filters), "grain": sorted(core.grain),
-            "join graph": sorted(list(core.join_nodes) + list(core.join_edges)),
-            "physical lineage": sorted(core.source_columns)}
-
-
-def _diff(declared: dict, computed: dict) -> dict:
-    return {k: {"declared": declared[k], "computed": computed[k]}
-            for k in _COMPONENTS if declared[k] != computed[k]}
-
-
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "x"

@@ -51,6 +51,21 @@ def table_map(select: exp.Select) -> dict[str, str]:
     return mapping
 
 
+def requalify_columns(node: exp.Expression, table: str | None,
+                      only_qualified: bool = True) -> None:
+    """Rewrite column qualifiers in place to `table` (or strip them when
+    None). Adapters use it to bind a declaration's own naming (`source.`, a
+    dataset alias) to the relation the synthesized claim reads FROM; the
+    emitter uses it in reverse. With only_qualified, bare columns are left
+    alone."""
+    for col in node.find_all(exp.Column):
+        if only_qualified and not col.table:
+            continue
+        col.set("catalog", None)
+        col.set("db", None)
+        col.set("table", exp.to_identifier(table) if table else None)
+
+
 def flatten_conjuncts(node: exp.Expression | None) -> list[exp.Expression]:
     if node is None:
         return []

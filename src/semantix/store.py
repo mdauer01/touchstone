@@ -617,30 +617,6 @@ class Store:
 
     # ------------------------------------------------------------ valid time
 
-    def concepts_touching_artifact(self, system: str, object_id: str) -> set[str]:
-        """Concept labels this artifact has previously contributed a definition
-        to. Used to decide whether an unreadable artifact is a RELEVANT gap:
-        if it once defined `net_revenue`, a scan that cannot read it must not
-        certify `net_revenue`."""
-        refs = {
-            r["ref_id"]
-            # substr, not LIKE: `_` is a LIKE wildcard and dbt object ids are
-            # full of them, so `model.acme.a_b` also matched `model.acme.axb`.
-            for r in self._conn.execute(
-                "SELECT ref_id FROM observations WHERE kind = 'fingerprint' "
-                "AND substr(object_key, 1, ?) = ?",
-                (len(f"{system}:{object_id}:"), f"{system}:{object_id}:"),
-            )
-        }
-        if not refs:
-            return set()
-        labels = set()
-        for r in self._conn.execute("SELECT label, members_json FROM concepts"):
-            members = json.loads(r["members_json"] or "{}")
-            if refs & set(members.get("fingerprints", [])):
-                labels.add(r["label"])
-        return labels
-
     def record_artifact_state(self, scan_id: str, system: str, object_id: str,
                               readable: bool) -> None:
         self._conn.execute(

@@ -46,8 +46,9 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from semantix.adapters.base import DeclaredSpec
+from semantix.adapters.base import DeclaredSpec, informational_skip as _info
 from semantix.adapters.loadutil import load_json, load_yaml
+from semantix.extraction.sqlutil import requalify_columns
 
 SUPPORTED_VERSIONS = ("0.1.0", "0.1.1")
 
@@ -187,11 +188,6 @@ def _unwrap(f: Path, data: object, strict: bool, skipped: list[dict]) -> list[di
     skipped.append(_info(f.name, str(f),
                          "not an Ossie document (no `semantic_model`) — not read"))
     return []
-
-
-def _info(object_id: str, path: str, reason: str) -> dict:
-    return {"object_id": object_id, "relation": None, "path": path,
-            "reason": reason, "informational": True}
 
 
 def _read_document(f: Path, doc: dict, dialect: str,
@@ -536,9 +532,5 @@ def _translate(text: str, read: str | None, d_name: str,
 
     # Qualifiers now provably mean the one dataset; rewrite them to the name
     # the synthesized claim's FROM clause will carry, so qualification binds.
-    for col in node.find_all(exp.Column):
-        if col.table:
-            col.set("catalog", None)
-            col.set("db", None)
-            col.set("table", exp.to_identifier(ds.tail))
+    requalify_columns(node, ds.tail)
     return node.sql(dialect=dialect), ds.source, []

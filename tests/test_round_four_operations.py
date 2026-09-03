@@ -8,8 +8,6 @@ verdicts nobody can read, and a three-part warehouse — the one that made the
 whole engine inert on Snowflake, Databricks and BigQuery.
 """
 
-import pathlib
-import tempfile
 
 import pytest
 

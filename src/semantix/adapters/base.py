@@ -59,6 +59,14 @@ def spec_content_text(spec: DeclaredSpec) -> str:
     )
 
 
+def informational_skip(object_id: str, path: str, reason: str) -> dict:
+    """A `skipped` entry for content that WAS read but is not verified —
+    disclosure only, never absence-blocking (engine.run_scan checks the
+    flag before recording artifact state)."""
+    return {"object_id": object_id, "relation": None, "path": path,
+            "reason": reason, "informational": True}
+
+
 def artifact_key(artifact: ComputedArtifact) -> tuple[str, str]:
     """Identity of an artifact. NOT its relation: two artifacts can legitimately
     target the same relation (a dbt model and a hand-written view, two sources

@@ -80,16 +80,15 @@ def _fn_name(fn: exp.Expression) -> str:
             else type(fn).__name__).upper().replace("_", "")
 
 
-def _has_distinct_on(parsed: exp.Expression) -> bool:
+def _has_distinct_on(select: exp.Select) -> bool:
     """DISTINCT ON is an order-sensitive consumer that is NOT an aggregate:
     its ORDER BY decides which row survives per key. It was invisible to both
     consumer checks, so the deciding ordering was stripped and asc/desc
-    variants falsely certified — the canonical Postgres/DuckDB dedup idiom."""
-    for select in parsed.find_all(exp.Select):
-        distinct = select.args.get("distinct")
-        if isinstance(distinct, exp.Expression) and distinct.args.get("on"):
-            return True
-    return False
+    variants falsely certified — the canonical Postgres/DuckDB dedup idiom.
+    Both consumer checks call this; the check must never live in one of
+    them alone."""
+    distinct = select.args.get("distinct")
+    return isinstance(distinct, exp.Expression) and bool(distinct.args.get("on"))
 
 
 def _order_sensitive_names(parsed: exp.Expression) -> set[str]:
@@ -155,8 +154,7 @@ def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, .
     for select in parsed.find_all(exp.Select):
         if select is outermost or select.args.get("order") is None:
             continue
-        distinct = select.args.get("distinct")
-        if isinstance(distinct, exp.Expression) and distinct.args.get("on"):
+        if _has_distinct_on(select):
             continue
         if id(select) in keep:
             return ("inner ORDER BY consumed by an order-sensitive aggregate",)
@@ -274,12 +272,9 @@ def _strip_neutral(ast: exp.Expression) -> None:
     for select in ast.find_all(exp.Select):
         if id(select) in keep and select is not outermost:
             continue
-        distinct = select.args.get("distinct")
-        if isinstance(distinct, exp.Expression) and distinct.args.get("on"):
-            # DISTINCT ON's ORDER BY decides WHICH row survives per key — the
-            # canonical Postgres/DuckDB dedup idiom. Stripping it certified
-            # asc/desc variants as identical in both outer and inner
-            # positions.
+        if _has_distinct_on(select):
+            # Stripping its ORDER BY certified asc/desc variants as identical
+            # in both outer and inner positions.
             continue
         bounded = select.args.get("limit") is not None or select.args.get("offset") is not None
         if not bounded:

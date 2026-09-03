@@ -8,7 +8,6 @@ no unrendered Jinja.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from semantix.adapters.loadutil import load_json
