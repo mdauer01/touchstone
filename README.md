@@ -425,9 +425,12 @@ Snowflake connector remains) · an Agents Schema claims adapter (second-platform
 declared source: OSI + LookML) · an Apache Ossie document adapter (`scan --osi`;
 per-dialect variants as sibling claims, cross-dialect drift as contradictions).
 
-**Still open:** Ossie export (`publish` emitting Ossie documents stamped with the
-receipt hash + `verified_as_of`) · applying Ossie's declared join graph so
-cross-dataset metrics translate · warehouse query-history adapter · telemetry-driven severity ·
+**Still open:** live Databricks connector (system.query.history and
+information_schema over a real workspace — file-based intake for both ships) ·
+Ossie export (`publish` emitting Ossie documents stamped with the
+receipt hash + `verified_as_of`) · applying the declared join graphs (Ossie
+relationships, metric-view joins) so cross-dataset metrics translate ·
+telemetry-driven severity ·
 concept-resolution overrides (lineage-overlap clustering first; embedding similarity
 only as candidate generation — consensus signals must never decide a verdict, that is
 the failure mode this engine exists to correct) · IN-list operand normalization (the
