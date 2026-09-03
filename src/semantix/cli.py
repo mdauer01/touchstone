@@ -623,6 +623,9 @@ def _cmd_publish(args: argparse.Namespace) -> int:
           f"→ agents.root in {summary['warehouse']} (scan {summary['scan_id']})")
     for key in summary["keys"]:
         print(f"  semantix · {key}")
+    print(f"  semantix.verdicts · {summary['verdict_rows']} row(s) — gate on "
+          f"them via dbt tests (integrations/dbt/semantix), warehouse alerts, "
+          f"or asset checks (docs/action-rails.md)")
     return 0
 
 

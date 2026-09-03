@@ -223,9 +223,26 @@ claims, which makes it both a semantix input and a semantix output:
   --catalog examples/acme/catalog.yml --db out/semantix.db
 
 # Out: signed receipts written back into AGENTS.ROOT (write-back certification,
-# spec §7 Phase 2), plus a skill/verify-metric row teaching agents the check.
+# spec §7 Phase 2), plus a skill/verify-metric row teaching agents the check —
+# and a structured semantix.verdicts projection beside it.
 .venv/bin/semantix publish --db out/semantix.db --warehouse out/agents.duckdb
 ```
+
+### Act on findings — inside rails you already triage
+
+semantix grows no alert channel of its own. `publish` projects verdicts into
+`semantix.verdicts` (one row per verdict per affected relation), and the
+estate's existing immune system gates on it: the shipped **dbt package**
+([integrations/dbt/semantix](integrations/dbt/semantix)) turns findings into
+ordinary tests (`semantix.no_contradictions`, `semantix.certified`,
+`semantix.fresh_scan`) with dbt-native severity that stay red until the
+finding is resolved — state, not a one-shot alert. Non-dbt estates gate on
+the same table through Snowflake/Databricks SQL alerts, Dagster asset
+checks, Soda/Great Expectations checks, or the CLI's exit codes in any
+scheduler — copy-paste templates in
+[docs/action-rails.md](docs/action-rails.md). The doctrinal line every rail
+shares: semantix routes, proposes, and gates; it never auto-decides which
+side of a contradiction is the truth.
 
 The demo export deliberately carries the standard's characteristic
 underspecifications — an OSI metric with no filters, a LookML measure with no

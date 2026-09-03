@@ -12,6 +12,12 @@ plus a `skill/verify-metric` row teaching any SQL-capable agent the check
 documentation row under the unprefixed key `receipt` (per the schema's
 doc-row convention).
 
+Alongside ROOT, publish projects the scan's verdicts into a structured
+`semantix.verdicts` table (one row per verdict per affected relation), so
+findings gate through rails the estate already triages — dbt tests
+(integrations/dbt/semantix), warehouse alerts, orchestrator asset checks —
+rather than through a new alert channel. See docs/action-rails.md.
+
 Replacement semantics follow the standard's own model — provider rows are
 regenerated wholesale on each publish. That is safe here because ROOT is a
 *projection*: the append-only semantix store keeps every receipt and the
@@ -136,11 +142,85 @@ def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
     con.executemany(
         f"INSERT INTO {root} (provider, key, content) VALUES (?, ?, ?)", rows
     )
+    verdict_rows = _publish_verdicts(store, scan, con, catalog)
     con.close()
 
     return {
         "warehouse": warehouse_path,
         "scan_id": scan["scan_id"],
         "receipts": len(rows) - 2,
+        "verdict_rows": verdict_rows,
         "keys": [key for _, key, _ in rows],
     }
+
+
+# Columns the verdicts projection carries. The table exists so the estate's
+# OWN immune system can gate on findings — dbt tests, warehouse alerts,
+# orchestrator asset checks are all "run this SELECT, fail on rows" — instead
+# of semantix growing one more alert channel nobody triages.
+_VERDICT_COLUMNS = ("scan_id", "scanned_at", "published_at", "concept",
+                    "verdict", "severity", "summary", "relation")
+
+
+def _publish_verdicts(store: Store, scan: dict, con, catalog: str) -> int:
+    """Project the latest scan's verdicts, one row per affected relation.
+
+    A verdict is concept-level; consumers gate per-relation (`{{ this }}` in
+    a dbt test) or per-concept. Each verdict therefore lands once per
+    relation its concept touches, plus with relation NULL when the concept
+    touches none — so concept-scoped queries always find it.
+
+    Unlike agents.root (a shared convention this tool must not disturb),
+    semantix.verdicts is OURS: replaced wholesale each publish, a projection
+    of the append-only store, never the record.
+    """
+    relations: dict[str, set[str]] = {}
+    for concept in store.concepts_for_scan(scan["scan_id"]):
+        rels: set[str] = set()
+        for fp_id in concept["members"].get("fingerprints") or []:
+            row = store.fingerprint_row(fp_id)
+            if row and row.get("relation"):
+                rels.add(row["relation"])
+        for claim_id in concept["members"].get("claims") or []:
+            row = store.claim_row(claim_id)
+            if row and row.get("model"):
+                rels.add(row["model"])
+        relations[concept["label"]] = rels
+
+    table = f'"{catalog}".semantix.verdicts'
+    con.execute(f'CREATE SCHEMA IF NOT EXISTS "{catalog}".semantix')
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        "scan_id VARCHAR, scanned_at TIMESTAMPTZ, published_at TIMESTAMPTZ, "
+        "concept VARCHAR, verdict VARCHAR, severity INTEGER, "
+        "summary VARCHAR, relation VARCHAR)"
+    )
+    existing = {
+        r[0].lower()
+        for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE lower(table_schema) = 'semantix' "
+            "AND lower(table_name) = 'verdicts'"
+        ).fetchall()
+    }
+    missing = sorted(set(_VERDICT_COLUMNS) - existing)
+    if existing and missing:
+        raise ValueError(
+            f"semantix.verdicts exists but is missing column(s) "
+            f"{', '.join(missing)} — refusing to write a projection tests "
+            f"would silently misread")
+
+    rows = []
+    for v in store.verdicts_for_scan(scan["scan_id"]):
+        rels = sorted(relations.get(v["concept_label"], set())) or [None]
+        for rel in rels:
+            rows.append((scan["scan_id"], scan["started_at"],
+                         v["concept_label"], v["verdict"], v["severity"],
+                         v["summary"], rel))
+    con.execute(f"DELETE FROM {table}")
+    con.executemany(
+        f"INSERT INTO {table} ({', '.join(_VERDICT_COLUMNS)}) "
+        "VALUES (?, CAST(? AS TIMESTAMPTZ), current_timestamp, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    return len(rows)
