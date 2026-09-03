@@ -18,6 +18,23 @@ it never auto-decides which side of a contradiction is the truth. That
 decision belongs to the owning human; the bitemporal store then records the
 resolution as a definition change.
 
+## Propose: resolutions in the code-review rail
+
+```bash
+semantix propose --db semantix.db --out proposals/ [--format metrics|ossie|uc-metrics]
+gh pr create --body-file proposals/RESOLUTIONS.md   # the memo is the PR body
+```
+
+For each CONTRADICTION: **Option A** — a declaration file emitted from what
+the code computes today, in the ontology's format (the ontology drifted);
+**Option B** — the component diff describing the code change that would
+match the declaration instead (the code drifted). For each SHADOW_METRIC: the
+missing declaration, drafted from the fingerprint — accept it or delete the
+model. Candidates the formats cannot express (join graphs, post-aggregate
+filters, filtered metrics in Ossie 0.1.x) are refused with the reason in the
+memo. Nothing is applied and no PR is opened by the tool: a proposal that
+applied itself would be the verifier deciding meaning.
+
 ## dbt (the richest rail)
 
 Use the shipped package — `integrations/dbt/semantix` — for generic tests

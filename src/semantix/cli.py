@@ -17,6 +17,7 @@
                        [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
     semantix bench     [--dialects duckdb,databricks,snowflake,bigquery]
     semantix catalog   --warehouse duckdb:///wh.db --out catalog.yml
+    semantix propose   --db semantix.db --out proposals/ [--format metrics|ossie|uc-metrics]
     semantix monitor   --db semantix.db --history-file history.sql
                        [--dbt <dir>] [--catalog c.yml] [--min-runs 2]
                        [--fail-on-alt]        # alt definitions in the query stream
@@ -223,6 +224,18 @@ def main(argv: list[str] | None = None) -> int:
     p_cat.add_argument("--out", dest="out_path", required=True,
                        help="catalog YAML to write")
 
+    p_prop = sub.add_parser(
+        "propose",
+        help="draft resolutions for contradictions and declarations for "
+             "shadow metrics — a PR body plus declaration files, nothing applied")
+    p_prop.add_argument("--out", dest="out_dir", required=True,
+                        help="directory to write RESOLUTIONS.md + declarations/")
+    p_prop.add_argument("--format", dest="fmt", default="metrics",
+                        choices=["metrics", "ossie", "uc-metrics"],
+                        help="declaration format to emit (default: metrics YAML)")
+    p_prop.add_argument("--concept", help="only this concept")
+    p_prop.add_argument("--db", default="semantix.db")
+
     p_mon = sub.add_parser(
         "monitor",
         help="mine executed SQL for alternative definitions of scanned concepts")
@@ -266,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         "relationships": _cmd_relationships,
         "monitor": _cmd_monitor,
         "catalog": _cmd_catalog,
+        "propose": _cmd_propose,
     }[args.command]
     try:
         return handler(args)
@@ -930,6 +944,30 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         print(f"\nsemantix monitor: FAILED — {len(alts)} alternative "
               f"definition(s) in use", file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_propose(args: argparse.Namespace) -> int:
+    from semantix.services.propose import build_proposals, write_proposals
+
+    store = _open_existing(args.db)
+    result = build_proposals(store, fmt=args.fmt, concept=args.concept)
+    written = write_proposals(result, args.out_dir)
+    kinds = {"resolution": 0, "promotion": 0}
+    refused = 0
+    for p in result["proposals"]:
+        kinds[p["kind"]] += 1
+        refused += sum(1 for c in p["candidates"] if c["declaration"] is None)
+    print(f"proposals against scan {result['scan_id']}: "
+          f"{kinds['resolution']} contradiction resolution(s), "
+          f"{kinds['promotion']} shadow promotion(s)"
+          + (f" · {refused} candidate(s) could not be emitted (reasons in memo)"
+             if refused else ""))
+    for path in written["declarations"]:
+        print(f"  {path}")
+    print(f"  memo: {written['memo']}")
+    print("  nothing applied — review the memo, pick a direction per concept, "
+          "and open it as a PR (e.g. gh pr create --body-file RESOLUTIONS.md)")
     return 0
 
 

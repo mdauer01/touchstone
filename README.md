@@ -244,6 +244,17 @@ scheduler — copy-paste templates in
 shares: semantix routes, proposes, and gates; it never auto-decides which
 side of a contradiction is the truth.
 
+The *propose* half is `semantix propose --out proposals/`: for every
+CONTRADICTION it emits the definition the code actually computes as a
+declaration in the ontology's own format (`--format metrics|ossie|uc-metrics`)
+— Option A, the ontology drifted — and describes the code change that would
+match the declaration instead — Option B, the code drifted — in a
+`RESOLUTIONS.md` written to be a PR body. SHADOW_METRICs get their missing
+declaration drafted from the fingerprint: accept it or delete the model.
+Nothing is applied; the human picks in the review rail, and a declaration
+emitted from a fingerprint scans back in as CERTIFIED (tested round-trip).
+The same emitter is the Ossie export.
+
 The demo export deliberately carries the standard's characteristic
 underspecifications — an OSI metric with no filters, a LookML measure with no
 grain — and the scan surfaces both as cross-provider contradictions with blame
