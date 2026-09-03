@@ -20,6 +20,7 @@ from semantix.adapters.dbt import load_dbt_detailed, load_dbt_metrics
 from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.ossie import load_ossie
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
+from semantix.adapters.uc_metrics import load_uc_metrics
 from semantix.extraction.canonicalize import canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
@@ -99,6 +100,7 @@ def run_scan(
     views_path: str | None = None,
     agents_schema_path: str | None = None,
     osi_path: str | None = None,
+    uc_metrics_path: str | None = None,
 ) -> tuple[ScanResult, Store]:
     if not (dbt_path or sql_dir or views_path):
         raise ValueError("no computed-SQL source: pass dbt_path, sql_dir, or views_path")
@@ -203,18 +205,22 @@ def run_scan(
         specs += load_metrics(metrics_path)
     if agents_schema_path:
         specs += load_agents_schema(agents_schema_path)
-    if osi_path:
-        ossie_specs, ossie_skipped = load_ossie(osi_path, dialect)
-        specs += ossie_specs
-        # This runs AFTER the record_artifact_state loop above, so any
-        # non-informational entry is recorded here explicitly — otherwise an
-        # unread Ossie object would be absent from artifact state and a later
-        # scan could read its disappearance as a deletion with proof.
-        for s in ossie_skipped:
-            entry = {**s, "system": "ossie"}
+    # These run AFTER the record_artifact_state loop above, so any
+    # non-informational entry is recorded here explicitly — otherwise an
+    # unread declared object would be absent from artifact state and a later
+    # scan could read its disappearance as a deletion with proof.
+    for source_system, path, loader in (("ossie", osi_path, load_ossie),
+                                        ("uc_metrics", uc_metrics_path,
+                                         load_uc_metrics)):
+        if not path:
+            continue
+        source_specs, source_skipped = loader(path, dialect)
+        specs += source_specs
+        for s in source_skipped:
+            entry = {**s, "system": source_system}
             skipped.append(entry)
             if not entry.get("informational"):
-                store.record_artifact_state(scan_id, "ossie",
+                store.record_artifact_state(scan_id, source_system,
                                             entry["object_id"], readable=False)
 
     claims: list[Claim] = []

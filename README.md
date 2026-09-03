@@ -270,6 +270,29 @@ Three behaviors are specific to this adapter:
   a log warning (event `I078`); reading the source documents directly turns
   those into refusals with reasons in the report.
 
+### Unity Catalog metric views + generated catalogs
+
+Databricks metric views (GA April 2026, and what dbt-databricks v1.12
+materializes) are governed measure declarations — a claims source:
+
+```bash
+.venv/bin/semantix catalog --warehouse duckdb://wh.db --out catalog.yml
+.venv/bin/semantix scan --sql-dir models/ \
+  --uc-metrics metric_views/ --catalog catalog.yml --db out/semantix.db
+```
+
+Each `measures[]` entry becomes a claim over the view's `source`, carrying
+the view-level `filter`; expressions are parsed as Databricks SQL and
+rendered for the scan dialect. Semantics that would change the metric's
+meaning are refused with the reason, not approximated: `window:` measures
+(trailing/cumulative/semiadditive), expressions reaching through join
+aliases, `:parameter` references, and measures naming a declared field whose
+expression is not the identity column. Joins (with cardinality),
+parameters, and materialization schedules are disclosed as unverified.
+`semantix catalog` generates the physical catalog from any warehouse's
+ANSI `information_schema.columns` — regenerate it instead of hand-
+maintaining YAML that drifts.
+
 ### Prove the prover — across dialects
 
 ```bash

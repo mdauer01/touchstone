@@ -2,7 +2,8 @@
 
     semantix scan (--dbt <dir> | --sql-dir <dir> | --views <dump.sql>)
                   [--metrics m.yml] [--agents-schema export.json|agents.duckdb]
-                  [--osi osi/|osi_document.json] [--catalog c.yml]
+                  [--osi osi/|osi_document.json] [--uc-metrics views/]
+                  [--catalog c.yml]
                   [--execute seed.sql]
                   [--db semantix.db] [--report out.html] [--json out.json]
                   [--dialect duckdb] [--label "..."] [--fail-on contradiction]
@@ -15,6 +16,7 @@
                        [--dbt <dir> | --sql-dir <dir> | --views <dump.sql>]
                        [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
     semantix bench     [--dialects duckdb,databricks,snowflake,bigquery]
+    semantix catalog   --warehouse duckdb:///wh.db --out catalog.yml
     semantix monitor   --db semantix.db --history-file history.sql
                        [--dbt <dir>] [--catalog c.yml] [--min-runs 2]
                        [--fail-on-alt]        # alt definitions in the query stream
@@ -56,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
         "--osi", dest="osi_path",
         help="Apache Ossie documents: an osi/ directory, one document, or "
              "dbt's target/osi_document.json")
+    p_scan.add_argument(
+        "--uc-metrics", dest="uc_metrics_path",
+        help="Unity Catalog metric view YAML (one file or a directory)")
     p_scan.add_argument("--catalog", help="physical catalog YAML (schema.table.column: type)")
     p_scan.add_argument("--db", default="semantix.db")
     p_scan.add_argument("--dialect", default="duckdb")
@@ -210,6 +215,14 @@ def main(argv: list[str] | None = None) -> int:
     p_rel.add_argument("--json", dest="json_out", help="write full graph JSON here")
     p_rel.add_argument("--db", default="semantix.db")
 
+    p_cat = sub.add_parser(
+        "catalog",
+        help="generate catalog YAML from a warehouse's information_schema")
+    p_cat.add_argument("--warehouse", dest="warehouse_url", required=True,
+                       help="warehouse URL (duckdb:///path.db)")
+    p_cat.add_argument("--out", dest="out_path", required=True,
+                       help="catalog YAML to write")
+
     p_mon = sub.add_parser(
         "monitor",
         help="mine executed SQL for alternative definitions of scanned concepts")
@@ -252,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         "verify-relationships": _cmd_verify_relationships,
         "relationships": _cmd_relationships,
         "monitor": _cmd_monitor,
+        "catalog": _cmd_catalog,
     }[args.command]
     try:
         return handler(args)
@@ -276,6 +290,8 @@ def _add_estate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--osi", dest="osi_path",
                         help="Apache Ossie documents (osi/ dir, one document, "
                              "or dbt's target/osi_document.json)")
+    parser.add_argument("--uc-metrics", dest="uc_metrics_path",
+                        help="Unity Catalog metric view YAML (file or directory)")
     parser.add_argument("--dialect", default="duckdb")
 
 
@@ -288,6 +304,7 @@ def _estate_kwargs(args: argparse.Namespace) -> dict | None:
         "metrics_path": args.metrics,
         "agents_schema_path": args.agents_schema_path,
         "osi_path": args.osi_path,
+        "uc_metrics_path": args.uc_metrics_path,
     }
     if not any(estate.values()):
         return None
@@ -312,6 +329,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         views_path=args.views_path,
         agents_schema_path=args.agents_schema_path,
         osi_path=args.osi_path,
+        uc_metrics_path=args.uc_metrics_path,
     )
     stats = result.stats()
     print(f"scan {result.scan_id} · {result.observed_at}")
@@ -909,6 +927,20 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         print(f"\nsemantix monitor: FAILED — {len(alts)} alternative "
               f"definition(s) in use", file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_catalog(args: argparse.Namespace) -> int:
+    from semantix.adapters.infoschema import generate_catalog, write_catalog_yaml
+    from semantix.warehouse import connect_warehouse
+
+    wh = connect_warehouse(args.warehouse_url)
+    try:
+        catalog = generate_catalog(wh)
+    finally:
+        wh.close()
+    tables, columns = write_catalog_yaml(catalog, args.out_path)
+    print(f"catalog: {tables} table(s), {columns} column(s) -> {args.out_path}")
     return 0
 
 
