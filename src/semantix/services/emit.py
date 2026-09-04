@@ -149,9 +149,9 @@ def emit_declaration(name: str, core: SemanticCore, dialect: str, fmt: str,
     last_reason = "no renderer produced a faithful declaration"
     for write in writers:
         try:
-            expr = _rewrite(core.measure_expr, dialect, write, qualifier)
-            filters = [_rewrite(f, dialect, write, qualifier) for f in core.filters]
-            group_by = [_rewrite(g, dialect, write, qualifier) for g in core.grain]
+            expr = _rewrite(core.measure_expr, dialect, write, qualifier, model)
+            filters = [_rewrite(f, dialect, write, qualifier, model) for f in core.filters]
+            group_by = [_rewrite(g, dialect, write, qualifier, model) for g in core.grain]
         except _Unrenderable as e:
             return None, [str(e)]
         except Exception as e:  # noqa: BLE001 — canonical text is ours, but stay honest
@@ -199,20 +199,27 @@ def _render(fmt: str, name: str, model: str, qualifier: str | None,
     return json.dumps(doc, indent=2) + "\n"
 
 
-def _rewrite(text: str, read: str, write: str | None, qualifier: str | None) -> str:
-    """Canonical `t0."col"` references -> bare (or dataset-qualified) columns,
-    unquoted where the identifier is plain AND not a keyword of the target
-    dialect, rendered for the target dialect."""
+def _rewrite(text: str, read: str, write: str | None, qualifier: str | None,
+             model: str = "") -> str:
+    """Canonical relation-qualified references (`"db"."main"."orders"."col"`)
+    -> bare (or dataset-qualified) columns, unquoted where the identifier is
+    plain AND not a keyword of the target dialect, rendered for the target
+    dialect. A multi-part qualifier that is NOT the model's own name is a
+    struct path and is refused."""
     node = sqlglot.parse_one(text, read=read)
     if node.find(exp.Query) is not None or node.find(exp.Subquery) is not None:
         raise _Unrenderable(
             "expression contains a subquery — stripping its qualifiers turns a "
             "correlated subquery into an uncorrelated one, a different metric")
+    model_parts = [p.lower() for p in model.split(".")] if model else []
     for col in node.find_all(exp.Column):
-        if col.args.get("db") or col.args.get("catalog"):
+        chain = [p.name.lower() for p in (col.args.get("catalog"), col.args.get("db"),
+                                          col.args.get("table")) if p is not None]
+        if len(chain) > 1 and model_parts[-len(chain):] != chain:
             raise _Unrenderable(
-                f"column reference {col.sql()} has more than one qualifier — a "
-                f"struct path would be rewritten as a table qualifier")
+                f"column reference {col.sql()} has a qualifier chain that is not "
+                f"the model's name — a struct path would be rewritten as a table "
+                f"qualifier")
     requalify_columns(node, qualifier, only_qualified=False)
     dcls = Dialect.get_or_raise(write) if write else Dialect
     keywords = {k.upper() for k in dcls.tokenizer_class.KEYWORDS}

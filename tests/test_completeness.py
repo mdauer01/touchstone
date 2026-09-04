@@ -152,4 +152,6 @@ def test_clean_query_hash_is_unchanged_by_the_gate():
            "from raw.orders where status = 'completed' group by 1")
     assert f.canon_level == CanonLevel.OPTIMIZED.value
     assert f.gaps == ()
-    assert f.core.filters == ('t0."status" = \'completed\'',)
+    # Single-source cores render unqualified since round seven (positional
+    # aliases leaked into blame as false "expression" differences).
+    assert f.core.filters == ('"status" = \'completed\'',)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -118,11 +119,37 @@ def core_components(core: SemanticCore) -> dict[str, object]:
             for k, v in core.components().items()}
 
 
+# Positional aliases (`t0.`) and relation qualifier chains
+# (`analytics.fct_orders.`) in canonical text. Anchored on a leading letter
+# so `1.5` survives.
+QUALIFIER_RE = re.compile(r"\b(?:[A-Za-z_][\w$]*\.)+(?=[\w\"$])")
+
+
+def strip_qualifiers(text) -> object:
+    if isinstance(text, str):
+        return QUALIFIER_RE.sub("", text)
+    if isinstance(text, list):
+        return sorted(strip_qualifiers(t) for t in text)
+    return text
+
+
 def core_diff(left: dict, right: dict, left_label: str, right_label: str) -> dict:
     """Per-component differences between two core_components() views,
-    labelled for whoever reads them (reference/observed, declared/computed)."""
-    return {k: {left_label: left[k], right_label: right[k]}
+    labelled for whoever reads them (reference/observed, declared/computed).
+
+    When the JOIN GRAPHS differ, a component whose only difference is how
+    its columns are qualified is not listed: single-source cores render
+    unqualified and multi-source cores by relation, so a mart and a joined
+    query computing the same math would otherwise be blamed for a
+    different "expression". When the join graphs are equal, a qualifier
+    difference names a different table's column and stays."""
+    diff = {k: {left_label: left[k], right_label: right[k]}
             for k in COMPONENT_ORDER if left[k] != right[k]}
+    if "join graph" in diff:
+        for k in ("expression", "filters", "grain"):
+            if k in diff and strip_qualifiers(left[k]) == strip_qualifiers(right[k]):
+                del diff[k]
+    return diff
 
 
 @dataclass(frozen=True)

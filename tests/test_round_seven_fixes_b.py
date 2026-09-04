@@ -221,7 +221,7 @@ def test_monitor_contested_definition_is_not_consistency(tmp_path):
 
 
 def _core(**kw):
-    base = dict(measure_expr='SUM(t0."amount")', filters=(), grain=(),
+    base = dict(measure_expr='SUM("amount")', filters=(), grain=(),
                 join_nodes=("db.main.orders",), join_edges=(),
                 source_columns=("db.main.orders.amount",))
     base.update(kw)
@@ -232,15 +232,16 @@ def test_emit_refuses_distinct_tag_and_subquery():
     _, reasons = emit_declaration("x", _core(filters=("SELECT DISTINCT",)), "duckdb", "metrics")
     assert reasons and "DISTINCT" in reasons[0]
     _, reasons = emit_declaration(
-        "x", _core(measure_expr='SUM(t0."amount") / (SELECT COUNT(*) FROM "db"."main"."orders" AS "o2" '
-                                'WHERE "o2"."customer_id" = t0."customer_id")'),
+        "x", _core(measure_expr='SUM("amount") / (SELECT COUNT(*) FROM '
+                                '"db"."main"."orders" AS "o2" '
+                                'WHERE "o2"."customer_id" = "customer_id")'),
         "duckdb", "metrics")
     assert reasons and "subquery" in reasons[0]
 
 
 def test_emit_keeps_reserved_words_quoted():
     emitted, reasons = emit_declaration(
-        "x", _core(measure_expr='COUNT(t0."from")', source_columns=("db.main.orders.from",)),
+        "x", _core(measure_expr='COUNT("from")', source_columns=("db.main.orders.from",)),
         "duckdb", "metrics")
     assert not reasons
     assert '"from"' in yaml.safe_load(emitted.text)["metrics"][0]["expr"]
@@ -315,3 +316,73 @@ def test_warehouse_url_grammar(tmp_path):
         wh = connect_warehouse(url)
         assert wh.query("SELECT count(*) FROM t")[0][0] == 0
         wh.close()
+
+
+# ------------------------------------------ join order and alias numbering
+
+
+JOIN_CATALOG = {"db.main.orders": {"customer_id": "INT", "amount": "DOUBLE",
+                                   "status": "TEXT", "id": "INT", "parent_id": "INT"},
+                "db.main.customers": {"customer_id": "INT", "segment": "TEXT"}}
+
+
+def _fp(sql: str):
+    from semantix.extraction.canonicalize import canonicalize_sql
+    from semantix.extraction.fingerprint import extract_fingerprints
+    from semantix.models import PROOF_LEVELS, Provenance
+    registry = SchemaRegistry(JOIN_CATALOG)
+    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    (fp,) = extract_fingerprints(canon, "db.main.m", Provenance("t", "m"), "duckdb", registry)
+    assert fp.canon_level in PROOF_LEVELS and not fp.gaps, (canon.level, canon.error, fp.gaps)
+    return fp
+
+
+def test_inner_join_order_and_predicate_placement_do_not_change_the_core():
+    a = _fp("SELECT SUM(o.amount) AS seg_revenue FROM db.main.orders o "
+            "JOIN db.main.customers c ON o.customer_id = c.customer_id "
+            "WHERE c.segment = 'smb'")
+    b = _fp("SELECT SUM(o.amount) AS seg_revenue FROM db.main.customers c "
+            "JOIN db.main.orders o ON c.customer_id = o.customer_id "
+            "WHERE c.segment = 'smb'")
+    c = _fp("SELECT SUM(o.amount) AS seg_revenue FROM db.main.orders o "
+            "JOIN db.main.customers c ON o.customer_id = c.customer_id "
+            "AND c.segment = 'smb'")
+    d = _fp("SELECT SUM(o.amount) AS seg_revenue FROM db.main.orders o, db.main.customers c "
+            "WHERE o.customer_id = c.customer_id AND c.segment = 'smb'")
+    assert a.core.hash() == b.core.hash() == c.core.hash() == d.core.hash()
+    assert any("segment" in f for f in a.core.filters)
+
+
+def test_outer_join_direction_and_kind_still_differ():
+    inner = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o "
+                "JOIN db.main.customers c ON o.customer_id = c.customer_id")
+    left = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o "
+               "LEFT JOIN db.main.customers c ON o.customer_id = c.customer_id")
+    left_rev = _fp("SELECT SUM(o.amount) AS r FROM db.main.customers c "
+                   "LEFT JOIN db.main.orders o ON o.customer_id = c.customer_id")
+    assert len({inner.core.hash(), left.core.hash(), left_rev.core.hash()}) == 3
+
+
+def test_expression_is_not_blamed_when_only_alias_numbering_differs():
+    from semantix.models import core_components, core_diff
+    single = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o WHERE o.status = 'x'")
+    joined = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o "
+                 "JOIN db.main.customers c ON o.customer_id = c.customer_id "
+                 "WHERE o.status = 'x'")
+    diff = core_diff(core_components(single.core), core_components(joined.core),
+                     "single", "joined")
+    assert "expression" not in diff and "filters" not in diff
+    assert "join graph" in diff
+
+
+def test_self_join_keeps_distinct_aliases():
+    a = _fp("SELECT SUM(o1.amount - o2.amount) AS delta FROM db.main.orders o1 "
+            "JOIN db.main.orders o2 ON o1.id = o2.parent_id")
+    b = _fp("SELECT SUM(o2.amount - o1.amount) AS delta FROM db.main.orders o1 "
+            "JOIN db.main.orders o2 ON o1.id = o2.parent_id")
+    assert a.core.hash() != b.core.hash()
+
+
+def test_cartesian_product_is_named():
+    fp = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o, db.main.customers c")
+    assert any(e.startswith("CARTESIAN") for e in fp.core.join_edges)

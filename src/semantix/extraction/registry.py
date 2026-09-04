@@ -23,6 +23,9 @@ class SchemaRegistry:
         self._types: dict[str, dict[str, str]] = {}
         # relation -> {column: physical terminal columns}
         self._terminals: dict[str, dict[str, tuple[str, ...]]] = {}
+        # Relations registered from computed SQL — distinct from catalog
+        # tables, which also carry terminals (their own columns).
+        self._models: set[str] = set()
         self.physical: set[str] = set(catalog)
         # Output columns that are AGGREGATE-derived, per registered model. A
         # declared metric that re-aggregates one of these (`sum(mart.revenue)`
@@ -174,7 +177,7 @@ class SchemaRegistry:
     def known_models(self) -> set[str]:
         """Relations registered from computed SQL (as opposed to catalog
         tables): reading one of these is reading THROUGH a definition."""
-        return set(self._terminals)
+        return set(self._models)
 
     def columns(self, relation: str) -> list[str]:
         return list(self._types.get(relation, {}))
@@ -241,6 +244,7 @@ class SchemaRegistry:
         known_before = relation in self._types and bool(self._types[relation])
         self._types[relation] = cols
         self._terminals[relation] = terms
+        self._models.add(relation)
         self._agg_outputs[relation] = agg_outputs
         self._add_to_cached_schemas(relation, cols, replaced=known_before)
 

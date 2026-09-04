@@ -102,7 +102,9 @@ def test_shadow_promotion_round_trips_to_certified(tmp_path):
 
 
 def _core(**kw):
-    base = dict(measure_expr='SUM(t0."amount")', filters=(), grain=(),
+    # Cores render relation-qualified (round seven): the fixture must match
+    # what canonicalization produces, or the self-check rightly refuses it.
+    base = dict(measure_expr='SUM("amount")', filters=(), grain=(),
                 join_nodes=("db.main.orders",), join_edges=(),
                 source_columns=("db.main.orders.amount",))
     base.update(kw)
@@ -133,7 +135,7 @@ def _registry():
 
 def test_emit_uc_metric_view_shape():
     emitted, reasons = emit_declaration(
-        "net_revenue", _core(filters=('t0."status" = \'completed\'',)),
+        "net_revenue", _core(filters=('"status" = \'completed\'',)),
         "duckdb", "uc-metrics", registry=_registry())
     assert not reasons and emitted.verified is True
     doc = yaml.safe_load(emitted.text)
@@ -160,7 +162,7 @@ def test_emit_ossie_document_and_its_refusal():
     assert metric["expression"]["dialects"][0]["expression"] == "SUM(orders.amount)"
 
     _, reasons = emit_declaration(
-        "net_revenue", _core(filters=('t0."status" = \'completed\'',)),
+        "net_revenue", _core(filters=('"status" = \'completed\'',)),
         "duckdb", "ossie", registry=_registry())
     assert reasons and "no filter or grain" in reasons[0]
     # Without a registry there is no self-check, and Ossie/UC transpile.

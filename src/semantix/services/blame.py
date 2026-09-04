@@ -20,8 +20,9 @@ import re
 from collections import Counter
 from typing import Any
 
+from semantix.models import QUALIFIER_RE as _ALIAS_RE  # one definition of "qualifier"
+
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_ALIAS_RE = re.compile(r"\bt\d+\.")
 
 # Tokens that are SQL machinery, not data references.
 _NOISE = frozenset("""
@@ -33,7 +34,9 @@ _NOISE = frozenset("""
 
 def _refs(expression: str) -> set[str]:
     """Column-ish identifiers referenced by a canonical expression."""
-    return {tok.lower() for tok in _IDENT_RE.findall(expression)
+    # Strip qualifiers first, or the relation names inside a multi-source
+    # core read as "columns" the other definition omits.
+    return {tok.lower() for tok in _IDENT_RE.findall(_ALIAS_RE.sub("", expression))
             if tok.lower() not in _NOISE and not re.fullmatch(r"t\d+", tok.lower())}
 
 

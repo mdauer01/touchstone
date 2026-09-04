@@ -7,6 +7,7 @@ Windowed aggregates are analytic columns, not metric definitions.
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 
 from sqlglot import exp
 
@@ -43,20 +44,29 @@ def extract_fingerprints(
     amap = {alias: registry.canonical_relation(rel) for alias, rel in amap.items()}
     single_source = next(iter(amap.values())) if len(amap) == 1 else None
 
-    # Everything below is encoded into the EXISTING SemanticCore fields rather
-    # than new ones, so a query using none of these constructs keeps the exact
-    # hash it had before — only the previously mis-fingerprinted ones move.
-    # Post-aggregate and bound predicates are tagged so they can never alias a
-    # plain WHERE conjunct of the same text.
-    where = select.args.get("where")
-    filter_list = [render(p, dialect) for p in flatten_conjuncts(where.this if where else None)]
+    # The core is rendered RELATION-qualified, not alias-qualified. Positional
+    # aliases (t0, t1) are assigned per query, so `SUM(t0."amount")` over one
+    # table and the same math inside a join over two tables rendered as
+    # different EXPRESSIONS — and blame then named "expression" as a
+    # difference when only the numbering moved. Relations that appear once
+    # are named; a self-joined relation keeps its positional aliases, since
+    # collapsing them would equate `o1.amount - o2.amount` with its negation.
+    qselect = _relation_qualified(select, amap)
 
-    having = select.args.get("having")
+    # Everything below is encoded into the EXISTING SemanticCore fields rather
+    # than new ones. Post-aggregate and bound predicates are tagged so they
+    # can never alias a plain WHERE conjunct of the same text.
+    where = qselect.args.get("where")
+    where_preds = flatten_conjuncts(where.this if where else None)
+    join_edges_list, filter_list = _join_graph(qselect, amap, where_preds, dialect)
+
+    having = qselect.args.get("having")
     filter_list += [f"HAVING {render(p, dialect)}" for p in flatten_conjuncts(having.this if having else None)]
 
-    qualify = select.args.get("qualify")
+    qualify = qselect.args.get("qualify")
     filter_list += [f"QUALIFY {render(p, dialect)}" for p in flatten_conjuncts(qualify.this if qualify else None)]
 
+    select_for_render = qselect
     distinct = select.args.get("distinct")
     if distinct is not None:
         # DISTINCT ON (k) keeps one row per k; plain DISTINCT de-duplicates
@@ -67,26 +77,28 @@ def extract_fingerprints(
             # The ORDER BY decides WHICH row survives per key, so it is part
             # of the definition: asc/desc variants compute different rows and
             # previously hashed identically at proof grade.
-            order = select.args.get("order")
+            order = select_for_render.args.get("order")
             ordering = (" ORDER BY " + ", ".join(render(e, dialect)
                                                  for e in order.expressions)
                         if order is not None else "")
-            filter_list.append(f"SELECT DISTINCT ON ({render(on, dialect)}){ordering}")
+            q_on = select_for_render.args.get("distinct").args.get("on")
+            filter_list.append(f"SELECT DISTINCT ON ({render(q_on, dialect)}){ordering}")
         else:
             filter_list.append("SELECT DISTINCT")
 
     # A bounded measure is a different measure, and its ordering is what
     # decides *which* rows survive — so both travel together.
-    bound = _render_bound(select, dialect)
+    bound = _render_bound(select_for_render, dialect)
     if bound:
         filter_list.append(bound)
 
     filters = tuple(sorted(filter_list))
 
-    grain = tuple(sorted(_grain_terms(select, select.args.get("group"), dialect)))
+    grain = tuple(sorted(_grain_terms(select_for_render,
+                                      select_for_render.args.get("group"), dialect)))
 
     join_nodes = tuple(sorted(set(amap.values())))
-    join_edges = tuple(sorted(_join_terms(select, amap, dialect)))
+    join_edges = tuple(sorted(join_edges_list))
 
     canonical_sql = render(select, dialect)
 
@@ -103,7 +115,7 @@ def extract_fingerprints(
         level = CanonLevel.INCOMPLETE.value
 
     fingerprints: list[Fingerprint] = []
-    for proj in select.expressions:
+    for proj, qproj in zip(select.expressions, qselect.expressions):
         inner = proj.this if isinstance(proj, exp.Alias) else proj
         aggs = [a for a in inner.find_all(exp.AggFunc) if a.find_ancestor(exp.Window) is None]
         if not aggs:
@@ -111,13 +123,16 @@ def extract_fingerprints(
 
         name = proj.alias_or_name or _synthesize_name(aggs[0])
 
+        # Terminals resolve through the ORIGINAL aliases; the rendered text
+        # comes from the relation-qualified copy.
         terminal_set: set[str] = set()
         for col in inner.find_all(exp.Column):
             src = amap.get(col.table) or single_source or col.table or "<unknown>"
             terminal_set.update(registry.terminals_for(src, col.name))
+        qinner = qproj.this if isinstance(qproj, exp.Alias) else qproj
 
         core = SemanticCore(
-            measure_expr=render(inner, dialect),
+            measure_expr=render(qinner, dialect),
             filters=filters,
             grain=grain,
             join_nodes=join_nodes,
@@ -334,6 +349,120 @@ def _grain_terms(select: exp.Select, group: exp.Expression | None,
         for node in group.args.get(construct) or []:
             terms.append(f"{construct.replace('_', ' ').upper()}({render(node, dialect)})")
     return terms
+
+
+def _relation_qualified(select: exp.Select, amap: dict[str, str]) -> exp.Select:
+    """A copy of the select rendered without positional aliases.
+
+    Single-source selects render columns UNQUALIFIED: the qualifier adds
+    nothing (the relation lives in join_nodes and lineage), and qualifying
+    it would make two models with identical grain over different tables
+    read as "different grain" in blame — a false clause-level accusation.
+    Multi-source selects qualify columns by RELATION for every relation that
+    appears exactly once, so join order cannot move a column's name; CTE
+    digests, derived tables and self-joined relations keep their aliases,
+    since there is no single name to give them and collapsing two aliases
+    of one table would equate `o1.amount - o2.amount` with its negation."""
+    counts = Counter(amap.values())
+    single = len(amap) <= 1
+    copy = select.copy()
+    for col in copy.find_all(exp.Column):
+        alias = col.table
+        rel = amap.get(alias) if alias else None
+        if rel is None:
+            continue  # not a top-scope source: leave nested scopes alone
+        if single:
+            col.set("catalog", None)
+            col.set("db", None)
+            col.set("table", None)
+            continue
+        if counts[rel] != 1 or rel.startswith(("cte:", "<")):
+            continue
+        parts = rel.split(".")
+        col.set("catalog", exp.to_identifier(parts[0]) if len(parts) == 3 else None)
+        col.set("db", exp.to_identifier(parts[-2]) if len(parts) >= 2 else None)
+        col.set("table", exp.to_identifier(parts[-1]))
+    return copy
+
+
+def _qualifiers_in(pred: exp.Expression) -> set[tuple[str, ...]]:
+    """Distinct source identities a predicate references (relation-qualified
+    or positional, whichever the column carries)."""
+    out: set[tuple[str, ...]] = set()
+    for col in pred.find_all(exp.Column):
+        if not col.table:
+            continue
+        out.add(tuple(p.name for p in (col.args.get("catalog"), col.args.get("db"),
+                                        col.args.get("table")) if p is not None))
+    return out
+
+
+def _is_plain_inner(join: exp.Join) -> bool:
+    return (not join.args.get("side")
+            and (join.args.get("kind") or "").upper() in ("", "INNER", "CROSS")
+            and not join.args.get("method")
+            and join.args.get("match_condition") is None)
+
+
+def _join_graph(select: exp.Select, amap: dict[str, str],
+                where_preds: list[exp.Expression], dialect: str
+                ) -> tuple[list[str], list[str]]:
+    """(join edges, WHERE-level filters) for one select.
+
+    For a PURE inner-join graph, ON and WHERE are one conjunction and join
+    order is irrelevant, so the edge set is the set of predicates that link
+    two sources, and every single-source predicate — wherever the author or
+    the optimizer put it — is a filter. Written `orders JOIN customers` or
+    `customers JOIN orders`, with the segment filter in ON or in WHERE, the
+    core is the same; before, the optimizer's placement decided the hash and
+    identical models CONTRADICTED. A join graph with a component no
+    predicate links is a cartesian product and is named as one.
+
+    Any outer, semi, anti or ASOF join makes predicate placement and join
+    direction load-bearing, and the per-join, directional rendering is kept.
+    """
+    joins = list(select.args.get("joins") or [])
+    if joins and all(_is_plain_inner(j) for j in joins):
+        preds: list[exp.Expression] = list(where_preds)
+        edges: list[str] = []
+        for join in joins:
+            on = join.args.get("on")
+            if on is not None:
+                preds.extend(flatten_conjuncts(on))
+            if join.args.get("using"):
+                cols = ", ".join(render(u, dialect) for u in join.args["using"])
+                edges.append(f"INNER JOIN USING ({cols})")
+        filters: list[str] = []
+        linked: list[set[tuple[str, ...]]] = []
+        for pred in preds:
+            quals = _qualifiers_in(pred)
+            if len(quals) >= 2:
+                edges.append(f"INNER JOIN ON {render(pred, dialect)}")
+                linked.append(quals)
+            else:
+                filters.append(render(pred, dialect))
+        # Connectivity: sources no predicate links are multiplied, not joined.
+        sources = [s for s in table_map(select)]
+        if len(sources) > 1:
+            parent = {s: s for s in sources}
+
+            def find(x):
+                while parent[x] != x:
+                    x = parent[x]
+                return x
+
+            names = {s: (amap.get(s) or s) for s in sources}
+            for quals in linked:
+                touched = [s for s in sources
+                           if any(q[-1] == s or names[s].endswith(q[-1]) for q in quals)]
+                for a, b in zip(touched, touched[1:]):
+                    parent[find(a)] = find(b)
+            roots = {find(s) for s in sources}
+            if len(roots) > 1 and not any(j.args.get("using") for j in joins):
+                edges.append("CARTESIAN(" + ", ".join(sorted(names[s] for s in sources)) + ")")
+        return edges, filters
+    return (_join_terms(select, amap, dialect),
+            [render(p, dialect) for p in where_preds])
 
 
 def _join_terms(select: exp.Select, amap: dict[str, str], dialect: str) -> list[str]:
