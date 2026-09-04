@@ -426,4 +426,11 @@ def load_agents_schema(path: str | Path) -> list[DeclaredSpec]:
         columns = [d[0].lower() for d in cur.description]
         tables[table] = [dict(zip(columns, r)) for r in cur.fetchall()]
     con.close()
+    if not tables:
+        # A DuckDB file with none of the AGENTS claim tables yielded 0 claims
+        # and exit 0 — every metric then read as a SHADOW_METRIC. A wrong
+        # file must never look like an estate with no declarations.
+        raise ValueError(
+            f"{p}: no AGENTS schema tables found "
+            f"({', '.join(AGENTS_TABLES)}) — is this the right warehouse file?")
     return claims_from_tables(tables, path=str(p))

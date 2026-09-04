@@ -105,6 +105,22 @@ def run_scan(
     if not (dbt_path or sql_dir or views_path):
         raise ValueError("no computed-SQL source: pass dbt_path, sql_dir, or views_path")
     store = Store(db_path)
+    try:
+        return _run_scan(store, dbt_path, metrics_path, catalog_path, dialect,
+                         label, execute_seed, sql_dir, views_path,
+                         agents_schema_path, osi_path, uc_metrics_path)
+    except BaseException:
+        # An adapter refusal mid-scan used to leave the store OPEN with its
+        # transaction, so the next Store() in the same process hung on the
+        # SQLite lock. The unfinished scans row stays (every reader already
+        # ignores scans without stats); the connection must not.
+        store.close()
+        raise
+
+
+def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
+              label, execute_seed, sql_dir, views_path, agents_schema_path,
+              osi_path, uc_metrics_path) -> tuple[ScanResult, Store]:
     scan_id, observed_at = store.begin_scan(label, dialect)
 
     catalog = load_catalog(catalog_path) if catalog_path else {}
@@ -489,7 +505,14 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
     (§4) by synthesizing the query it claims to be."""
     provenance = Provenance(system=spec.system, object_id=f"{spec.system}.{spec.name}", path=spec.path)
     claim = Claim(
-        claim_id=Claim.make_id(spec.name, provenance, spec.expr),
+        # Identity covers EVERYTHING the declaration says (model, filters,
+        # group_by, untranslatable reasons) plus where it was said: keyed on
+        # system|name|expr, two same-named declarations over different models
+        # — or two refusals with expr=None — collapsed to one store row, and
+        # every downstream reader (propose, publish, monitor) presented the
+        # wrong declaration.
+        claim_id=Claim.make_id(spec.name, provenance,
+                               spec_content_text(spec) + "|" + (spec.path or "")),
         name=spec.name,
         provenance=provenance,
         description=spec.description,

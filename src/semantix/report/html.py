@@ -257,7 +257,8 @@ def _members_table(members: list[dict]) -> str:
             f'<th class="mhead"><div class="kind {kind}">{kind.upper()}</div>'
             f'<div class="nm">{html.escape(m["name"])}</div>'
             f'<div class="where">{html.escape(where)}</div>'
-            f'<div class="where">{html.escape(path)} · {html.escape(m.get("canon_level", ""))} · '
+            f'<div class="where">{html.escape(m.get("system") or "")} · '
+            f'{html.escape(path)} · {html.escape(m.get("canon_level", ""))} · '
             f'<code>{html.escape(m.get("core_hash", ""))}</code></div></th>'
         )
 

@@ -176,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
              "(write-back certification into Agents Schema)",
     )
     p_publish.add_argument("--db", default="semantix.db")
+    # Estate sources: when given, every published receipt embeds a LIVE
+    # freshness check instead of `unchecked`.
+    _add_estate_args(p_publish)
     p_publish.add_argument("--warehouse", required=True,
                            help="DuckDB file to publish AGENTS.ROOT rows into")
 
@@ -234,6 +237,11 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["metrics", "ossie", "uc-metrics"],
                         help="declaration format to emit (default: metrics YAML)")
     p_prop.add_argument("--concept", help="only this concept")
+    p_prop.add_argument("--dbt", help="dbt project dir — rebuilds the scan's registry "
+                                      "so emitted declarations are round-trip checked")
+    p_prop.add_argument("--sql-dir", dest="sql_dir", help="directory of .sql files")
+    p_prop.add_argument("--views", dest="views_path", help="file of CREATE VIEW statements")
+    p_prop.add_argument("--catalog", help="catalog YAML (column resolution)")
     p_prop.add_argument("--db", default="semantix.db")
 
     p_mon = sub.add_parser(
@@ -282,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
         "propose": _cmd_propose,
     }[args.command]
     try:
+        import duckdb
+        duckdb_errors: tuple = (duckdb.Error,)
+    except ImportError:  # pragma: no cover — duckdb is optional
+        duckdb_errors = ()
+    try:
         return handler(args)
     except (ValueError, FileNotFoundError) as e:
         # Intake problems the adapters have already described precisely — a
@@ -289,6 +302,12 @@ def main(argv: list[str] | None = None) -> int:
         # an unsupported warehouse URL. They arrived as raw tracebacks, which
         # is the least actionable way to tell an operator their path is wrong.
         print(f"semantix: {e}", file=sys.stderr)
+        return 2
+    except duckdb_errors as e:
+        # A nonexistent, locked, or non-DuckDB warehouse file, or the SQLite
+        # store passed as a warehouse — the driver's own message is precise;
+        # a traceback around it is not.
+        print(f"semantix: warehouse error — {e}", file=sys.stderr)
         return 2
 
 
@@ -472,7 +491,11 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         print(f"  NEW      [{v['verdict']:<13}] sev {v['severity']:>3}  "
               f"{v['concept_label']}: {v['summary']}")
     for v in diff["resolved"]:
-        print(f"  RESOLVED [{v['verdict']:<13}]          {v['concept_label']}")
+        # A vanished CERTIFIED/ALIASING is a certification LOST, not a
+        # problem resolved — one word for both congratulated a typo'd path
+        # that read nothing.
+        tag = "LOST    " if v["verdict"] in ("CERTIFIED", "ALIASING") else "RESOLVED"
+        print(f"  {tag} [{v['verdict']:<13}]          {v['concept_label']}")
     if not diff["new"] and not diff["resolved"]:
         print("  no verdict changes vs baseline")
     print(f"  ({diff['unchanged']} pre-existing verdict(s) unchanged)")
@@ -628,13 +651,22 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 def _cmd_publish(args: argparse.Namespace) -> int:
     from semantix.services.writeback import publish_receipts
 
+    store = _open_existing(args.db)
+    freshness = None
+    estate = _estate_kwargs(args)
+    if estate:
+        from semantix.services.freshness import check_freshness
+        freshness = check_freshness(store, **estate)
     try:
-        summary = publish_receipts(_open_existing(args.db), args.warehouse)
+        summary = publish_receipts(store, args.warehouse, freshness=freshness)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
     print(f"published {summary['receipts']} receipt(s) + skill/verify-metric "
-          f"→ agents.root in {summary['warehouse']} (scan {summary['scan_id']})")
+          f"→ agents.root in {summary['warehouse']} (scan {summary['scan_id']})"
+          + (f" · freshness {freshness.get('status')}" if freshness else
+             " · freshness unchecked — pass estate sources (--dbt/--sql-dir/…) "
+             "to embed a live re-check in every receipt"))
     for key in summary["keys"]:
         print(f"  semantix · {key}")
     print(f"  semantix.verdicts · {summary['verdict_rows']} row(s) — gate on "
@@ -890,12 +922,17 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     if args.views_path:
         from semantix.adapters.sql_dir import load_views_file
         artifacts += load_views_file(args.views_path, dialect)[0]
+    if not artifacts:
+        # Without the scan's models, observed lineage resolves to different
+        # terminals than the reference cores' and byte-exact reruns of the
+        # estate's own marts were accused as NAMED ALTs. A registry the scan
+        # did not have is not a degraded mode; it is a different comparison.
+        print("semantix: monitor needs the estate the scan read (--dbt, "
+              "--sql-dir or --views) so observed queries resolve through the "
+              "same models the reference definitions did", file=sys.stderr)
+        return 2
     catalog = load_catalog(args.catalog) if args.catalog else {}
     registry = build_registry(catalog, artifacts, dialect)
-    if not artifacts and not catalog:
-        print("  ! no estate sources or catalog passed — observed queries "
-              "resolve columns without the scan's registry, so matches "
-              "against models' definitions may misreport as unregistered")
 
     result = monitor_history(store, text, registry, dialect,
                              min_runs=args.min_runs)
@@ -904,22 +941,29 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
           f"{ref['definitions']} definition(s) across {ref['concepts']} "
           f"concept(s)"
           + (f" ({ref['excluded_below_proof']} below proof grade excluded)"
-             if ref["excluded_below_proof"] else ""))
+             if ref["excluded_below_proof"] else "")
+          + (f" · contested: {', '.join(ref['contested_concepts'])}"
+             if ref["contested_concepts"] else ""))
     parts = []
-    for key, label in (("skipped_statements", "unparseable"),
-                       ("non_query_statements", "non-query"),
+    for key, label in (("non_query_statements", "non-query"),
                        ("unreadable_statements", "unreadable"),
-                       ("statements_without_measures", "no measure")):
+                       ("statements_without_measures", "no measure"),
+                       ("statements_with_nested_measures",
+                        "measure in a nested scope — not read")):
         if result[key]:
             parts.append(f"{result[key]} {label}")
-    print(f"history: {result['statements']} statement(s)"
-          + (f" ({', '.join(parts)})" if parts else ""))
+    print(f"history: {result['statements']} statement(s): "
+          f"{result['parsed_statements']} parsed"
+          + (f" ({', '.join(parts)})" if parts else "")
+          + (f", {result['skipped_statements']} unparseable"
+             if result["skipped_statements"] else ""))
     print(f"observed: {result['observed_definitions']} distinct measure "
           f"definition(s) · {result['recurring_definitions']} recurring "
           f"(≥{result['min_runs']} run(s)) · {result['below_min_runs']} "
           f"below the threshold")
     print()
-    tags = {"consistent_use": "CONSISTENT", "named_alt_definition": "NAMED ALT",
+    tags = {"consistent_use": "CONSISTENT", "contested_use": "CONTESTED",
+            "named_alt_definition": "NAMED ALT",
             "candidate_alt_definition": "CANDIDATE ALT",
             "unregistered_recurring_measure": "UNREGISTERED",
             "unverifiable": "UNVERIFIABLE"}
@@ -929,7 +973,10 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         print(f"  [{tags[f['kind']]:<13}]{sev}  uses {f['uses']:>4}  "
               f"{names}: {f['summary']}")
         for component, sides in (f.get("diff") or {}).items():
-            print(f"      {component}: certified {sides['reference']} · "
+            # "reference", not "certified": the reference set is every
+            # proof-grade definition the scan holds, including ones it
+            # found CONTRADICTED or merely SHADOW.
+            print(f"      {component}: reference {sides['reference']} · "
                   f"observed {sides['observed']}")
     if not result["findings"]:
         print("  no recurring measures met the threshold")
@@ -938,10 +985,11 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(result, indent=2))
         print(f"  findings JSON: {args.json_out}")
-    alts = [f for f in result["findings"]
-            if f["kind"] in ("named_alt_definition", "candidate_alt_definition")]
+    # Only NAMED alts fail the gate: a candidate is a hypothesis by
+    # construction, and failing CI on a hypothesis is the alert-fatigue path.
+    alts = [f for f in result["findings"] if f["kind"] == "named_alt_definition"]
     if args.fail_on_alt and alts:
-        print(f"\nsemantix monitor: FAILED — {len(alts)} alternative "
+        print(f"\nsemantix monitor: FAILED — {len(alts)} named alternative "
               f"definition(s) in use", file=sys.stderr)
         return 1
     return 0
@@ -951,18 +999,51 @@ def _cmd_propose(args: argparse.Namespace) -> int:
     from semantix.services.propose import build_proposals, write_proposals
 
     store = _open_existing(args.db)
-    result = build_proposals(store, fmt=args.fmt, concept=args.concept)
+    scan = store.latest_scan()
+    dialect = (scan or {}).get("dialect") or "duckdb"
+    registry = None
+    if args.dbt or args.sql_dir or args.views_path:
+        from semantix.adapters.catalog import load_catalog
+        from semantix.services.monitor import build_registry
+
+        artifacts = []
+        if args.dbt:
+            from semantix.adapters.dbt import load_dbt
+            artifacts += load_dbt(args.dbt)
+        if args.sql_dir:
+            from semantix.adapters.sql_dir import load_sql_dir
+            artifacts += load_sql_dir(args.sql_dir, dialect)[0]
+        if args.views_path:
+            from semantix.adapters.sql_dir import load_views_file
+            artifacts += load_views_file(args.views_path, dialect)[0]
+        catalog = load_catalog(args.catalog) if args.catalog else {}
+        registry = build_registry(catalog, artifacts, dialect)
+    elif args.fmt != "metrics":
+        # Ossie and metric-view emission TRANSPILE (generic / Databricks
+        # writers); without the registry there is no self-check, and an
+        # unverified transpile has already been shown to change meaning.
+        print(f"semantix: --format {args.fmt} needs the estate sources (--dbt, "
+              f"--sql-dir or --views, plus --catalog) so each emitted declaration "
+              f"is round-trip checked before it is offered", file=sys.stderr)
+        return 2
+    result = build_proposals(store, fmt=args.fmt, concept=args.concept,
+                             registry=registry, dialect=dialect)
     written = write_proposals(result, args.out_dir)
     kinds = {"resolution": 0, "promotion": 0}
-    refused = 0
+    refused = matched = 0
     for p in result["proposals"]:
         kinds[p["kind"]] += 1
-        refused += sum(1 for c in p["candidates"] if c["declaration"] is None)
+        refused += sum(1 for c in p["candidates"]
+                       if c["declaration"] is None and not c["matches_declaration"])
+        matched += sum(1 for c in p["candidates"] if c["matches_declaration"])
     print(f"proposals against scan {result['scan_id']}: "
           f"{kinds['resolution']} contradiction resolution(s), "
           f"{kinds['promotion']} shadow promotion(s)"
+          + (f" · {matched} site(s) already match a declaration" if matched else "")
           + (f" · {refused} candidate(s) could not be emitted (reasons in memo)"
-             if refused else ""))
+             if refused else "")
+          + (" · round trips verified" if registry is not None else
+             " · round trips NOT verified (no estate sources)"))
     for path in written["declarations"]:
         print(f"  {path}")
     print(f"  memo: {written['memo']}")

@@ -114,37 +114,54 @@ def _read_view(f: Path, view: dict, dialect: str,
             f"(supported: {', '.join(SUPPORTED_VERSIONS)}) — refusing to "
             f"guess at a shape this adapter does not know")
 
+    view = _yaml11_keys(view)
     taints: list[str] = []
     unknown = sorted(set(view) - _TOP_KEYS)
     if unknown:
         taints.append(f"metric view carries unmodelled key(s) "
                       f"{', '.join(unknown)} — cannot rule out semantic impact")
 
-    raw_source = str(view.get("source") or "")
-    source = raw_source.replace("`", "").strip()
-    if not _RELATION_RE.match(source):
-        taints.append("source is an inline SQL query, not a nameable "
-                      "relation — claims need a relation to bind to")
+    raw_source = view.get("source")
+    source = str(raw_source).replace("`", "").strip() if isinstance(raw_source, str) else ""
+    if not isinstance(raw_source, str) or not source:
+        taints.append("source is missing or not a string")
+    elif len(source.split(".")) > 3:
+        taints.append(f"source {source!r} has more than three parts")
+    elif not _RELATION_RE.match(source):
+        taints.append(
+            f"source {source[:60]!r} is not a 1–3 part relation name (an "
+            f"inline SQL query, or a quoted name with spaces) — claims need a "
+            f"relation to bind to")
     tail = source.split(".")[-1] if source else ""
 
     join_names: set[str] = set()
-    for j, join in enumerate(view.get("joins") or []):
-        if not isinstance(join, dict) or not join.get("name"):
-            raise ValueError(f"{f}: joins[{j}] has no name")
-        join_names.add(str(join["name"]).lower())
-        unknown = sorted(set(join) - _JOIN_KEYS)
-        if unknown:
-            taints.append(f"join {join['name']} carries unmodelled key(s) "
-                          f"{', '.join(unknown)} — cannot rule out impact on "
-                          f"the view's row universe")
-        for nested in join.get("joins") or []:
-            if isinstance(nested, dict) and nested.get("name"):
-                join_names.add(str(nested["name"]).lower())
+
+    def read_joins(joins: list, depth: int = 0) -> None:
+        for j, join in enumerate(joins):
+            if not isinstance(join, dict):
+                raise ValueError(f"{f}: joins[{j}] is not an object")
+            join = _yaml11_keys(join)
+            if not join.get("name"):
+                raise ValueError(f"{f}: joins[{j}] has no name")
+            join_names.add(str(join["name"]).lower())
+            unknown = sorted(set(join) - _JOIN_KEYS)
+            if unknown:
+                taints.append(f"join {join['name']} carries unmodelled key(s) "
+                              f"{', '.join(unknown)} — cannot rule out impact on "
+                              f"the view's row universe")
+            # Snowflake-schema joins nest; only the first level was read, so
+            # a depth-3 alias was refused as "neither source nor the source
+            # table" and a nested join's unknown keys were never checked.
+            if depth < 8:
+                read_joins(join.get("joins") or [], depth + 1)
+
+    read_joins(view.get("joins") or [])
 
     params: set[str] = set()
     for p, param in enumerate(view.get("parameters") or []):
         if not isinstance(param, dict) or not param.get("name"):
             raise ValueError(f"{f}: parameters[{p}] has no name")
+        param = _yaml11_keys(param)
         params.add(str(param["name"]))
         unknown = sorted(set(param) - _PARAM_KEYS)
         if unknown:
@@ -158,27 +175,39 @@ def _read_view(f: Path, view: dict, dialect: str,
     for entry in field_entries:
         if not isinstance(entry, dict):
             raise ValueError(f"{f}: field entry is not an object")
+        entry = _yaml11_keys(entry)
         name, expr = entry.get("name"), entry.get("expr")
-        if name is None:
-            continue  # wildcard field — expands columns, declares no alias
         unknown = sorted(set(entry) - _FIELD_KEYS)
+        if name is None:
+            if unknown:
+                taints.append(f"wildcard field carries unmodelled key(s) "
+                              f"{', '.join(unknown)}")
+            continue  # wildcard field — expands columns, declares no alias
+        # `expr: source.amount` is the documented identity spelling; comparing
+        # the raw text refused it as "not the identity column".
         identity = (isinstance(expr, str)
-                    and _strip_ident(expr) == _strip_ident(str(name)))
+                    and _strip_qualifier(_strip_ident(expr), tail) == _strip_ident(str(name)))
         if unknown or not identity:
             risky_fields.add(_strip_ident(str(name)))
+
+    measure_names = {_strip_ident(str(m.get("name")))
+                     for m in (view.get("measures") or [])
+                     if isinstance(m, dict) and m.get("name") is not None}
 
     filter_sql = view.get("filter")
     filter_rendered: str | None = None
     filter_reasons: list[str] = []
     if filter_sql is not None:
         filter_rendered, filter_reasons = _translate(
-            str(filter_sql), tail, join_names, params, risky_fields, dialect)
+            str(filter_sql), tail, join_names, params, risky_fields, dialect,
+            measure_names)
         filter_reasons = [f"view filter: {r}" for r in filter_reasons]
 
     measures = view.get("measures") or []
     for m, measure in enumerate(measures):
         if not isinstance(measure, dict):
             raise ValueError(f"{f}: measures[{m}] is not an object")
+        measure = _yaml11_keys(measure)
         name = measure.get("name")
         expr = measure.get("expr")
         if name is None:
@@ -196,12 +225,20 @@ def _read_view(f: Path, view: dict, dialect: str,
             m_taints.append(
                 "window measure (order/range/semiadditive semantics) — its "
                 "bare aggregate is a different metric than the one declared")
-        if not isinstance(expr, str) or not expr.strip():
+        elif "window" in measure and not isinstance(measure.get("window"), list):
+            m_taints.append(f"window is present with an unmodelled value "
+                            f"({type(measure['window']).__name__})")
+        if expr is None:
             m_taints.append("measure declares no expression")
+            rendered = None
+        elif not isinstance(expr, str) or not expr.strip():
+            m_taints.append(f"measure expression is not a string "
+                            f"({type(expr).__name__})")
             rendered = None
         else:
             rendered, reasons = _translate(
-                expr, tail, join_names, params, risky_fields, dialect)
+                expr, tail, join_names, params, risky_fields, dialect,
+                measure_names - {_strip_ident(str(name))})
             m_taints.extend(reasons)
         description = measure.get("comment") if isinstance(
             measure.get("comment"), str) else None
@@ -237,8 +274,33 @@ def _strip_ident(text: str) -> str:
     return text.strip().strip("`").strip().lower()
 
 
+def _strip_qualifier(ident: str, tail: str) -> str:
+    for prefix in ("source.", f"{tail.lower()}." if tail else None):
+        if prefix and ident.startswith(prefix):
+            return ident[len(prefix):]
+    return ident
+
+
+def _yaml11_keys(mapping: dict) -> dict:
+    """PyYAML reads YAML 1.1: a bare `on:` key — the spec's own spelling for a
+    join condition — arrives as the boolean True (and `off`/`yes`/`no`
+    likewise). Un-normalized, the unknown-key message crashed on
+    `', '.join([True])` and the scan died with a traceback on real
+    Databricks YAML. Restore the one spelling this schema uses and stringify
+    the rest so they are named in a taint instead of crashing."""
+    out = {}
+    for k, v in mapping.items():
+        if k is True:
+            k = "on"
+        elif not isinstance(k, str):
+            k = str(k)
+        out[k] = v
+    return out
+
+
 def _translate(text: str, tail: str, join_names: set[str], params: set[str],
-               risky_fields: set[str], dialect: str
+               risky_fields: set[str], dialect: str,
+               measure_names: set[str] = frozenset()
                ) -> tuple[str | None, list[str]]:
     """Render one metric-view expression for the scan dialect.
 
@@ -258,6 +320,19 @@ def _translate(text: str, tail: str, join_names: set[str], params: set[str],
         return None, [f"could not parse expression: {e}"]
     if node is None or isinstance(node, exp.Query):
         return None, ["expression is a full query — expected a scalar expression"]
+    # Any placeholder — `:START_DATE` against a lower-case declaration,
+    # `:undeclared`, `${x}`, `?` — makes this a family of metrics, whatever the
+    # declared `parameters` block says. The regex above is the friendly
+    # pre-check; the AST is the gate.
+    if node.find(exp.Parameter) is not None or node.find(exp.Placeholder) is not None:
+        return None, ["expression contains a parameter placeholder — a "
+                      "parameter makes this a family of metrics, not one claim"]
+    anonymous = node.find(exp.Anonymous)
+    if anonymous is not None:
+        return None, [f"expression calls {anonymous.name}(), a function this "
+                      f"adapter does not model (metric-view MEASURE() "
+                      f"references included) — refusing to read it as a column "
+                      f"expression"]
 
     reasons: list[str] = []
     for col in node.find_all(exp.Column):
@@ -269,6 +344,10 @@ def _translate(text: str, tail: str, join_names: set[str], params: set[str],
                     f"references declared field {col.name}, whose expression "
                     f"is not the identity column — field-vs-column resolution "
                     f"order is engine-internal, refusing to guess")
+            elif name in measure_names:
+                reasons.append(
+                    f"references {col.name}, which is another measure of this "
+                    f"view — measure composition is not modelled")
             continue
         if qualifier in join_names:
             reasons.append(f"references joined table {col.table} — declared "

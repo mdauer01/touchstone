@@ -159,8 +159,22 @@ class Fingerprint:
     gaps: tuple[str, ...] = ()
 
     @staticmethod
-    def make_id(core: SemanticCore, concept_candidate: str) -> str:
-        raw = f"{core.hash()}|{concept_candidate.lower()}"
+    def make_id(core: SemanticCore, concept_candidate: str, relation: str = "",
+                canon_level: str = "", gaps: tuple[str, ...] = ()) -> str:
+        """Identity of a definition SITE, not just of a definition.
+
+        Keyed on core+name alone, two models computing the same thing shared
+        one content-addressed store row (record_fingerprint is INSERT OR
+        IGNORE), so the first site recorded owned the relation forever: the
+        verdicts projection never named the second model, a renamed model
+        stayed attributed to its deleted relation, and a core that later
+        picked up completeness gaps kept the stale proof-grade level — the
+        monitor then certified against a definition that was no longer proof
+        grade. Relation, level and gaps are part of what the row asserts, so
+        they are part of what identifies it.
+        """
+        raw = "|".join((core.hash(), concept_candidate.lower(), relation,
+                        canon_level, ",".join(gaps)))
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @property

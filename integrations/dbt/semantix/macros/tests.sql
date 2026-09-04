@@ -31,7 +31,11 @@
     select 'CONTRADICTION stands' as reason, severity, summary
     from concept_verdicts where verdict = 'CONTRADICTION'
     union all
-    select 'no CERTIFIED verdict for {{ concept }}' as reason, 0, null
+    {#- A one-row anchor: `select ... where not exists (...)` with no FROM is
+        not accepted everywhere; a derived single row is. -#}
+    select 'no CERTIFIED verdict for {{ concept }}' as reason,
+           cast(0 as integer) as severity, cast(null as {{ dbt.type_string() }}) as summary
+    from (select 1 as one) as anchor
     where not exists (select 1 from concept_verdicts where verdict = 'CERTIFIED')
 {% endtest %}
 
@@ -42,6 +46,9 @@
 {% test fresh_scan(model, max_hours=24) %}
     select scan_id, scanned_at
     from {{ semantix.findings() }}
-    where scanned_at < {{ dbt.dateadd('hour', -max_hours, 'current_timestamp') }}
+    {#- Cast the cutoff: on BigQuery dateadd yields DATETIME and comparing it
+        with a TIMESTAMP column is a type error. -#}
+    where scanned_at < cast({{ dbt.dateadd('hour', -max_hours, 'current_timestamp') }}
+                            as {{ dbt.type_timestamp() }})
     limit 1
 {% endtest %}

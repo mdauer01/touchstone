@@ -62,6 +62,13 @@ def load_sql_dir(root: str | Path, dialect: str = "duckdb") -> tuple[list[Comput
     DELETED, manufacturing absence evidence out of an I/O error.
     """
     rootp = Path(root)
+    if not rootp.is_dir():
+        # A typo'd --sql-dir completed a scan with 0 artifacts and exit 0,
+        # became latest_scan, "resolved" every standing contradiction in
+        # `diff`, emptied the verdicts projection, and signed an ORPHAN_CLAIM
+        # receipt beside the concept's own computed evidence. --dbt and
+        # --views already refused; this was the one source that did not.
+        raise ValueError(f"{rootp}: not a directory")
     artifacts: list[ComputedArtifact] = []
     skipped: list[dict] = []
     # Case-insensitive: `rglob("*.sql")` silently skipped `.SQL` and `.Sql`
@@ -69,6 +76,10 @@ def load_sql_dir(root: str | Path, dialect: str = "duckdb") -> tuple[list[Comput
     candidates = sorted(
         p for p in rootp.rglob("*") if p.is_file() and p.suffix.lower() == ".sql"
     )
+    # An EXISTING directory with no .sql files is left to the CLI gate
+    # (`--fail-on` fails an empty estate by design, with its own message) and
+    # to the narrowed-scan semantics the store encodes; only a path that is
+    # not a directory at all is refused here.
     for path in candidates:
         rel_path = path.relative_to(rootp)
         object_id = str(rel_path)

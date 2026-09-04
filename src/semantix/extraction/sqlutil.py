@@ -19,8 +19,14 @@ def unwrap_select(ast: exp.Expression | None) -> exp.Select | None:
 
 
 def table_fqname(table: exp.Table) -> str:
+    """The relation a Table node names, WITHOUT the `_` placeholder that
+    canonicalize._pin_short_references adds for qualification. The pin is a
+    resolution device; letting it leak into join nodes and lineage made two
+    byte-identical models — one canonicalized before a full-depth model was
+    registered, one after — read as `raw.orders` vs `_.raw.orders` and
+    CONTRADICT each other over a relation that does not exist."""
     parts = [table.args.get("catalog"), table.args.get("db"), table.this]
-    return ".".join(p.name for p in parts if p is not None)
+    return ".".join(p.name for p in parts if p is not None and p.name != "_")
 
 
 def scope_sources(select: exp.Select) -> list[exp.Expression]:

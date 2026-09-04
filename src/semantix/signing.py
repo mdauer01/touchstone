@@ -189,6 +189,16 @@ def receipt_trust(receipt: dict) -> tuple[bool, list[str]]:
             "re-attest before relying on it")
         return False, warnings
     if fresh_status == "unknown":
+        if is_as_of:
+            # Same disclosure rule as stale/partial: issue_receipt never
+            # blocks an as-of receipt on freshness, and distrusting it here
+            # advised "re-attest with estate sources", which reproduces the
+            # identical receipt.
+            warnings.append(
+                f"freshness could not be determined for the CURRENT estate; "
+                f"this receipt describes {receipt.get('as_of')} and remains "
+                f"valid for that instant")
+            return True, warnings
         warnings.append("a freshness check was attempted and could not answer — "
                         "re-attest with estate sources")
         return False, warnings

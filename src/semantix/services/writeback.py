@@ -48,7 +48,7 @@ Before answering a business-metric question with a number, check whether the
 metric's definition is certified:
 
 ```sql
-SELECT content FROM agents.root
+SELECT content FROM "{catalog}".agents.root
 WHERE provider = 'semantix' AND key = 'receipt/<metric_name>';
 ```
 
@@ -71,9 +71,14 @@ DOC_CONTENT = (
 )
 
 
-def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
+def publish_receipts(store: Store, warehouse_path: str,
+                     freshness: dict | None = None) -> dict[str, Any]:
     """Publish signed receipts for every concept in the latest scan into the
-    warehouse's AGENTS.ROOT. Returns a summary of what was written."""
+    warehouse's AGENTS.ROOT. Returns a summary of what was written.
+
+    `freshness` is the estate re-check to embed in every receipt; without
+    it each published receipt carries `freshness.status = "unchecked"`, and
+    the docs' "decay honestly" claim rests on verified_as_of alone."""
     # Every other warehouse entry point refuses an unsupported scheme by name;
     # publish treated any string as a DuckDB path, so `--warehouse
     # postgres://host/db` died in a raw duckdb IOException.
@@ -100,16 +105,18 @@ def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
     labels = sorted({v["concept_label"] for v in store.verdicts_for_scan(scan["scan_id"])})
     rows: list[tuple[str, str, str]] = []
     for label in labels:
-        receipt = store.issue_receipt(label)
+        receipt = store.issue_receipt(label, freshness=freshness)
         if receipt is not None:
             rows.append((PROVIDER, f"receipt/{label}", json.dumps(receipt.as_dict())))
-    rows.append((PROVIDER, SKILL_KEY, SKILL_CONTENT))
-    rows.append((PROVIDER, DOC_KEY, DOC_CONTENT))
 
     con = duckdb.connect(warehouse_path)
     # Fully qualify with the catalog: a warehouse file named agents.duckdb —
-    # the natural name — makes bare `agents.root` ambiguous in DuckDB.
+    # the natural name — makes bare `agents.root` ambiguous in DuckDB. The
+    # skill text agents read must carry the same qualification, or the SQL
+    # it teaches fails in exactly that file.
     catalog = con.execute("SELECT current_database()").fetchone()[0]
+    rows.append((PROVIDER, SKILL_KEY, SKILL_CONTENT.replace("{catalog}", catalog)))
+    rows.append((PROVIDER, DOC_KEY, DOC_CONTENT))
     root = f'"{catalog}".agents.root'
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{catalog}".agents')
     con.execute(
@@ -138,11 +145,28 @@ def publish_receipts(store: Store, warehouse_path: str) -> dict[str, Any]:
             "does not match the Agents Schema convention"
         )
 
-    con.execute(f"DELETE FROM {root} WHERE provider = ?", (PROVIDER,))
-    con.executemany(
-        f"INSERT INTO {root} (provider, key, content) VALUES (?, ?, ?)", rows
-    )
-    verdict_rows = _publish_verdicts(store, scan, con, catalog)
+    try:
+        _refuse_unwritable_columns(con, "agents", "root", {"provider", "key", "content"},
+                                   warehouse_path)
+    except ValueError:
+        con.close()
+        raise
+    # One transaction for both tables: DuckDB autocommits each statement, so
+    # a DELETE that succeeded before an INSERT failed (a customer column the
+    # shape guard did not know about) left agents.root without our rows and
+    # semantix.verdicts EMPTY — after which every dbt gate passed cleanly.
+    con.begin()
+    try:
+        con.execute(f"DELETE FROM {root} WHERE provider = ?", (PROVIDER,))
+        con.executemany(
+            f"INSERT INTO {root} (provider, key, content) VALUES (?, ?, ?)", rows
+        )
+        verdict_rows = _publish_verdicts(store, scan, con, catalog, warehouse_path)
+        con.commit()
+    except Exception:
+        con.rollback()
+        con.close()
+        raise
     con.close()
 
     return {
@@ -162,7 +186,29 @@ _VERDICT_COLUMNS = ("scan_id", "scanned_at", "published_at", "concept",
                     "verdict", "severity", "summary", "relation")
 
 
-def _publish_verdicts(store: Store, scan: dict, con, catalog: str) -> int:
+def _refuse_unwritable_columns(con, schema: str, table: str, ours: set[str],
+                               warehouse_path: str) -> None:
+    """A customer-created table whose EXTRA columns are NOT NULL without a
+    default cannot take our rows; the name-only shape guard let the DELETE
+    run and the INSERT fail. Refuse before touching anything."""
+    rows = con.execute(
+        "SELECT column_name, is_nullable, column_default FROM information_schema.columns "
+        "WHERE lower(table_schema) = ? AND lower(table_name) = ?",
+        (schema, table)).fetchall()
+    blocking = sorted(name for name, nullable, default in rows
+                      if name.lower() not in ours
+                      and str(nullable).upper() == "NO" and default is None)
+    if blocking:
+        # The caller owns the connection (and the transaction, when there is
+        # one): closing here left the rollback path with a dead handle.
+        raise ValueError(
+            f"{warehouse_path}: {schema}.{table} carries NOT NULL column(s) "
+            f"{', '.join(blocking)} that semantix does not write — refusing "
+            f"to publish into a table shaped for another writer")
+
+
+def _publish_verdicts(store: Store, scan: dict, con, catalog: str,
+                      warehouse_path: str = "") -> int:
     """Project the latest scan's verdicts, one row per affected relation.
 
     A verdict is concept-level; consumers gate per-relation (`{{ this }}` in
@@ -195,20 +241,29 @@ def _publish_verdicts(store: Store, scan: dict, con, catalog: str) -> int:
         "concept VARCHAR, verdict VARCHAR, severity INTEGER, "
         "summary VARCHAR, relation VARCHAR)"
     )
-    existing = {
-        r[0].lower()
+    described = {
+        r[0].lower(): str(r[1]).upper()
         for r in con.execute(
-            "SELECT column_name FROM information_schema.columns "
+            "SELECT column_name, data_type FROM information_schema.columns "
             "WHERE lower(table_schema) = 'semantix' "
             "AND lower(table_name) = 'verdicts'"
         ).fetchall()
     }
-    missing = sorted(set(_VERDICT_COLUMNS) - existing)
-    if existing and missing:
+    missing = sorted(set(_VERDICT_COLUMNS) - set(described))
+    if described and missing:
         raise ValueError(
             f"semantix.verdicts exists but is missing column(s) "
             f"{', '.join(missing)} — refusing to write a projection tests "
             f"would silently misread")
+    # Names are not enough: a VARCHAR scanned_at took our rows and then
+    # broke every fresh_scan comparison at test time.
+    for col in ("scanned_at", "published_at"):
+        if col in described and "TIMESTAMP" not in described[col]:
+            raise ValueError(
+                f"semantix.verdicts.{col} is {described[col]}, not a timestamp "
+                f"— the freshness gate cannot compare against it")
+    _refuse_unwritable_columns(con, "semantix", "verdicts", set(_VERDICT_COLUMNS),
+                               warehouse_path)
 
     rows = []
     for v in store.verdicts_for_scan(scan["scan_id"]):

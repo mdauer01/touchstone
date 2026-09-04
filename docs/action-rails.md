@@ -52,11 +52,18 @@ CREATE ALERT semantix_contradictions
   SCHEDULE = '60 MINUTE'
   IF (EXISTS (SELECT 1 FROM semantix.verdicts WHERE verdict = 'CONTRADICTION'))
   THEN CALL SYSTEM$SEND_EMAIL(...);  -- or a notification integration
+ALTER ALERT semantix_contradictions RESUME;  -- alerts are created SUSPENDED
 ```
 
 Databricks: a SQL Alert on the same SELECT, routed to the workspace's
 existing email/Slack/webhook destinations. BigQuery: a scheduled query or a
-Dataform assertion over the table.
+Dataform assertion over the table (`scanned_at` is a TIMESTAMP; compare it
+against `CURRENT_TIMESTAMP()`, not a DATETIME).
+
+Two DuckDB notes: name the warehouse file anything but `agents.duckdb` or
+`semantix.duckdb`, or qualify with the catalog (`"agents".agents.root`) —
+DuckDB otherwise reports the bare `agents.root` as ambiguous. URL forms are
+`duckdb://relative/path.duckdb` and `duckdb:///absolute/path.duckdb`.
 
 ## Orchestrators
 
@@ -65,10 +72,13 @@ Dagster — verdicts are relation-keyed, so they map onto asset checks:
 ```python
 @asset_check(asset=fct_orders)
 def no_semantic_contradictions(context) -> AssetCheckResult:
+    # Relations are stored as the scan saw them — three-part on a dbt
+    # project with a database, two-part otherwise — so match both forms.
     rows = warehouse.query(
         "SELECT concept, summary FROM semantix.verdicts "
         "WHERE verdict = 'CONTRADICTION' "
-        "AND lower(relation) = 'analytics.fct_orders'")
+        "AND (lower(relation) = 'prod.analytics.fct_orders' "
+        "     OR lower(relation) = 'analytics.fct_orders')")
     return AssetCheckResult(passed=not rows,
                             metadata={"findings": [r[1] for r in rows]})
 ```

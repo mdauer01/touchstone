@@ -4,9 +4,11 @@ its own physical shape.
 Hand-maintained catalog YAML is the first thing to drift on a real estate —
 and a stale catalog quietly degrades qualification, which degrades proof
 grade, which shrinks what a scan can say. `information_schema.columns` is
-ANSI-standard and served by DuckDB, Databricks (per catalog), Snowflake and
-BigQuery alike, so the catalog can be regenerated from the warehouse itself
-and diffed like any other artifact.
+ANSI-standard, so the catalog can be regenerated from the warehouse itself
+and diffed like any other artifact. The shipped driver is DuckDB; on
+Databricks, Snowflake and BigQuery the same query applies per catalog /
+database / dataset once a driver exists (`semantix.warehouse` names the
+seam) — this module does not claim to reach them today.
 
 System namespaces are excluded; an empty result raises rather than writing
 an empty catalog, because the likeliest cause is a wrong URL — and a scan
@@ -24,11 +26,18 @@ import yaml
 _SYSTEM_SCHEMAS = ("information_schema", "pg_catalog")
 _SYSTEM_CATALOGS = ("system", "temp")
 
+
+def _sql_list(values: tuple[str, ...]) -> str:
+    # Not `repr(tuple)`: a one-element tuple renders as ('x',), which
+    # Snowflake and BigQuery reject.
+    return "(" + ", ".join("'" + v.replace("'", "''") + "'" for v in values) + ")"
+
+
 _COLUMNS_QUERY = f"""
 SELECT table_catalog, table_schema, table_name, column_name, data_type
 FROM information_schema.columns
-WHERE lower(table_schema) NOT IN {_SYSTEM_SCHEMAS!r}
-  AND lower(table_catalog) NOT IN {_SYSTEM_CATALOGS!r}
+WHERE lower(table_schema) NOT IN {_sql_list(_SYSTEM_SCHEMAS)}
+  AND lower(table_catalog) NOT IN {_sql_list(_SYSTEM_CATALOGS)}
 ORDER BY table_catalog, table_schema, table_name, ordinal_position
 """.strip()
 
@@ -38,10 +47,23 @@ def generate_catalog(warehouse) -> dict:
     adapters.catalog.load_catalog reads it back."""
     rows = warehouse.query(_COLUMNS_QUERY)
     catalog: dict = {}
+    dotted: set[str] = set()
     for cat, schema, table, column, data_type in rows:
-        (catalog.setdefault(str(cat), {})
-                .setdefault(str(schema), {})
-                .setdefault(str(table), {}))[str(column)] = str(data_type)
+        parts = (str(cat), str(schema), str(table))
+        if any("." in p for p in parts):
+            # Legal in DuckDB, unrepresentable in a dot-nested YAML catalog:
+            # loaded back, `tbl_1.5` split into a phantom namespace and every
+            # fingerprint in the scan degraded to `parsed`.
+            dotted.add(".".join(parts))
+            continue
+        (catalog.setdefault(parts[0], {})
+                .setdefault(parts[1], {})
+                .setdefault(parts[2], {}))[str(column)] = str(data_type)
+    if dotted:
+        raise ValueError(
+            "relation name(s) containing a dot cannot be represented in the "
+            "catalog YAML: " + ", ".join(sorted(dotted)) + " — rename or "
+            "exclude them; refusing to write a catalog that would misparse")
     if not catalog:
         raise ValueError(
             "information_schema returned no user tables — likely a wrong "

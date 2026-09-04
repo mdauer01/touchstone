@@ -13,7 +13,7 @@ orchestrator alerting you already run, and stay red until resolved.
 packages:
   - git: "<your semantix repo url>"
     subdirectory: integrations/dbt/semantix
-    revision: v0.1.0
+    revision: main            # or a tag once one exists — `git tag` is empty today
 ```
 
 Run the pipeline in this order: `semantix scan` → `semantix publish

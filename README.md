@@ -59,7 +59,7 @@ engineered so one scan produces every verdict type:
 ```bash
 # change a model's SQL, rescan into the same db, then:
 .venv/bin/semantix history net_revenue --db out/semantix.db   # valid-time intervals per site
-.venv/bin/semantix asof net_revenue --at 2026-06-01T00:00:00Z --db out/semantix.db
+.venv/bin/semantix asof net_revenue --at <timestamp after your first scan> --db out/semantix.db
 .venv/bin/semantix attest net_revenue --db out/semantix.db    # semantic receipt (JSON)
 ```
 
@@ -78,7 +78,7 @@ canonical payload**, so it verifies offline:
 **Verification decays honestly.** A verdict describes the estate *at scan time*, so
 every receipt carries `verified_as_of` plus a `freshness` block. Pass the estate's
 sources to `attest` (`--dbt` / `--sql-dir` / `--views` / `--metrics` /
-`--agents-schema` / `--osi`) and it re-hashes them against the scan's recorded snapshot before
+`--agents-schema` / `--osi` / `--uc-metrics`) and it re-hashes them against the scan's recorded snapshot before
 answering:
 
 ```bash
@@ -137,7 +137,7 @@ SQL the BI tool actually ran. semantix mines that history, then refuses to trust
 [CERTIFIED ] declared+used  analytics.fct_orders.customer_id = raw.customers.customer_id · 3 queries
       N:1, parent key raw.customers.customer_id
 [FAILED    ] shadow         analytics.fct_orders.order_id = raw.payments.order_id · 2 queries
-      1:N, parent key analytics.fct_orders.order_id — 2 orphan value(s) violate referential integrity
+      1:N, parent key analytics.fct_orders.order_id — 2 orphan row(s) violate referential integrity
 [FAILED    ] shadow         analytics.fct_orders.channel = raw.payments.method · 1 query
       N:M — no unique side (N:M) — join semantics undefined
 [CERTIFIED ] orphan         raw.channels.channel_code = raw.orders.channel · never used
@@ -156,7 +156,7 @@ Every edge therefore carries two orthogonal axes: **status** (`certified` / `fai
 `unverified` — what the warehouse proved) and **usage** (`declared+used` / `shadow` /
 `orphan` — declaration vs. practice). A certified shadow edge is a documentation gap; a
 failed heavily-used edge is an active bug; a certified orphan means the ERD is right and
-nobody joins it. In the demo above, the payments↔orders join *six dashboards rely on* is
+nobody joins it. In the demo above, the payments↔orders join *the shipped query history uses* is
 broken: a payment for a cancelled order and one for a deleted order both survive into
 `fct_orders` joins. Mining is alias- and direction-free — flipped operands and implicit
 `FROM a, b WHERE a.x = b.y` joins collapse into one edge — and unparseable history lines
@@ -253,7 +253,8 @@ match the declaration instead — Option B, the code drifted — in a
 declaration drafted from the fingerprint: accept it or delete the model.
 Nothing is applied; the human picks in the review rail, and a declaration
 emitted from a fingerprint scans back in as CERTIFIED (tested round-trip).
-The same emitter is the Ossie export.
+The same emitter will back the planned Ossie export (`publish --definitions`,
+still open).
 
 The demo export deliberately carries the standard's characteristic
 underspecifications — an OSI metric with no filters, a LookML measure with no

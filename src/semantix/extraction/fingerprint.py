@@ -39,6 +39,8 @@ def extract_fingerprints(
         return []
 
     amap = _resolve_cte_sources(table_map(select), select, dialect)
+    # One physical table, one name — whatever form the query wrote it in.
+    amap = {alias: registry.canonical_relation(rel) for alias, rel in amap.items()}
     single_source = next(iter(amap.values())) if len(amap) == 1 else None
 
     # Everything below is encoded into the EXISTING SemanticCore fields rather
@@ -124,7 +126,7 @@ def extract_fingerprints(
         )
         fingerprints.append(
             Fingerprint(
-                fingerprint_id=Fingerprint.make_id(core, name),
+                fingerprint_id=Fingerprint.make_id(core, name, relation, level, gaps),
                 concept_candidate=name,
                 core=core,
                 relation=relation,

@@ -141,7 +141,12 @@ def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, .
     """
     if not _has_inner_order(parsed):
         return ()
-    if not (_order_sensitive_names(parsed) or _window_gaps(parsed)):
+    # DISTINCT ON without its own ORDER BY is a consumer too — the gate
+    # enumerated only functions and windows here, so the chain below was
+    # never even examined for it and asc/desc variants certified equal.
+    inherits_order = any(_has_distinct_on(s) and s.args.get("order") is None
+                         for s in parsed.find_all(exp.Select))
+    if not (_order_sensitive_names(parsed) or _window_gaps(parsed) or inherits_order):
         return ()
     # The gap fires only when an inner ORDER BY sits in a scope a consumer
     # actually READS. The whole-AST test fired on a decorative ordering in an
@@ -180,10 +185,16 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
 
     # Read what the optimizer is about to destroy, before it runs.
     pre_gaps = _pre_optimization_gaps(parsed, dialect)
+    # A bind parameter (`$1`, `?`, `:status`) is a value the text does not
+    # carry; a core built over it describes a FAMILY of queries. Deny by
+    # default: it can be reported and diffed, never certified — and never
+    # accused of "differing filters" against a concrete value.
+    if parsed.find(exp.Placeholder) is not None or parsed.find(exp.Parameter) is not None:
+        pre_gaps = pre_gaps + ("bind parameter placeholder in query text",)
 
     _pin_short_references(parsed, schema)
     _strip_neutral(parsed)
-    _resolve_group_ordinals(parsed)
+    pre_gaps = pre_gaps + _resolve_group_ordinals(parsed)
 
     error = None
     try:
@@ -201,6 +212,14 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
     try:
         ast = _canonical_table_aliases(ast)
         ast = _normalize_symmetric(ast, dialect)
+        # The `_` pin has done its job (qualification); it must not survive
+        # into the canonical text, where it named a relation that does not
+        # exist in blame and receipts.
+        for table in ast.find_all(exp.Table):
+            for part in ("catalog", "db"):
+                ident = table.args.get(part)
+                if ident is not None and ident.name == "_":
+                    table.set(part, None)
     except Exception as e3:  # noqa: BLE001
         # Normalization is best-effort; a partially normalized AST is still
         # usable, it just weakens equality to a hypothesis — and THAT is what
@@ -241,6 +260,19 @@ def _pin_short_references(ast: exp.Expression, schema) -> None:
         else:
             key = (table.args["db"].name.lower(), name)
         pad = short.get(key)
+        if pad is None and len(key) == 1:
+            # A BARE one-part reference has no db to match a `(db, name)`
+            # short entry, so on a mixed-depth estate it raced the replicas
+            # (`raw._` vs `raw.prod`) and sqlglot refused it as ambiguous —
+            # a coverage regression against round five. When exactly one
+            # short entry ends in this name, that is its home.
+            tails = [k for k in short if len(k) > 1 and k[-1] == name]
+            if len(tails) == 1:
+                key = tails[0]
+                pad = short[key]
+                table.set("db", exp.to_identifier(key[-2]))
+                if len(key) == 3:
+                    table.set("catalog", exp.to_identifier(key[0]))
         if pad is None:
             continue
         if len(key) == 2 and pad >= 1:
@@ -283,8 +315,12 @@ def _strip_neutral(ast: exp.Expression) -> None:
 
 def _order_bearing_selects(ast: exp.Expression) -> set[int]:
     """ids of Selects whose ORDER BY an order-sensitive consumer can see."""
+    # Lowercased: this runs on the PRE-normalization AST, and DuckDB/Snowflake
+    # fold unquoted identifiers, so `WITH S AS (...) SELECT first(x) FROM s`
+    # is one chain. Matching as written missed it, the ordering was stripped,
+    # and asc/desc variants certified equal at proof grade.
     bodies: dict[str, exp.Expression] = {
-        cte.alias_or_name: cte.this for cte in ast.find_all(exp.CTE)
+        cte.alias_or_name.lower(): cte.this for cte in ast.find_all(exp.CTE)
     }
 
     def consumer_selects() -> list[exp.Select]:
@@ -302,6 +338,15 @@ def _order_bearing_selects(ast: exp.Expression) -> set[int]:
                 parent = window.find_ancestor(exp.Select)
                 if parent is not None:
                     out.append(parent)
+        # DISTINCT ON is the third order-sensitive consumer — neither an
+        # aggregate nor a window. Without its own ORDER BY it inherits the
+        # ordering of the scope it reads (Postgres: "unpredictable" without
+        # one), so that inner ordering is load-bearing and must reach the
+        # keep-set; both STRIPPING sites knew this, the consumer enumeration
+        # did not, and asc/desc variants certified equal.
+        for select in ast.find_all(exp.Select):
+            if _has_distinct_on(select) and select.args.get("order") is None:
+                out.append(select)
         return out
 
     keep: set[int] = set()
@@ -317,7 +362,7 @@ def _order_bearing_selects(ast: exp.Expression) -> set[int]:
             return
         source = sources[0]
         if isinstance(source, exp.Table) and not source.args.get("db"):
-            name = source.name
+            name = source.name.lower()
             if name in bodies and name not in seen:
                 seen.add(name)
                 body = bodies[name]
@@ -338,9 +383,14 @@ def _order_bearing_selects(ast: exp.Expression) -> set[int]:
     return keep
 
 
-def _resolve_group_ordinals(ast: exp.Expression) -> None:
+def _resolve_group_ordinals(ast: exp.Expression) -> tuple[str, ...]:
     """Rewrite GROUP BY 1 to the projection expression it points at, so
-    ordinal and explicit grouping canonicalize identically."""
+    ordinal and explicit grouping canonicalize identically. Returns gaps:
+    an ordinal aimed at an aggregate is SQL no warehouse runs, and leaving
+    the literal in place was not enough — sqlglot's own positional expansion
+    spliced the aggregate into the grain downstream, so the unrunnable query
+    still reached proof grade with a content-free grain."""
+    gaps: list[str] = []
     for select in ast.find_all(exp.Select):
         group = select.args.get("group")
         if group is None:
@@ -379,11 +429,8 @@ def _resolve_group_ordinals(ast: exp.Expression) -> None:
                     target = select.expressions[idx]
                     target = target.this if isinstance(target, exp.Alias) else target
                     if target.find(exp.AggFunc) is not None:
-                        # `GROUP BY 1` pointing at an aggregate projection is
-                        # SQL no warehouse executes; splicing the aggregate in
-                        # fabricated a proof-grade grain for an unrunnable
-                        # query. Leave the literal — the query fails
-                        # downstream where it should.
+                        gaps.append("GROUP BY ordinal targets an aggregate "
+                                    "projection (unrunnable grouping)")
                         continue
                     item.replace(target.copy())
 
@@ -392,6 +439,7 @@ def _resolve_group_ordinals(ast: exp.Expression) -> None:
             for node in group.args.get(construct) or []:
                 if isinstance(node, exp.Expression):
                     resolve_items(list(node.expressions))
+    return tuple(gaps)
 
 
 def normalize_scope(ast: exp.Expression, dialect: str) -> exp.Expression:

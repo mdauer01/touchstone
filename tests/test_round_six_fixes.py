@@ -145,15 +145,25 @@ def test_multi_database_estates_bind_both_reference_forms():
     coverage on PROD+DEV) and an `_`-only fallback broke fully-qualified
     refs. Short entries now live under `_` AND replicas, with short
     references PINNED to `_` before optimizing — neither form is ambiguous."""
+    # Round seven found the first version registered models with NO AST, so
+    # the schema stayed two-part and the test exercised neither padding,
+    # replication nor pinning. Real models make the estate three-part.
     cols = {"id": "bigint", "region": "varchar", "amount": "decimal(18,2)"}
     registry = SchemaRegistry({"landing.raw_t": cols})
-    registry.register_model("PROD.analytics.m1", None)
-    registry.register_model("DEV.analytics.m2", None)
+    for relation, ref in (("PROD.analytics.m1", "PROD.LANDING.RAW_T"),
+                          ("DEV.analytics.m2", "DEV.LANDING.RAW_T")):
+        canon = canonicalize_sql(f"select region, sum(amount) as m from {ref} group by 1",
+                                 registry.sqlglot_schema("snowflake"), "snowflake")
+        registry.register_model(relation, canon.ast)
+    assert set(registry._nested()) >= {"_", "PROD", "DEV"}
+    assert registry.short_entries(), "short entries must exist on a mixed-depth estate"
     for sql in ("select region, sum(amount) as m from PROD.LANDING.RAW_T group by 1",
                 "select region, sum(amount) as m from DEV.LANDING.RAW_T group by 1",
                 "select region, sum(amount) as m from landing.raw_t group by 1"):
         canon = canonicalize_sql(sql, registry.sqlglot_schema("snowflake"), "snowflake")
         assert canon.level == CanonLevel.OPTIMIZED, f"{sql}: {canon.error}"
+        # And the short form binds to the CATALOG relation, never to `_`.
+        assert "_." not in canon.ast.sql()
 
 
 def test_reaggregation_refusal_survives_spelling_variants():

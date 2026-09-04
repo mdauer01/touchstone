@@ -98,11 +98,24 @@ def markdown_comment(diff: dict[str, Any]) -> str:
         lines.append("### semantix: no new semantic verdicts ✅")
     lines.append("")
 
-    if resolved:
-        s = "s" if len(resolved) != 1 else ""
-        lines.append(f"**{len(resolved)} verdict{s} resolved by this change:** "
+    # A verdict that DISAPPEARED is not always good news: a lost CERTIFIED or
+    # ALIASING is a regression, and a lost CONTRADICTION on a scan that read
+    # nothing is a typo'd path, not a fix. Only problem verdicts are
+    # "resolved"; the affirmative ones are reported as lost.
+    fixed = [v for v in resolved if v["verdict"] not in ("CERTIFIED", "ALIASING")]
+    lost = [v for v in resolved if v["verdict"] in ("CERTIFIED", "ALIASING")]
+    if fixed:
+        s = "s" if len(fixed) != 1 else ""
+        lines.append(f"**{len(fixed)} verdict{s} resolved by this change:** "
                      + ", ".join(f"{_BADGE.get(v['verdict'], '')} {v['verdict']} "
-                                 f"`{v['concept_label']}`" for v in resolved))
+                                 f"`{v['concept_label']}`" for v in fixed))
+        lines.append("")
+    if lost:
+        s = "s" if len(lost) != 1 else ""
+        lines.append(f"**{len(lost)} certification{s} LOST by this change:** "
+                     + ", ".join(f"🔴 {v['verdict']} `{v['concept_label']}`" for v in lost)
+                     + " — the estate no longer earns these; if the scan read "
+                       "fewer models than before, check the source paths first")
         lines.append("")
 
     lines.append(f"_{diff['unchanged']} pre-existing verdict(s) unchanged · "

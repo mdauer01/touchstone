@@ -40,6 +40,7 @@ reasons instead of log lines.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 
@@ -63,6 +64,7 @@ _SQL_DIALECTS: dict[str, str | None] = {
     "BIGQUERY": "bigquery",
 }
 _NON_SQL_DIALECTS = frozenset({"MDX", "TABLEAU", "MAQL"})
+_RELATION_RE = re.compile(r"^[\w$]+(\.[\w$]+){0,2}$")
 
 # Deny-by-default key vocabulary (spec 0.1.x object shapes).
 _DOC_KEYS = frozenset({"version", "semantic_model"})
@@ -106,9 +108,14 @@ def load_ossie(path: str | Path, dialect: str = "duckdb"
     entries must never represent unread estate.
     """
     root = Path(path)
+    skipped: list[dict] = []
     if root.is_dir():
-        files = sorted(p for p in root.rglob("*") if p.is_file()
-                       and p.suffix.lower() in (".json", ".yml", ".yaml"))
+        candidates = sorted(p for p in root.rglob("*")
+                            if p.suffix.lower() in (".json", ".yml", ".yaml"))
+        files = [p for p in candidates if p.is_file()]
+        for p in candidates:
+            if p.is_symlink() and not p.exists():
+                skipped.append(_info(p.name, str(p), "broken symlink — not read"))
         if not files:
             raise ValueError(
                 f"{root}: no .json/.yaml files found — is this an osi/ "
@@ -121,7 +128,6 @@ def load_ossie(path: str | Path, dialect: str = "duckdb"
         raise ValueError(f"{root}: not a file or directory")
 
     specs: list[DeclaredSpec] = []
-    skipped: list[dict] = []
     documents = 0
     for f in files:
         suffix = f.suffix.lower()
@@ -149,7 +155,7 @@ def _unwrap(f: Path, data: object, strict: bool, skipped: list[dict]) -> list[di
         if "documents" in data:
             inner = data["documents"]
             if isinstance(inner, dict):
-                entries = [inner[k] for k in sorted(inner)]
+                entries = [inner[k] for k in sorted(inner, key=str)]
             elif isinstance(inner, list):
                 entries = inner
             else:
@@ -178,13 +184,23 @@ def _unwrap(f: Path, data: object, strict: bool, skipped: list[dict]) -> list[di
         skipped.append(_info(f.name, str(f),
                              "not an Ossie document (no `semantic_model`) — not read"))
         return []
-    if isinstance(data, list) and data and all(
-            isinstance(d, dict) and "semantic_model" in d for d in data):
-        return data
+    if isinstance(data, list):
+        docs = [d for d in data if isinstance(d, dict) and "semantic_model" in d]
+        if docs:
+            # A list holding documents AND anything else is malformed, not
+            # "not an Ossie document": skipping the whole file as informational
+            # let a declaration go unread while the concept CERTIFIED.
+            stray = [i for i, d in enumerate(data)
+                     if not (isinstance(d, dict) and "semantic_model" in d)]
+            if stray:
+                raise ValueError(
+                    f"{f}: list entries {stray} are not Ossie documents beside "
+                    f"{len(docs)} that are — refusing to read half a file")
+            return docs
     if strict:
         raise ValueError(
-            f"{f}: not an Ossie document — expected an object with "
-            f"`version` and `semantic_model`")
+            f"{f}: not an Ossie document — expected an object with `version` "
+            f"and `semantic_model`, or a list of such objects")
     skipped.append(_info(f.name, str(f),
                          "not an Ossie document (no `semantic_model`) — not read"))
     return []
@@ -233,10 +249,19 @@ def _read_model(f: Path, model_name: str, model: dict, doc_taints: list[str],
         if not isinstance(raw, dict):
             raise ValueError(f"{f}: {model_name} datasets[{j}] is not an object")
         ds = _read_dataset(f, model_name, j, raw)
+        if ds.name.lower() in ds_by_name:
+            # Lower-casing for lookup silently let `Orders` overwrite
+            # `orders` — a metric then bound to whichever came last.
+            taints.append(f"datasets {ds_by_name[ds.name.lower()].name} and "
+                          f"{ds.name} differ only by case — ambiguous")
         ds_by_name[ds.name.lower()] = ds
         ds_by_tail.setdefault(ds.tail.lower(), []).append(ds)
         if raw.get("primary_key") or raw.get("unique_keys"):
             key_decls += 1
+    for ds in ds_by_name.values():
+        if ds.source.lower() in ds_by_name and ds_by_name[ds.source.lower()] is not ds:
+            ds.taints.append(f"dataset {ds.name} source {ds.source!r} is another "
+                             f"dataset's NAME, not a relation")
 
     metrics = model.get("metrics") or []
     for k, metric in enumerate(metrics):
@@ -281,6 +306,13 @@ def _read_dataset(f: Path, model_name: str, idx: int, raw: dict) -> _Dataset:
                          f"source — its metrics would bind to nothing")
     source = source.replace('"', "").replace("`", "").strip()
     ds = _Dataset(name=name, source=source, tail=source.split(".")[-1])
+    if not _RELATION_RE.match(source):
+        # The synthesized claim reads `FROM {source}` verbatim; an
+        # unvalidated source spliced `db.main.orders WHERE status = 'paid'`
+        # into the claim and it CERTIFIED as a filtered metric.
+        ds.taints.append(f"dataset {name} source {source[:60]!r} is not a "
+                         f"1–3 part relation name — claims need a relation "
+                         f"to bind to")
 
     unknown = sorted(set(raw) - _DATASET_KEYS)
     if unknown:
@@ -312,6 +344,10 @@ def _read_dataset(f: Path, model_name: str, idx: int, raw: dict) -> _Dataset:
                               f"{', '.join(vendors)} — content not readable")
         fld.variants = _variant_map(fraw.get("expression"), fld.taints,
                                     f"field {f_name}")
+        if f_name.lower() in ds.fields:
+            fld.taints.append(f"fields differ only by case ({f_name}) — ambiguous")
+            ds.fields[f_name.lower()].taints.append(
+                f"fields differ only by case ({f_name}) — ambiguous")
         ds.fields[f_name.lower()] = fld
     return ds
 
@@ -445,6 +481,10 @@ def _translate(text: str, read: str | None, d_name: str,
     if isinstance(node, exp.Query):
         return None, None, ["expression is a full query — expected a scalar "
                             "metric expression"]
+    if node.find(exp.Query) is not None:
+        return None, None, ["expression contains a subquery — its table "
+                            "references bypass dataset resolution, so the "
+                            "cross-dataset rule cannot be applied to it"]
 
     columns = list(node.find_all(exp.Column))
     resolved: dict[int, _Dataset] = {}
@@ -524,7 +564,33 @@ def _translate(text: str, read: str | None, d_name: str,
         except Exception as e:  # noqa: BLE001
             return None, ds.source, [
                 f"field {col.name} expression could not be parsed: {e}"]
-        replacement = sub if isinstance(sub, exp.Column) else exp.Paren(this=sub)
+        # Substitution is one level deep by construction. A field expression
+        # that itself names another declared field, or qualifies a column
+        # with ANY dataset, would be spliced in unresolved — the inner name
+        # then bound to a physical column of the wrong table and CERTIFIED.
+        # Refuse both shapes rather than resolve to a fixpoint we cannot
+        # promise is what the author meant.
+        for inner in sub.find_all(exp.Column):
+            if inner.table:
+                return None, ds.source, [
+                    f"field {col.name} qualifies {inner.table}.{inner.name} — "
+                    f"field expressions must reference the dataset's own "
+                    f"columns unqualified"]
+            if inner.name.lower() in ds.fields:
+                return None, ds.source, [
+                    f"field {col.name} references declared field "
+                    f"{inner.name} — nested field resolution is not modelled"]
+        if sub.find(exp.AggFunc) is not None or sub.find(exp.Query) is not None:
+            return None, ds.source, [
+                f"field {col.name} expression aggregates or subqueries — not a "
+                f"row-level field"]
+        # Parenthesize only where precedence needs it: a Paren wrapped around
+        # a function argument survived canonicalization and made
+        # `SUM((amount - refunds))` differ from the mart's `SUM(amount -
+        # refunds)` — a false CONTRADICTION for every substituted field.
+        needs_paren = (isinstance(sub, exp.Binary)
+                       and isinstance(col.parent, (exp.Binary, exp.Unary)))
+        replacement = exp.Paren(this=sub) if needs_paren else sub
         if col is node:
             node = replacement
         else:

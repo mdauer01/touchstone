@@ -125,23 +125,33 @@ def test_emit_metrics_unqualifies_and_unquotes():
     assert entry["group_by"] == ["DATE_TRUNC('MONTH', order_date)"]
 
 
+def _registry():
+    from semantix.extraction.registry import SchemaRegistry
+    return SchemaRegistry({"db.main.orders": {"amount": "DOUBLE", "status": "VARCHAR",
+                                              "order_date": "DATE"}})
+
+
 def test_emit_uc_metric_view_shape():
     emitted, reasons = emit_declaration(
-        "net_revenue",
-        _core(filters=('t0."status" = \'completed\'',),
-              grain=("DATE_TRUNC('MONTH', t0.\"order_date\")",)),
-        "duckdb", "uc-metrics")
-    assert not reasons
+        "net_revenue", _core(filters=('t0."status" = \'completed\'',)),
+        "duckdb", "uc-metrics", registry=_registry())
+    assert not reasons and emitted.verified is True
     doc = yaml.safe_load(emitted.text)
     assert doc["version"] == "1.1" and doc["source"] == "db.main.orders"
     assert "status = 'completed'" in doc["filter"]
     assert doc["measures"] == [{"name": "net_revenue", "expr": "SUM(amount)"}]
-    assert doc["fields"][0]["expr"].startswith("DATE_TRUNC")
+    # A metric-view measure has no fixed grain: writing grain as `fields`
+    # rescanned as a CONTRADICTION, so a grained core is refused.
+    _, reasons = emit_declaration(
+        "net_revenue", _core(grain=("DATE_TRUNC('MONTH', t0.\"order_date\")",)),
+        "duckdb", "uc-metrics", registry=_registry())
+    assert reasons and "no fixed grain" in reasons[0]
 
 
 def test_emit_ossie_document_and_its_refusal():
-    emitted, reasons = emit_declaration("total_revenue", _core(), "duckdb", "ossie")
-    assert not reasons
+    emitted, reasons = emit_declaration("total_revenue", _core(), "duckdb", "ossie",
+                                        registry=_registry())
+    assert not reasons and emitted.verified is True
     doc = json.loads(emitted.text)
     assert doc["version"] == "0.1.1"
     (model,) = doc["semantic_model"]
@@ -151,8 +161,11 @@ def test_emit_ossie_document_and_its_refusal():
 
     _, reasons = emit_declaration(
         "net_revenue", _core(filters=('t0."status" = \'completed\'',)),
-        "duckdb", "ossie")
+        "duckdb", "ossie", registry=_registry())
     assert reasons and "no filter or grain" in reasons[0]
+    # Without a registry there is no self-check, and Ossie/UC transpile.
+    _, reasons = emit_declaration("total_revenue", _core(), "duckdb", "ossie")
+    assert reasons and "self-check" in reasons[0]
 
 
 def test_emit_refuses_join_graph_and_tagged_filters():
@@ -187,7 +200,10 @@ def test_memo_presents_both_directions_and_writes_files(tmp_path):
     assert "only a human can pick" in memo
     assert "status = 'completed'" in memo
     assert len(written["declarations"]) == 1
-    assert written["declarations"][0].endswith("net_revenue__rev_mart.yml")
+    # Full relation + content hash: two sites sharing a table name in
+    # different schemas no longer overwrite each other.
+    assert "net_revenue__db_main_rev_mart__" in written["declarations"][0]
+    assert written["declarations"][0].endswith(".yml")
 
 
 def test_memo_when_nothing_to_propose(tmp_path):

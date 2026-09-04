@@ -171,10 +171,37 @@ class SchemaRegistry:
     def knows(self, relation: str) -> bool:
         return relation in self._types
 
+    def known_models(self) -> set[str]:
+        """Relations registered from computed SQL (as opposed to catalog
+        tables): reading one of these is reading THROUGH a definition."""
+        return set(self._terminals)
+
     def columns(self, relation: str) -> list[str]:
         return list(self._types.get(relation, {}))
 
+    def canonical_relation(self, relation: str) -> str:
+        """The registry's own name for a relation referenced in any form.
+
+        A short reference (`orders`, `raw.orders`) and a fully qualified one
+        (`PROD.raw.orders`) to a table the catalog holds once are the same
+        physical table; sqlglot binds both (via `_` padding and replicas),
+        but keying lineage and join nodes on the reference AS WRITTEN made
+        them different cores — a byte-identical dashboard query was accused
+        of reading a different table. Exact key first, then a UNIQUE suffix
+        match in either direction; ambiguous or unknown names pass through
+        unchanged (an unknown raw table is still honestly named by what the
+        query wrote). Non-relation markers (`cte:`, `<derived:`) pass through.
+        """
+        if not relation or relation in self._types or relation.startswith(("cte:", "<")):
+            return relation
+        target = relation.lower()
+        matches = [k for k in self._types
+                   if k.lower().endswith("." + target) or target.endswith("." + k.lower())
+                   or k.lower() == target]
+        return matches[0] if len(matches) == 1 else relation
+
     def terminals_for(self, relation: str, column: str) -> tuple[str, ...]:
+        relation = self.canonical_relation(relation)
         table = self._terminals.get(relation)
         if table and column in table:
             return table[column]

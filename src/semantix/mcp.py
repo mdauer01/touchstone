@@ -130,6 +130,15 @@ class McpServer:
     # ------------------------------------------------------------- tool impls
 
     def _attest(self, args: dict) -> Any:
+        unknown = sorted(set(args) - {"concept", "as_of"})
+        if unknown:
+            # Estate sources are SERVER configuration (--dbt/--osi/... at
+            # startup). A per-call `osi_path` was silently ignored, so a
+            # caller believed it had re-checked freshness against a document
+            # the server never opened.
+            return {"error": f"unknown argument(s) {', '.join(unknown)} — estate "
+                             f"sources for freshness are configured when the "
+                             f"server starts, not per call"}
         freshness = None
         if self.estate:
             from semantix.services.freshness import check_freshness

@@ -8,7 +8,8 @@ seam when asked for one that isn't shipped yet.
 
 Accepted URLs:
     path/to/file.duckdb            local DuckDB file (read-only)
-    duckdb:///path/to/file.duckdb  same, explicit scheme
+    duckdb://path/to/file.duckdb   same, explicit scheme, relative path
+    duckdb:///abs/path/file.duckdb absolute path (extra leading slashes collapse)
     :memory:                       ephemeral in-memory DuckDB
 """
 
@@ -102,7 +103,16 @@ def connect_warehouse(url: str) -> DuckDBWarehouse:
             return DuckDBWarehouse.ephemeral()
         return DuckDBWarehouse.from_path(url)
     if scheme == "duckdb":
-        return DuckDBWarehouse.from_path(rest.lstrip("/") if rest.startswith("//") else rest)
+        # One grammar, documented in the module docstring: `duckdb://rel/path`
+        # is relative, `duckdb:///abs/path` is absolute (extra leading slashes
+        # collapse). The previous rule stripped ALL leading slashes when there
+        # were two or more, so the documented `duckdb:///wh.db` opened `/wh.db`
+        # at the filesystem root on one path and `wh.db` on another.
+        path = "/" + rest.lstrip("/") if rest.startswith("/") else rest
+        if not path.strip("/"):
+            raise UnsupportedWarehouseError(
+                "duckdb:// carries no path — pass duckdb://<file> or duckdb:///<abs path>")
+        return DuckDBWarehouse.from_path(path)
     raise UnsupportedWarehouseError(
         f"no {scheme}:// driver shipped yet — a driver is query(sql)->rows, "
         "close(), and a dialect attribute; see semantix/warehouse.py"

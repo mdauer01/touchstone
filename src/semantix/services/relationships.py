@@ -116,19 +116,64 @@ def mine_sql_text(
 
 
 def _parse_statements(text: str, dialect: str) -> tuple[list[exp.Expression], int]:
+    """(parsed statements, unparseable statement count) for a history blob.
+
+    Statements are split on semicolons OUTSIDE strings and comments, using
+    the dialect's tokenizer, and each is parsed on its own. The previous
+    fallback split the raw text on `;`, so a semicolon inside a literal or a
+    comment split one statement into fragments — a valid statement was lost
+    and double-counted as unparseable, a comment fragment parsed as a
+    "non-query statement", and a SELECT embedded in an INSERT's string
+    literal was counted as an EXECUTION. Counts here are per statement the
+    operator actually ran.
+    """
+    from sqlglot.tokens import TokenType
+
     try:
-        statements = [s for s in sqlglot.parse(text, read=dialect) if s is not None]
-        return statements, 0
-    except Exception:  # noqa: BLE001 — fall back to per-statement salvage
-        statements, skipped = [], 0
-        for chunk in text.split(";"):
-            if not chunk.strip():
-                continue
-            try:
-                statements.append(sqlglot.parse_one(chunk, read=dialect))
-            except Exception:  # noqa: BLE001
-                skipped += 1
-        return statements, skipped
+        tokens = sqlglot.tokenize(text, read=dialect)
+    except Exception:  # noqa: BLE001 — a blob the tokenizer rejects outright
+        return _parse_whole(text, dialect)
+    chunks: list[str] = []
+    start = 0
+    for tok in tokens:
+        if tok.token_type == TokenType.SEMICOLON:
+            chunks.append(text[start:tok.start])
+            start = tok.end + 1
+    chunks.append(text[start:])
+
+    statements: list[exp.Expression] = []
+    skipped = 0
+    for chunk in chunks:
+        if not _has_code(chunk, dialect):
+            continue  # whitespace or comments only — nothing was executed
+        try:
+            parsed = sqlglot.parse_one(chunk, read=dialect)
+        except Exception:  # noqa: BLE001
+            skipped += 1
+            continue
+        if parsed is None or isinstance(parsed, exp.Semicolon):
+            continue
+        statements.append(parsed)
+    return statements, skipped
+
+
+def _has_code(chunk: str, dialect: str) -> bool:
+    """True when a chunk holds anything besides whitespace and comments."""
+    if not chunk.strip():
+        return False
+    try:
+        from sqlglot.tokens import TokenType
+        return any(t.token_type != TokenType.SEMICOLON
+                   for t in sqlglot.tokenize(chunk, read=dialect))
+    except Exception:  # noqa: BLE001 — let the parser report it
+        return True
+
+
+def _parse_whole(text: str, dialect: str) -> tuple[list[exp.Expression], int]:
+    try:
+        return [s for s in sqlglot.parse(text, read=dialect) if s is not None], 0
+    except Exception:  # noqa: BLE001
+        return [], 1
 
 
 def _cte_names(select: exp.Select) -> set[str]:

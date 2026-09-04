@@ -199,7 +199,7 @@ def _reconcile_concept(concept: Concept) -> list[Verdict]:
                         "Declared definition is not machine-expressible; static "
                         "verification impossible — requires the dynamic execution "
                         "harness (Phase 1)."
-                        + ((" Reason: " + (inexpressible[0].error or "")[:160])
+                        + ((" Reason: " + _clip(inexpressible[0].error or "", 160))
                            if inexpressible and inexpressible[0].error else "")
                     ),
                     evidence=base_evidence,
@@ -474,6 +474,15 @@ def _member_evidence(fps: list[Fingerprint], expressible_claims: list[Claim]) ->
             }
         )
     return members
+
+
+def _clip(text: str, limit: int) -> str:
+    """Cut at a word boundary with an ellipsis — `…cannot rule out sema` in a
+    verdict summary read as a typo, not a truncation."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return cut + " …"
 
 
 def _inexpressible_evidence(claims: list[Claim]) -> list[dict]:
