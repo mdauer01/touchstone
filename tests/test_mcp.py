@@ -49,9 +49,20 @@ def test_attest_returns_signed_receipt_and_flags_contradiction(acme, tmp_path):
     assert receipt["signature"]["alg"] == "ed25519"
     assert receipt["known_divergences"]
 
-    # the receipt round-trips through verify_receipt on the same server
+    # the receipt round-trips through verify_receipt on the same server: the
+    # signature verifies, but a server started without estate sources never
+    # re-checked anything, so the receipt is not valid for CURRENT use.
     verdict = _payload(_call(server, "verify_receipt", {"receipt": receipt}))
-    assert verdict["valid"] is True
+    assert verdict["detail"].startswith("signature valid")
+    assert verdict["current_use"] is False and verdict["valid"] is False
+    # configured with every scanned source, the same check passes.
+    configured = McpServer(server.store.path,
+                           estate={"dbt_path": str(acme / "dbt_project"),
+                                   "metrics_path": str(acme / "metrics.yml")})
+    fresh_receipt = _payload(_call(configured, "attest", {"concept": "gmv"}))
+    assert fresh_receipt["freshness"]["status"] == "fresh"
+    checked = _payload(_call(configured, "verify_receipt", {"receipt": fresh_receipt}))
+    assert checked["current_use"] is True and checked["valid"] is True
 
 
 def test_concepts_and_history_read_models(acme, tmp_path):

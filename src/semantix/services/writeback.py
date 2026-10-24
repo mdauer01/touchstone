@@ -53,9 +53,15 @@ WHERE provider = 'semantix' AND key = 'receipt/<metric_name>';
 ```
 
 The row is a signed semantic receipt. `status` is the verdict on the
-definition itself: CERTIFIED means every computed definition matches the
-declared one; CONTRADICTION means competing definitions disagree — read
-`known_divergences` before answering, and say which definition you used.
+definition itself: CERTIFIED means every computed definition matched the
+declared one when it was verified; CONTRADICTION means competing definitions
+disagree — read `known_divergences` before answering, and say which
+definition you used.
+
+Rely on a CERTIFIED receipt for a CURRENT answer only when
+`freshness.status` is `fresh`. Any other freshness (`unchecked`, `partial`,
+`stale`, `unknown`) makes it a historical attestation: true as of
+`verified_as_of`, silent about the estate now — say so if you use it.
 `definition_version` pins the exact content-addressed definitions that were
 live. Verify the receipt offline with `semantix verify-receipt` against the
 publisher's pinned public key. Quote the `receipt_id` alongside the number.

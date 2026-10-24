@@ -61,9 +61,20 @@ def test_one_key_per_store_and_persisted_payload_is_signed(acme, tmp_path):
 
 
 def test_cli_verify_roundtrip(acme, tmp_path, capsys):
+    from semantix.services.freshness import check_freshness
+
     store = _store_with_scan(acme, tmp_path)
+    # Unchecked: the signature verifies, but a receipt nobody re-checked is a
+    # historical attestation, not permission for current use (round eight).
     receipt_path = tmp_path / "r.json"
-    receipt_path.write_text(json.dumps(store.issue_receipt("net_revenue").as_dict()))
+    receipt_path.write_text(json.dumps(store.issue_receipt("gmv").as_dict()))
+    assert main(["verify-receipt", str(receipt_path)]) == 1
+    assert "signature valid" in capsys.readouterr().out
+    # Re-checked against every scanned source: fresh, valid for current use.
+    fresh = check_freshness(store, dbt_path=str(acme / "dbt_project"),
+                            metrics_path=str(acme / "metrics.yml"))
+    assert fresh["status"] == "fresh", fresh
+    receipt_path.write_text(json.dumps(store.issue_receipt("gmv", freshness=fresh).as_dict()))
     assert main(["verify-receipt", str(receipt_path)]) == 0
     db = str(tmp_path / "s.db")
     assert main(["pubkey", "--db", db]) == 0

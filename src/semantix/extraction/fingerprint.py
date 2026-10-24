@@ -14,7 +14,13 @@ from sqlglot import exp
 from semantix.extraction.canonicalize import CanonResult, normalize_scope
 from semantix.extraction.completeness import detect_gaps
 from semantix.extraction.registry import SchemaRegistry
-from semantix.extraction.sqlutil import flatten_conjuncts, render, table_map, unwrap_select
+from semantix.extraction.sqlutil import (
+    flatten_conjuncts,
+    render,
+    split_group,
+    table_map,
+    unwrap_select,
+)
 from semantix.models import CanonLevel, Fingerprint, PROOF_LEVELS, Provenance, SemanticCore
 
 
@@ -131,6 +137,25 @@ def extract_fingerprints(
             terminal_set.update(registry.terminals_for(src, col.name))
         qinner = qproj.this if isinstance(qproj, exp.Alias) else qproj
 
+        # Identity that depends on the session: a join node or lineage
+        # terminal whose name, after the operator-supplied context, is still
+        # shorter than the estate's names. Equality over such a core proves
+        # nothing about WHICH table was read, so it is a gap — missing
+        # metadata must never become evidence of sameness.
+        loose = sorted({rel for rel in join_nodes if registry.under_qualified(rel)}
+                       | {t.rsplit(".", 1)[0] for t in terminal_set
+                          if "." in t and registry.under_qualified(t.rsplit(".", 1)[0])})
+        fp_gaps = gaps
+        fp_level = level
+        if loose:
+            fp_gaps = tuple(sorted({*gaps, (
+                f"relation identity depends on the session: {', '.join(loose)} "
+                f"is not fully qualified for this estate "
+                f"({registry.estate_depth()}-part names) and no default "
+                f"database/schema was supplied")}))
+            if fp_level in PROOF_LEVELS:
+                fp_level = CanonLevel.INCOMPLETE.value
+
         core = SemanticCore(
             measure_expr=render(qinner, dialect),
             filters=filters,
@@ -141,15 +166,15 @@ def extract_fingerprints(
         )
         fingerprints.append(
             Fingerprint(
-                fingerprint_id=Fingerprint.make_id(core, name, relation, level, gaps),
+                fingerprint_id=Fingerprint.make_id(core, name, relation, fp_level, fp_gaps),
                 concept_candidate=name,
                 core=core,
                 relation=relation,
                 dialect=dialect,
-                canon_level=level,
+                canon_level=fp_level,
                 canonical_sql=canonical_sql,
                 provenance=provenance,
-                gaps=gaps,
+                gaps=fp_gaps,
             )
         )
     return fingerprints
@@ -344,10 +369,10 @@ def _grain_terms(select: exp.Select, group: exp.Expression | None,
                        for a in (proj.this if isinstance(proj, exp.Alias) else proj)
                        .find_all(exp.AggFunc))
         ]
-    terms = [render(g, dialect) for g in group.expressions]
-    for construct in ("rollup", "cube", "grouping_sets"):
-        for node in group.args.get(construct) or []:
-            terms.append(f"{construct.replace('_', ' ').upper()}({render(node, dialect)})")
+    plain, constructs = split_group(group)
+    terms = [render(g, dialect) for g in plain]
+    for kind, node in constructs:
+        terms.append(f"{kind.replace('_', ' ').upper()}({render(node, dialect)})")
     return terms
 
 

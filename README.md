@@ -326,14 +326,14 @@ maintaining YAML that drifts.
 
 ```bash
 .venv/bin/semantix bench
-# equivalence corpus: 26 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 100.0%
-#     duckdb      9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
-#     databricks  9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
-#     snowflake   9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
-#     bigquery    9/9 detected · near-misses 15/15 · coverage 100.0% · false certs 0
-#   equivalence detection: 36/36 (100%)
+# equivalence corpus: 32 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 100.0%
+#     duckdb      10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
+#     databricks  10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
+#     snowflake   10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
+#     bigquery    10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
+#   equivalence detection: 40/40 (100%)
 #   known gaps: 2 confirmed
-#   near-misses distinguished: 60/60
+#   near-misses distinguished: 80/80
 #   false certifications: 0 ✓
 ```
 
@@ -356,6 +356,55 @@ type, HAVING, LIMIT, grouping sets, `SELECT DISTINCT` — while `bench` reported
 `false certifications: 0 ✓`. The corpus had been written by the implementer and so
 tested only the implementer's imagination. Each is now a corpus case that goes red
 without its fix.
+
+**It happened again, and a corpus cannot stop it.** An external review of `ec4baff`
+(2026-10) reproduced two more false certifications while `bench` was green: reads of
+`prod.raw.orders` and `dev.raw.orders` certified identical because both matched a
+short catalog entry `raw.orders` (executed, they returned 100 and 900), and
+`SUM(a + b + c)` certified equal to `SUM(a + c + b)` over DOUBLE values where they
+return 1 and 0, because the normalizer reassociated floating-point addition. Fixing
+that exposed a third: sqlglot renders `a + (b + c)` and `(a + b) + c` as the same
+text, so equality over rendered SQL could not see the grouping. Neither pair had
+been written into the corpus. A benchmark of hand-picked pairs judged by the
+canonicalizer's own output tests the same imagination that wrote the canonicalizer.
+
+### The execution oracle
+
+```bash
+.venv/bin/semantix oracle            # ~340 queries, ~900 executed pairs, <1s
+.venv/bin/semantix oracle --full     # ~15,600 queries, ~92,000 executed pairs, ~40s
+```
+
+The oracle does not ask the canonicalizer whether it is right. It generates queries
+across every rewrite the engine performs (arithmetic, predicates, grouping
+constructs, joins, relation qualification, order-sensitive consumers, subqueries),
+buckets them by core hash among the proof-grade fingerprints — exactly the set the
+engine would certify equal — and EXECUTES every member of every bucket in DuckDB
+against adversarial datasets: NULLs, float cancellation and overflow, integer
+overflow, ties, empty tables, and separate databases holding different data under the
+same short table name. Any two members whose results differ are a false
+certification. Every query is compared with every other, so cross-family collisions
+surface too, and a self-test requires the datasets to tell apart pairs known to
+differ, so a quiet oracle has demonstrably been able to speak. Run against `ec4baff`
+it reports 45 false certifications covering every class above; on the current code
+it reports none. Its scope is DuckDB execution of DuckDB-dialect SQL; the other
+dialects in the matrix are canonicalized by `bench`, not executed.
+
+### What a certification guarantees, stated narrowly
+
+A `CERTIFIED` verdict means: the definitions' canonical cores are equal at proof
+grade; every construct they use is one the core models (anything else is a gap and
+refuses); relation identity came from names the SQL wrote or from execution context
+the operator supplied (`--default-database` / `--default-schema`), never from a
+shared short catalog entry; and the parser was a qualified sqlglot version
+(`semantix/toolchain.py` — an unqualified version withholds certification, and a new
+one qualifies only through `scripts/qualify_sqlglot.sh`, which runs the suite, the
+benchmark and the full oracle). It does not cover semantics the SQL text does not
+carry (session time zones, collations, user-defined functions), engine-specific
+runtime behaviour beyond the DuckDB oracle, or definitions the scan did not reach. A
+receipt's `CERTIFIED` is a historical attestation as of `verified_as_of`; it is valid
+for current use only when its freshness check re-hashed every scanned source and
+found them unchanged.
 
 ### The completeness gate
 
@@ -418,7 +467,11 @@ undeclared measure); every verdict is still stored, in the report, and in
 plus `incomplete` — the completeness gate's verdict on SQL we parsed but cannot
 fully model. Artifacts that can't be fully canonicalized still get recorded; equality
 below proof grade can't certify (`UNRESOLVED`, not a false `CERTIFIED`). The scan
-prints canonicalization coverage — the §9 target is >85 %; the demo estate hits 100 %.
+prints two coverage numbers: how much SQL parsed and qualified, and how many measures
+reached proof grade (each unreadable artifact counts as one unverifiable measure). The
+second is the one to judge readiness by — the §9 target is >85 %; the demo estate hits
+100 %. Coverage used to be the first number alone, which let an estate whose only metric
+used TABLESAMPLE report 100 % while nothing in it could be certified.
 
 In practice `qualified` almost never fires: `qualify()` fails on the same
 unresolvable-column condition as `optimize()`, so coverage behaves as a binary

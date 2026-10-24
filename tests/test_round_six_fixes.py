@@ -229,17 +229,21 @@ def test_cte_mediated_and_transitive_readers_of_contested_relations(tmp_path):
 
 # ------------------------------------------------------------------- trust
 
-def test_partial_no_drift_receipts_are_trusted():
-    """receipt_trust distrusted any partial/stale unconditionally, so every
-    receipt the issue-time rules sign as CERTIFIED-partial-no-drift was
-    rejected seconds later by the same MCP server, with the false statement
-    'the estate has drifted' and advice that reproduces the same receipt."""
+def test_partial_no_drift_receipts_are_historical_not_drifted():
+    """Round six: a partial-no-drift receipt must never be told 'the estate has
+    drifted', and the advice must change the outcome. Round eight: it is also
+    not valid for CURRENT use — systems that were not re-checked may hold the
+    very change that breaks the certificate — and the warning names them, so
+    re-attesting with those sources yields a different (fresh) receipt."""
     receipt = {"status": "CERTIFIED",
-               "freshness": {"status": "partial",
+               "freshness": {"status": "partial", "unchecked_systems": ["metrics_yaml"],
                              "estate_drift": {"changed": [], "added": [], "removed": []}}}
     trusted, warnings = receipt_trust(receipt)
-    assert trusted, warnings
+    assert not trusted
     assert not any("has drifted" in w for w in warnings)
+    assert any("metrics_yaml" in w for w in warnings)
+    fresh = {"status": "CERTIFIED", "freshness": {"status": "fresh"}}
+    assert receipt_trust(fresh)[0] is True
 
 
 def test_stale_with_drift_is_still_distrusted():

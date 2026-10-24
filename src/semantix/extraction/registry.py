@@ -18,7 +18,19 @@ from semantix.extraction.sqlutil import table_map, unwrap_select
 
 
 class SchemaRegistry:
-    def __init__(self, catalog: dict[str, dict[str, str]]):
+    def __init__(self, catalog: dict[str, dict[str, str]],
+                 default_database: str | None = None,
+                 default_schema: str | None = None):
+        # EXECUTION CONTEXT: the session's default database and schema, as
+        # supplied by the operator. It is the ONLY thing allowed to fill in a
+        # qualifier the SQL omitted. A short catalog entry is not evidence
+        # that `prod.raw.orders` and `dev.raw.orders` are one table — the
+        # round-seven suffix match treated it as such and certified two
+        # queries returning 100 and 900 as canonically identical.
+        self._context = (default_database or None, default_schema or None)
+        # Fixed before any fingerprint is taken (set_estate_depth), so whether
+        # a reference counts as under-qualified never depends on scan order.
+        self._estate_depth: int | None = None
         # relation -> {column: type}
         self._types: dict[str, dict[str, str]] = {}
         # relation -> {column: physical terminal columns}
@@ -97,6 +109,7 @@ class SchemaRegistry:
             # signature takes only (sql, schema, dialect) — can pin short
             # references to the `_` home without a registry parameter.
             schema._semantix_short_entries = self.short_entries()
+            schema._semantix_context = self._context
             self._schema_cache[dialect] = schema
         return self._schema_cache[dialect]
 
@@ -112,8 +125,12 @@ class SchemaRegistry:
         # entry's head part, and `_` never equals `ANALYTICS` — so a
         # two-part hand catalog against three-part SQL bound nothing and
         # coverage sat at 40% while the docstring claimed "and vice versa".
-        # A short entry means "wherever this lives", which is exactly what
-        # replication expresses; setdefault keeps real entries authoritative.
+        # Replication supplies COLUMN TYPES to qualification and nothing
+        # more: a short entry does not mean prod.raw.orders and
+        # dev.raw.orders are one table (round eight certified exactly that
+        # mistake). Identity is canonical_relation's job, which never infers
+        # sameness from a shared short entry. setdefault keeps real entries
+        # authoritative.
         prefixes: dict[int, set[tuple[str, ...]]] = {}
         for rel in known:
             parts = rel.split(".")
@@ -149,8 +166,8 @@ class SchemaRegistry:
             # replicas: canonicalize_sql PINS any reference matching a short
             # entry to the `_` home before optimizing (see
             # _short_entry_homes), so short refs match `_` exactly and
-            # qualified refs match their database's replica. The replicas are
-            # copies of ONE physical table, so pinning loses nothing.
+            # qualified refs match their database's replica. Both bindings
+            # are for column types only; neither decides relation identity.
             insert(["_"] * pad + parts, cols)
             for prefix in prefixes.get(pad, set()):
                 insert([*prefix, *parts], cols)
@@ -182,26 +199,66 @@ class SchemaRegistry:
     def columns(self, relation: str) -> list[str]:
         return list(self._types.get(relation, {}))
 
-    def canonical_relation(self, relation: str) -> str:
-        """The registry's own name for a relation referenced in any form.
+    @property
+    def execution_context(self) -> dict[str, str | None]:
+        return {"default_database": self._context[0], "default_schema": self._context[1]}
 
-        A short reference (`orders`, `raw.orders`) and a fully qualified one
-        (`PROD.raw.orders`) to a table the catalog holds once are the same
-        physical table; sqlglot binds both (via `_` padding and replicas),
-        but keying lineage and join nodes on the reference AS WRITTEN made
-        them different cores — a byte-identical dashboard query was accused
-        of reading a different table. Exact key first, then a UNIQUE suffix
-        match in either direction; ambiguous or unknown names pass through
-        unchanged (an unknown raw table is still honestly named by what the
-        query wrote). Non-relation markers (`cte:`, `<derived:`) pass through.
+    def expand(self, relation: str) -> str:
+        """Fill omitted LEADING qualifiers from the supplied execution context
+        only. Never drops a part and never guesses one."""
+        if not relation or relation.startswith(("cte:", "<")):
+            return relation
+        database, schema = self._context
+        parts = relation.split(".")
+        if len(parts) == 1 and schema:
+            parts = [schema, *parts]
+        if len(parts) == 2 and database:
+            parts = [database, *parts]
+        return ".".join(parts)
+
+    def set_estate_depth(self, relations) -> None:
+        """Fix the estate's full name depth from everything the scan will read
+        (catalog, model relations, referenced relations) BEFORE fingerprinting,
+        so under-qualification is a property of the estate, not of the order
+        models happened to be registered in."""
+        lengths = [len(r.split(".")) for r in [*self._types, *relations]
+                   if r and not r.startswith(("cte:", "<"))]
+        self._estate_depth = max(lengths) if lengths else 0
+
+    def estate_depth(self) -> int:
+        if self._estate_depth is not None:
+            return self._estate_depth
+        known = [r for r, cols in self._types.items() if cols]
+        return max((len(r.split(".")) for r in known), default=0)
+
+    def under_qualified(self, relation: str) -> bool:
+        """True when a relation name, after the supplied context, still has
+        fewer parts than the estate's names: which physical table it reads
+        depends on the session's defaults, which the SQL does not carry."""
+        if not relation or relation.startswith(("cte:", "<")):
+            return False
+        return len(self.expand(relation).split(".")) < self.estate_depth()
+
+    def canonical_relation(self, relation: str) -> str:
+        """The identity of a referenced relation.
+
+        Exactly what the SQL wrote, with omitted leading qualifiers filled
+        ONLY from the operator-supplied execution context, then mapped to the
+        registry's own spelling when that is the same name. Qualifiers the
+        SQL wrote are never dropped, and nothing is matched by suffix: the
+        round-seven version mapped `prod.raw.orders` and `dev.raw.orders`
+        onto a shared short catalog entry `raw.orders` and certified their
+        sums as identical while they returned 100 and 900. Two references
+        are the same relation only when their context-expanded names are
+        equal; a short reference that stays short is flagged by
+        under_qualified, never resolved by guessing.
         """
         if not relation or relation in self._types or relation.startswith(("cte:", "<")):
             return relation
-        target = relation.lower()
-        matches = [k for k in self._types
-                   if k.lower().endswith("." + target) or target.endswith("." + k.lower())
-                   or k.lower() == target]
-        return matches[0] if len(matches) == 1 else relation
+        expanded = self.expand(relation)
+        target = expanded.lower()
+        matches = [k for k in self._types if self.expand(k).lower() == target]
+        return matches[0] if len(matches) == 1 else expanded
 
     def terminals_for(self, relation: str, column: str) -> tuple[str, ...]:
         relation = self.canonical_relation(relation)

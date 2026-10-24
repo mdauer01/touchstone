@@ -5,6 +5,36 @@ from __future__ import annotations
 from sqlglot import exp
 
 
+_GROUPING_KINDS: tuple[tuple[type, str], ...] = (
+    (exp.Rollup, "rollup"), (exp.Cube, "cube"), (exp.GroupingSets, "grouping_sets"))
+
+
+def split_group(group: exp.Group) -> tuple[list[exp.Expression], list[tuple[str, exp.Expression]]]:
+    """(plain grouping items, [(kind, construct node)]) for one GROUP BY.
+
+    The AST shape changed between sqlglot releases: up to 30.12 ROLLUP, CUBE
+    and GROUPING SETS lived in dedicated args (`group.args["rollup"]`); from
+    the 30.2x line they are nodes inside `group.expressions`. Every site that
+    read the dedicated args directly went blind under the newer parser, and
+    ordinals inside ROLLUP(1, 2) stopped resolving — two different grouping
+    definitions then hashed identically at proof grade. This is the single
+    reader every site must use; it accepts both shapes.
+    """
+    plain: list[exp.Expression] = []
+    constructs: list[tuple[str, exp.Expression]] = []
+    for item in group.expressions:
+        kind = next((k for cls, k in _GROUPING_KINDS if isinstance(item, cls)), None)
+        if kind is None:
+            plain.append(item)
+        else:
+            constructs.append((kind, item))
+    for _, kind in _GROUPING_KINDS:
+        for node in group.args.get(kind) or []:
+            if isinstance(node, exp.Expression):
+                constructs.append((kind, node))
+    return plain, constructs
+
+
 def render(node: exp.Expression, dialect: str) -> str:
     """The one true canonical text form. Every comparison in the system goes
     through this function so that equality is equality of this rendering."""

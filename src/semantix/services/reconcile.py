@@ -396,7 +396,7 @@ def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:
         if fp.canon_level in PROOF_LEVELS:
             continue
         if fp.gaps:
-            parts.append(f"{site} uses unmodelled constructs: "
+            parts.append(f"{site} cannot be compared at proof grade: "
                          + ", ".join(fp.gaps[:3]))
         else:
             parts.append(f"{site} canonicalized only to {fp.canon_level}")
@@ -405,7 +405,7 @@ def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:
             continue
         label = f"the {claim.provenance.system} declaration of {claim.name}"
         if claim.gaps:
-            parts.append(f"{label} uses unmodelled constructs: " + ", ".join(claim.gaps))
+            parts.append(f"{label} cannot be compared at proof grade: " + ", ".join(claim.gaps))
         elif claim.error:
             parts.append(f"{label}: {claim.error}")
         else:

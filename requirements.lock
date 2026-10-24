@@ -1,0 +1,15 @@
+# Exact versions the suite, benchmark and execution oracle were qualified with.
+# sqlglot is the trusted parser (see src/semantix/toolchain.py); change it only
+# through scripts/qualify_sqlglot.sh.
+cffi==2.1.0
+cryptography==49.0.0
+duckdb==1.5.4
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+pycparser==3.0
+Pygments==2.20.0
+pytest==9.1.1
+PyYAML==6.0.3
+ruff==0.15.21
+sqlglot==30.12.0

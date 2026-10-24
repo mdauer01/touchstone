@@ -23,6 +23,7 @@ from typing import Any
 import sqlglot
 from sqlglot import exp
 
+from semantix.extraction.sqlutil import split_group
 from semantix.models import Concept, Verdict, VerdictType
 from semantix.services.relationships import qcol
 from semantix.warehouse import qident
@@ -347,7 +348,7 @@ def _output_is_not_summable(sql: str, dialect: str) -> bool:
     if node.find(exp.Union, exp.Except, exp.Intersect) is not None:
         return True
     for group in node.find_all(exp.Group):
-        if any(group.args.get(k) for k in ("rollup", "cube", "grouping_sets", "totals")):
+        if split_group(group)[1] or group.args.get("totals"):
             return True
     return False
 

@@ -16,6 +16,7 @@
                        [--dbt <dir> | --sql-dir <dir> | --views <dump.sql>]
                        [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
     semantix bench     [--dialects duckdb,databricks,snowflake,bigquery]
+    semantix oracle    [--full]          # execute every pair the engine would certify equal
     semantix catalog   --warehouse duckdb:///wh.db --out catalog.yml
     semantix propose   --db semantix.db --out proposals/ [--format metrics|ossie|uc-metrics]
     semantix monitor   --db semantix.db --history-file history.sql
@@ -63,6 +64,15 @@ def main(argv: list[str] | None = None) -> int:
         "--uc-metrics", dest="uc_metrics_path",
         help="Unity Catalog metric view YAML (one file or a directory)")
     p_scan.add_argument("--catalog", help="physical catalog YAML (schema.table.column: type)")
+    p_scan.add_argument(
+        "--default-database", dest="default_database",
+        help="the session's default database: fills an omitted leading "
+             "qualifier. Without it, a reference shorter than the estate's "
+             "names is never assumed to mean any particular table")
+    p_scan.add_argument(
+        "--default-schema", dest="default_schema",
+        help="the session's default schema for one-part table names")
+
     p_scan.add_argument("--db", default="semantix.db")
     p_scan.add_argument("--dialect", default="duckdb")
     p_scan.add_argument("--label")
@@ -219,6 +229,14 @@ def main(argv: list[str] | None = None) -> int:
     p_rel.add_argument("--json", dest="json_out", help="write full graph JSON here")
     p_rel.add_argument("--db", default="semantix.db")
 
+    p_oracle = sub.add_parser(
+        "oracle",
+        help="execute every query pair the engine would certify as equal "
+             "against adversarial DuckDB datasets; exits 1 on any disagreement")
+    p_oracle.add_argument("--full", action="store_true",
+                          help="full cross product (~15k queries, ~40s) instead "
+                               "of the one-dimension-at-a-time default")
+
     p_cat = sub.add_parser(
         "catalog",
         help="generate catalog YAML from a warehouse's information_schema")
@@ -242,6 +260,15 @@ def main(argv: list[str] | None = None) -> int:
     p_prop.add_argument("--sql-dir", dest="sql_dir", help="directory of .sql files")
     p_prop.add_argument("--views", dest="views_path", help="file of CREATE VIEW statements")
     p_prop.add_argument("--catalog", help="catalog YAML (column resolution)")
+    p_prop.add_argument(
+        "--default-database", dest="default_database",
+        help="the session's default database: fills an omitted leading "
+             "qualifier. Without it, a reference shorter than the estate's "
+             "names is never assumed to mean any particular table")
+    p_prop.add_argument(
+        "--default-schema", dest="default_schema",
+        help="the session's default schema for one-part table names")
+
     p_prop.add_argument("--db", default="semantix.db")
 
     p_mon = sub.add_parser(
@@ -260,6 +287,15 @@ def main(argv: list[str] | None = None) -> int:
     p_mon.add_argument("--views", dest="views_path",
                        help="file of CREATE VIEW statements")
     p_mon.add_argument("--catalog", help="catalog YAML (column resolution)")
+    p_mon.add_argument(
+        "--default-database", dest="default_database",
+        help="the session's default database: fills an omitted leading "
+             "qualifier. Without it, a reference shorter than the estate's "
+             "names is never assumed to mean any particular table")
+    p_mon.add_argument(
+        "--default-schema", dest="default_schema",
+        help="the session's default schema for one-part table names")
+
     p_mon.add_argument("--dialect", help="history dialect (default: the scan's)")
     p_mon.add_argument("--min-runs", dest="min_runs", type=int, default=2,
                        help="occurrences before a recurring measure counts as "
@@ -287,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         "relationships": _cmd_relationships,
         "monitor": _cmd_monitor,
         "catalog": _cmd_catalog,
+        "oracle": _cmd_oracle,
         "propose": _cmd_propose,
     }[args.command]
     try:
@@ -363,13 +400,19 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         agents_schema_path=args.agents_schema_path,
         osi_path=args.osi_path,
         uc_metrics_path=args.uc_metrics_path,
+        default_database=args.default_database,
+        default_schema=args.default_schema,
     )
     stats = result.stats()
     print(f"scan {result.scan_id} · {result.observed_at}")
     print(
         f"  artifacts {stats['artifacts']} · fingerprints {stats['fingerprints']} · "
         f"claims {stats['claims']} · concepts {stats['concepts']} · "
-        f"canonicalization coverage {stats['coverage_pct']}%"
+        f"parsed {stats['parse_coverage_pct']}% · verifiable measures "
+        f"{stats['verifiable_measures'][0]}/{stats['verifiable_measures'][1]} "
+        f"({stats['coverage_pct']}%)"
+        + (f", counting {result.unread_artifacts} unreadable artifact(s) as one each"
+           if result.unread_artifacts else "")
     )
     # What the scan could NOT read, printed before the verdicts so coverage is
     # never mistaken for completeness.
@@ -444,9 +487,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     # `--dbt` path or a forgotten `dbt compile` turned CI green. Nothing was
     # verified, so nothing objected.
     if args.min_coverage is not None and stats["coverage_pct"] < args.min_coverage:
-        print(f"\nFAILED: proof-grade coverage {stats['coverage_pct']}% is below the "
-              f"required {args.min_coverage}% — most of this estate could not be "
-              f"canonicalized, so its verdicts do not describe it", file=sys.stderr)
+        print(f"\nFAILED: verifiable-measure coverage {stats['coverage_pct']}% is "
+              f"below the required {args.min_coverage}% — most measures in this "
+              f"estate are below proof grade, so its verdicts do not describe it",
+              file=sys.stderr)
         return 1
     if args.fail_on:
         if not result.artifacts:
@@ -601,6 +645,13 @@ def _cmd_attest(args: argparse.Namespace) -> int:
     fr = receipt.freshness or {}
     if fr.get("status"):
         print(f"freshness: {fr['status']} — {fr.get('note', '')}", file=sys.stderr)
+    from semantix.signing import receipt_trust
+    current, _ = receipt_trust(receipt.as_dict())
+    print("reliance: " + ("valid for CURRENT use — the estate was re-checked and matches"
+                          if current else
+                          "HISTORICAL attestation only — not valid for current use "
+                          "until re-attested with every estate source"),
+          file=sys.stderr)
     return 0
 
 
@@ -932,7 +983,8 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
               "same models the reference definitions did", file=sys.stderr)
         return 2
     catalog = load_catalog(args.catalog) if args.catalog else {}
-    registry = build_registry(catalog, artifacts, dialect)
+    registry = build_registry(catalog, artifacts, dialect,
+                              _scan_context(scan, args))
 
     result = monitor_history(store, text, registry, dialect,
                              min_runs=args.min_runs)
@@ -1017,7 +1069,8 @@ def _cmd_propose(args: argparse.Namespace) -> int:
             from semantix.adapters.sql_dir import load_views_file
             artifacts += load_views_file(args.views_path, dialect)[0]
         catalog = load_catalog(args.catalog) if args.catalog else {}
-        registry = build_registry(catalog, artifacts, dialect)
+        registry = build_registry(catalog, artifacts, dialect,
+                              _scan_context(scan, args))
     elif args.fmt != "metrics":
         # Ossie and metric-view emission TRANSPILE (generic / Databricks
         # writers); without the registry there is no self-check, and an
@@ -1050,6 +1103,43 @@ def _cmd_propose(args: argparse.Namespace) -> int:
     print("  nothing applied — review the memo, pick a direction per concept, "
           "and open it as a PR (e.g. gh pr create --body-file RESOLUTIONS.md)")
     return 0
+
+
+def _cmd_oracle(args: argparse.Namespace) -> int:
+    from semantix.oracle import run_oracle
+    from semantix.toolchain import sqlglot_version
+
+    report = run_oracle(full=args.full)
+    print(f"execution oracle · sqlglot {sqlglot_version()} · {report.queries} queries · "
+          f"{report.proof_grade} at proof grade · {report.buckets} shared-hash bucket(s) · "
+          f"{report.pairs_executed} pair executions over {report.datasets} dataset(s)")
+    for f in report.self_test_failures:
+        print(f"  SELF-TEST FAILED ({f['why']}): {f['a']}  ||  {f['b']}")
+    seen = set()
+    for m in report.mismatches:
+        if (m["a"], m["b"]) in seen:
+            continue
+        seen.add((m["a"], m["b"]))
+        print(f"  FALSE CERTIFICATION [{m['estate']}/{m['dataset']}]\n    {m['a']}\n    {m['b']}\n"
+              f"    -> {m['result_a']}  vs  {m['result_b']}")
+    if report.ok:
+        print("  no false certifications: every pair the engine equates executed identically")
+        return 0
+    print(f"\nFAILED: {len(seen)} false certification(s), "
+          f"{len(report.self_test_failures)} self-test failure(s)", file=sys.stderr)
+    return 1
+
+
+def _scan_context(scan: dict | None, args: argparse.Namespace) -> dict:
+    """Execution context for a registry rebuilt after the scan: the scan's
+    recorded context, overridden only by flags passed explicitly."""
+    recorded = {}
+    if scan and scan.get("stats_json"):
+        recorded = (json.loads(scan["stats_json"]) or {}).get("execution_context") or {}
+    return {
+        "default_database": getattr(args, "default_database", None) or recorded.get("default_database"),
+        "default_schema": getattr(args, "default_schema", None) or recorded.get("default_schema"),
+    }
 
 
 def _cmd_catalog(args: argparse.Namespace) -> int:

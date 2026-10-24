@@ -33,6 +33,10 @@ catalog:
       refund_id: bigint
       order_id: bigint
       amt: "decimal(18,2)"
+    measures:
+      a: double
+      b: double
+      c: double
   analytics:
     fct_orders:
       order_id: bigint
@@ -283,3 +287,55 @@ cases:
       product was indistinguishable from a single-table measure.
     a: "select sum(o.amount) as m from raw.orders o cross join raw.refunds r"
     b: "select sum(o.amount) as m from raw.orders o"
+
+  # --- Round eight: counterexamples from the external review (2026-10). ---
+  # Each of these CERTIFIED at ec4baff while this benchmark passed; the
+  # execution oracle (semantix oracle) now runs them against real data too.
+
+  - name: commutative-operands
+    category: normalization
+    expect: equivalent
+    note: Swapping the two operands of one + is exact for IEEE floats.
+    a: "select sum(a + b) as m from raw.measures"
+    b: "select sum(b + a) as m from raw.measures"
+
+  - name: float-reassociation
+    category: near-miss
+    expect: different
+    note: >
+      Floating-point addition is not associative. Over DOUBLE rows
+      a=1e16, b=-1e16, c=1 these return 1 and 0.
+    a: "select sum(a + b + c) as m from raw.measures"
+    b: "select sum(a + c + b) as m from raw.measures"
+
+  - name: float-regrouping-hidden-by-rendering
+    category: near-miss
+    expect: different
+    note: >
+      Same operands, different grouping. sqlglot renders both as
+      `a + b + c`, so equality over rendered text must keep the parentheses.
+    a: "select sum(a + b + c) as m from raw.measures"
+    b: "select sum(a + (b + c)) as m from raw.measures"
+
+  - name: mixed-additive-regrouping
+    category: near-miss
+    expect: different
+    a: "select sum(a + b - c) as m from raw.measures"
+    b: "select sum(a + (b - c)) as m from raw.measures"
+
+  - name: cross-database-same-short-table
+    category: near-miss
+    expect: different
+    note: >
+      A short catalog entry raw.orders is not evidence that prod.raw.orders
+      and dev.raw.orders are one table; executed, they returned 100 and 900.
+    a: "select sum(amount) as m from prod.raw.orders"
+    b: "select sum(amount) as m from dev.raw.orders"
+
+  - name: rollup-ordinal-order
+    category: near-miss
+    expect: different
+    note: ROLLUP(1, 2) and ROLLUP(2, 1) emit different subtotal rows.
+    a: "select status, channel, sum(amount) as m from raw.orders group by rollup(1, 2)"
+    b: "select status, channel, sum(amount) as m from raw.orders group by rollup(2, 1)"
+

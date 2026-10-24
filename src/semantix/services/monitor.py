@@ -115,14 +115,21 @@ class _Observed:
     sample_sql: str | None = None
 
 
-def build_registry(catalog: dict, artifacts: list, dialect: str) -> SchemaRegistry:
+def build_registry(catalog: dict, artifacts: list, dialect: str,
+                   execution_context: dict | None = None) -> SchemaRegistry:
     """The scan's registry, rebuilt without store writes: catalog plus every
     computed model registered upstream-first, so observed queries resolve
     columns through models to the same raw terminals reference cores carry.
     Sorted here — a caller passing multi-source artifacts unsorted produced a
-    registry whose terminals differed from the scan's."""
-    registry = SchemaRegistry(catalog)
-    for artifact in topo_sort(list(artifacts)):
+    registry whose terminals differed from the scan's. The execution context
+    and estate depth must match the scan's too, or relation identities would
+    be computed in a different space than the reference cores."""
+    ctx = execution_context or {}
+    registry = SchemaRegistry(catalog, ctx.get("default_database"), ctx.get("default_schema"))
+    ordered = topo_sort(list(artifacts))
+    registry.set_estate_depth([a.relation for a in ordered]
+                              + [d for a in ordered for d in a.depends_on])
+    for artifact in ordered:
         canon = canonicalize_sql(
             artifact.sql, registry.sqlglot_schema(dialect), dialect)
         registry.register_model(artifact.relation, canon.ast)

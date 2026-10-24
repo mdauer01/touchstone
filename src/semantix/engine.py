@@ -25,6 +25,7 @@ from semantix.extraction.canonicalize import canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import (
+    PROOF_LEVELS,
     CanonLevel,
     Claim,
     Concept,
@@ -37,6 +38,7 @@ from semantix.services.reconcile import reconcile
 from semantix.services.relationships import same_relation as same_rel
 from semantix.services.resolution import resolve_concepts
 from semantix.store import Store
+from semantix.toolchain import QUALIFIED_SQLGLOT, toolchain_status
 
 
 @dataclass
@@ -63,15 +65,48 @@ class ScanResult:
     # which reads as "this model defines no metric" and actively misled them
     # about which models the engine could not read at all.
     unparseable: list[str] = field(default_factory=list)
+    # Session defaults the operator supplied for omitted qualifiers; recorded
+    # so monitor/propose rebuild the SAME identity space the scan used.
+    execution_context: dict = field(default_factory=dict)
+    # Parser version the equalities were computed under (toolchain.py).
+    toolchain: dict = field(default_factory=dict)
 
     @property
-    def coverage(self) -> float:
-        """% of computed artifacts canonicalized to proof grade (§9 metric)."""
+    def parse_coverage(self) -> float:
+        """% of computed artifacts that parsed and QUALIFIED (optimized or
+        qualified). A statement about reading the SQL — not about whether any
+        measure in it can be verified."""
         total = sum(self.canon_levels.values())
         if not total:
             return 0.0
         good = self.canon_levels.get("optimized", 0) + self.canon_levels.get("qualified", 0)
         return 100.0 * good / total
+
+    @property
+    def unread_artifacts(self) -> int:
+        """Artifacts whose measures we never saw: SQL that failed to parse,
+        and enumerated models with no SQL at all."""
+        return (self.canon_levels.get(CanonLevel.FAILED.value, 0)
+                + sum(1 for s in self.skipped if not s.get("informational")))
+
+    @property
+    def verifiable_measures(self) -> tuple[int, int]:
+        """(computed measures at proof grade, measures in scope). An artifact
+        we could not read counts as at least one unverifiable measure:
+        counting only the fingerprints we managed to extract let an estate
+        with an unparseable model still report 100%."""
+        total = len(self.fingerprints) + self.unread_artifacts
+        good = sum(1 for fp in self.fingerprints if fp.canon_level in PROOF_LEVELS)
+        return good, total
+
+    @property
+    def coverage(self) -> float:
+        """% of computed MEASURES that reached proof grade — the number to
+        judge readiness by. It was the parse level recorded BEFORE the
+        completeness gate, so an estate whose only metric used TABLESAMPLE
+        reported 100% while nothing in it could be certified."""
+        good, total = self.verifiable_measures
+        return 100.0 * good / total if total else 0.0
 
     def stats(self) -> dict:
         return {
@@ -82,6 +117,10 @@ class ScanResult:
             "verdicts": Counter(v.verdict_type.value for v in self.verdicts),
             "canon_levels": self.canon_levels,
             "coverage_pct": round(self.coverage, 1),
+            "parse_coverage_pct": round(self.parse_coverage, 1),
+            "verifiable_measures": list(self.verifiable_measures),
+            "execution_context": self.execution_context,
+            "toolchain": self.toolchain,
             "skipped": len(self.skipped),
             "unmeasured": len(self.unmeasured),
             "duplicate_relations": len(self.duplicate_relations),
@@ -101,6 +140,8 @@ def run_scan(
     agents_schema_path: str | None = None,
     osi_path: str | None = None,
     uc_metrics_path: str | None = None,
+    default_database: str | None = None,
+    default_schema: str | None = None,
 ) -> tuple[ScanResult, Store]:
     if not (dbt_path or sql_dir or views_path):
         raise ValueError("no computed-SQL source: pass dbt_path, sql_dir, or views_path")
@@ -108,7 +149,8 @@ def run_scan(
     try:
         return _run_scan(store, dbt_path, metrics_path, catalog_path, dialect,
                          label, execute_seed, sql_dir, views_path,
-                         agents_schema_path, osi_path, uc_metrics_path)
+                         agents_schema_path, osi_path, uc_metrics_path,
+                         default_database, default_schema)
     except BaseException:
         # An adapter refusal mid-scan used to leave the store OPEN with its
         # transaction, so the next Store() in the same process hung on the
@@ -120,11 +162,13 @@ def run_scan(
 
 def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
               label, execute_seed, sql_dir, views_path, agents_schema_path,
-              osi_path, uc_metrics_path) -> tuple[ScanResult, Store]:
+              osi_path, uc_metrics_path, default_database=None,
+              default_schema=None) -> tuple[ScanResult, Store]:
     scan_id, observed_at = store.begin_scan(label, dialect)
+    toolchain = toolchain_status()
 
     catalog = load_catalog(catalog_path) if catalog_path else {}
-    registry = SchemaRegistry(catalog)
+    registry = SchemaRegistry(catalog, default_database, default_schema)
 
     artifacts: list[ComputedArtifact] = []
     skipped: list[dict] = []
@@ -143,6 +187,10 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
     # Re-sort globally: cross-source dependencies (a view over a dbt mart)
     # must still register upstream-first.
     artifacts = topo_sort(artifacts)
+    # Fixed before any fingerprint: whether a reference is under-qualified
+    # must be a property of the estate, never of registration order.
+    registry.set_estate_depth([a.relation for a in artifacts]
+                              + [d for a in artifacts for d in a.depends_on])
     dupes = duplicate_relations(artifacts)
     # Models the adapter enumerated but could not hand us SQL for. Recording
     # them as known-but-unreadable is what stops a routine partial compile
@@ -282,6 +330,7 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
             concepts, verdicts, artifacts, execute_seed, dialect
         )
     _qualify_for_unreadable(verdicts, unread)
+    _qualify_for_toolchain(verdicts, toolchain)
     contested = {rel: dupes[rel] for rel, contents in dupe_content.items()
                  if len(contents) > 1}
     # TRANSITIVE closure over the dependency graph: a CTE-mediated reader's
@@ -321,6 +370,8 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
         unmeasured=unmeasured,
         duplicate_relations=dupes,
         unparseable=unparseable,
+        execution_context=registry.execution_context,
+        toolchain=toolchain,
     )
     store.finish_scan(scan_id, result.stats())
     return result, store
@@ -461,6 +512,25 @@ def _qualify_for_ambiguous_relations(verdicts: list[Verdict],
             verdict.summary = f"{verdict.summary} Additionally: {note}"
         verdict.evidence = {**verdict.evidence,
                             "ambiguous_relations": {k: contested[k] for k in hit}}
+
+
+def _qualify_for_toolchain(verdicts: list[Verdict], toolchain: dict) -> None:
+    """No certification from a parser version nobody qualified. The engine's
+    equality is sqlglot's canonical form; a different release is a different
+    equality, and the one that reopened tested false certifications ran
+    every scan as if nothing had changed."""
+    if toolchain.get("qualified"):
+        return
+    for verdict in verdicts:
+        if verdict.verdict_type in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+            verdict.verdict_type = VerdictType.UNRESOLVED
+            verdict.severity = max(verdict.severity, 45)
+            verdict.summary = (
+                f"Cannot certify: sqlglot {toolchain.get('sqlglot')} is not a "
+                f"qualified parser version for semantix (qualified: "
+                f"{', '.join(sorted(QUALIFIED_SQLGLOT))}); equality under it is "
+                f"untested. {verdict.summary}")
+            verdict.evidence = {**verdict.evidence, "toolchain": toolchain}
 
 
 def _qualify_for_unreadable(verdicts: list[Verdict], unread: list[str]) -> None:

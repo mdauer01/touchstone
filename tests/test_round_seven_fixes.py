@@ -7,7 +7,6 @@ pins shut, so a future refactor that reopens it fails by name.
 
 from __future__ import annotations
 
-import sqlglot
 
 from semantix.engine import run_scan
 from semantix.extraction.canonicalize import canonicalize_sql
@@ -82,39 +81,55 @@ def _mixed_depth_estate(tmp_path):
 
 
 def test_pin_placeholder_never_leaks_into_cores(tmp_path):
+    """The `_` qualification pin must never surface in a core. (Round seven
+    also asserted the three spellings below were ONE table; round eight
+    found that assumption certified prod vs dev reads as identical. Without
+    execution context the short spellings are not provably the same table.)"""
     estate, catalog = _mixed_depth_estate(tmp_path)
     result, store = run_scan(sql_dir=str(estate), catalog_path=str(catalog),
                              db_path=str(tmp_path / "s.db"))
     store.close()
-    cores = {fp.provenance.object_id: fp for fp in result.fingerprints}
-    assert len(cores) == 3, result.canon_levels
-    nodes = {tuple(fp.core.join_nodes) for fp in result.fingerprints}
-    assert nodes == {("raw.orders",)}, nodes
-    assert all(fp.canon_level in PROOF_LEVELS for fp in result.fingerprints)
-    hashes = {fp.core.hash() for fp in result.fingerprints}
-    assert len(hashes) == 1  # three spellings, one physical table, one core
-    assert not any(v.verdict_type == VerdictType.CONTRADICTION for v in result.verdicts)
+    assert len(result.fingerprints) == 3, result.canon_levels
     assert not any("_." in fp.canonical_sql for fp in result.fingerprints)
+    assert not any(n.startswith("_.") for fp in result.fingerprints for n in fp.core.join_nodes)
+    by_rel = {fp.relation.rsplit(".", 1)[-1]: fp for fp in result.fingerprints}
+    # The explicitly qualified one is proof grade; the short ones depend on
+    # the session and say so, so nothing certifies across them.
+    assert by_rel["m3"].canon_level in PROOF_LEVELS
+    for short in ("m1", "m2"):
+        assert by_rel[short].canon_level not in PROOF_LEVELS
+        assert any("depends on the session" in g for g in by_rel[short].gaps)
+    assert not any(v.verdict_type == VerdictType.CERTIFIED for v in result.verdicts)
 
 
-def test_bare_reference_binds_by_unique_tail(tmp_path):
+def test_execution_context_makes_spellings_one_table(tmp_path):
     estate, catalog = _mixed_depth_estate(tmp_path)
     result, store = run_scan(sql_dir=str(estate), catalog_path=str(catalog),
-                             db_path=str(tmp_path / "s.db"))
+                             db_path=str(tmp_path / "s.db"),
+                             default_database="PROD", default_schema="raw")
     store.close()
-    bare = next(fp for fp in result.fingerprints if fp.relation.endswith(".m2"))
-    assert bare.canon_level in PROOF_LEVELS
+    assert all(fp.canon_level in PROOF_LEVELS for fp in result.fingerprints)
+    assert len({fp.core.hash() for fp in result.fingerprints}) == 1
+    assert not any(v.verdict_type == VerdictType.CONTRADICTION for v in result.verdicts)
 
 
-def test_canonical_relation_resolves_forms_once():
+def test_canonical_relation_never_drops_or_guesses_qualifiers():
     registry = SchemaRegistry({"db.main.orders": {"amount": "DOUBLE"}})
-    assert registry.canonical_relation("orders") == "db.main.orders"
-    assert registry.canonical_relation("main.orders") == "db.main.orders"
-    assert registry.canonical_relation("PROD.db.main.orders") == "db.main.orders"
+    # No context: a short reference keeps its short identity...
+    assert registry.canonical_relation("orders") == "orders"
+    assert registry.canonical_relation("main.orders") == "main.orders"
+    # ...and an explicit qualifier is never dropped.
+    assert registry.canonical_relation("PROD.db.main.orders") == "PROD.db.main.orders"
+    assert registry.canonical_relation("db.main.orders") == "db.main.orders"
     assert registry.canonical_relation("cte:abc") == "cte:abc"
-    assert registry.canonical_relation("elsewhere") == "elsewhere"
-    ambiguous = SchemaRegistry({"a.orders": {"x": "INT"}, "b.orders": {"x": "INT"}})
-    assert ambiguous.canonical_relation("orders") == "orders"
+    short = SchemaRegistry({"raw.orders": {"amount": "DOUBLE"}})
+    assert short.canonical_relation("prod.raw.orders") != short.canonical_relation("dev.raw.orders")
+    # With context, the omitted parts are filled — and only those.
+    ctx = SchemaRegistry({"db.main.orders": {"amount": "DOUBLE"}},
+                         default_database="db", default_schema="main")
+    assert ctx.canonical_relation("orders") == "db.main.orders"
+    assert ctx.canonical_relation("main.orders") == "db.main.orders"
+    assert ctx.canonical_relation("other.main.orders") == "other.main.orders"
 
 
 # ------------------------------------------------------- store identity is per site

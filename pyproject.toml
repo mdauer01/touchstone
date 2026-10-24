@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 dependencies = [
-    "sqlglot>=25",
+    "sqlglot==30.12.0",  # pinned: part of the trusted toolchain (toolchain.py)
     "pyyaml>=6",
 ]
 

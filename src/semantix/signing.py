@@ -202,10 +202,30 @@ def receipt_trust(receipt: dict) -> tuple[bool, list[str]]:
         warnings.append("a freshness check was attempted and could not answer — "
                         "re-attest with estate sources")
         return False, warnings
+    if fresh_status == "fresh":
+        return True, warnings
+    # Everything below is a VALID HISTORICAL ATTESTATION that does not license
+    # relying on the definition NOW. The first version trusted `unchecked`
+    # with a warning: a metric whose SQL was edited to double its result
+    # after the scan still verified, signed and trusted, because nobody had
+    # looked. A current-use answer requires that someone looked — every
+    # scanned system re-hashed against the estate as it is.
+    if is_as_of:
+        warnings.append(
+            f"this receipt describes {receipt.get('as_of')}; it is valid for that "
+            f"instant and says nothing about the current estate")
+        return True, warnings
     if fresh_status == "partial":
-        warnings.append("freshness is `partial`: the re-checked systems matched; "
-                        "some scanned systems were not re-checked")
-    elif fresh_status == "unchecked":
-        warnings.append("the estate was NOT re-checked at attest time — the "
-                        "verdicts describe the estate as of verified_as_of")
-    return True, warnings
+        unchecked = (freshness or {}).get("unchecked_systems") or []
+        warnings.append(
+            "historical attestation only, not valid for current use: freshness is "
+            "`partial` — systems not re-checked: "
+            + (", ".join(unchecked) or "not recorded")
+            + ". Re-attest with every estate source to rely on it now")
+        return False, warnings
+    warnings.append(
+        "historical attestation only, not valid for current use: the estate was "
+        "not re-checked when this receipt was issued, so nothing shows the "
+        "definition still matches what runs. Re-attest with the estate sources "
+        "(or from an MCP server configured with them) to rely on it now")
+    return False, warnings

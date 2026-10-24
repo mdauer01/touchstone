@@ -28,7 +28,13 @@ from sqlglot.optimizer import optimize
 from sqlglot.optimizer.qualify import qualify
 
 from semantix.models import CanonLevel
-from semantix.extraction.sqlutil import render, scope_sources, table_fqname, unwrap_select
+from semantix.extraction.sqlutil import (
+    render,
+    scope_sources,
+    split_group,
+    table_fqname,
+    unwrap_select,
+)
 
 
 @dataclass
@@ -242,12 +248,19 @@ def _pin_short_references(ast: exp.Expression, schema) -> None:
     refuses as ambiguous the moment two databases exist; with pinning, short
     references match the `_` home exactly while fully-qualified references
     match their database's replica — both forms bind on multi-database
-    estates. The replicas are copies of ONE physical table, so the pin
-    changes nothing about meaning or lineage.
+    estates. The pin and the replicas exist ONLY so columns get types: they
+    are not evidence that two references read one table. Relation identity
+    is decided separately (registry.canonical_relation), from what the SQL
+    wrote plus operator-supplied context, and the `_` never survives into a
+    core.
     """
     short = getattr(schema, "_semantix_short_entries", None)
-    if not short:
-        return
+    # The operator-supplied session schema is the only thing allowed to fill
+    # an omitted schema. Round seven GUESSED it from a unique short-entry
+    # tail; with an explicit context naming a different schema the guess
+    # overrode the operator, and without one it put a schema the SQL never
+    # wrote into the reference's identity.
+    _ctx_database, ctx_schema = getattr(schema, "_semantix_context", (None, None))
     ctes = {cte.alias_or_name.lower() for cte in ast.find_all(exp.CTE)}
     for table in ast.find_all(exp.Table):
         if table.args.get("catalog"):
@@ -256,23 +269,16 @@ def _pin_short_references(ast: exp.Expression, schema) -> None:
         if not table.args.get("db"):
             if name in ctes:
                 continue
-            key: tuple[str, ...] = (name,)
+            if ctx_schema:
+                table.set("db", exp.to_identifier(ctx_schema))
+                key: tuple[str, ...] = (ctx_schema.lower(), name)
+            else:
+                key = (name,)
         else:
             key = (table.args["db"].name.lower(), name)
+        if not short:
+            continue
         pad = short.get(key)
-        if pad is None and len(key) == 1:
-            # A BARE one-part reference has no db to match a `(db, name)`
-            # short entry, so on a mixed-depth estate it raced the replicas
-            # (`raw._` vs `raw.prod`) and sqlglot refused it as ambiguous —
-            # a coverage regression against round five. When exactly one
-            # short entry ends in this name, that is its home.
-            tails = [k for k in short if len(k) > 1 and k[-1] == name]
-            if len(tails) == 1:
-                key = tails[0]
-                pad = short[key]
-                table.set("db", exp.to_identifier(key[-2]))
-                if len(key) == 3:
-                    table.set("catalog", exp.to_identifier(key[0]))
         if pad is None:
             continue
         if len(key) == 2 and pad >= 1:
@@ -434,11 +440,10 @@ def _resolve_group_ordinals(ast: exp.Expression) -> tuple[str, ...]:
                         continue
                     item.replace(target.copy())
 
-        resolve_items(list(group.expressions))
-        for construct in ("rollup", "cube", "grouping_sets"):
-            for node in group.args.get(construct) or []:
-                if isinstance(node, exp.Expression):
-                    resolve_items(list(node.expressions))
+        plain, constructs = split_group(group)
+        resolve_items(plain)
+        for _, node in constructs:
+            resolve_items(list(node.expressions))
     return tuple(gaps)
 
 
@@ -552,6 +557,15 @@ def _flatten_chain(node: exp.Expression, cls: type) -> list[exp.Expression]:
     return out
 
 
+_ADDITIVE = (exp.Add, exp.Sub)
+_MULTIPLICATIVE = (exp.Mul, exp.Div, exp.Mod, exp.IntDiv)
+_ARITHMETIC = _ADDITIVE + _MULTIPLICATIVE
+
+
+def _same_level(node: exp.Expression) -> tuple[type, ...]:
+    return _ADDITIVE if isinstance(node, _ADDITIVE) else _MULTIPLICATIVE
+
+
 def _normalize_symmetric(ast: exp.Expression, dialect: str) -> exp.Expression:
     """Explicit post-order rewrite. sqlglot's Expression.transform is
     pre-order and does not descend into replacement nodes, which silently
@@ -580,10 +594,38 @@ def _normalize_symmetric(ast: exp.Expression, dialect: str) -> exp.Expression:
             inner = node.this
             inverse = _NOT_INVERSE[type(inner)]
             return inverse(this=inner.this, expression=inner.args.get("expression"))
-        if isinstance(node, (exp.And, exp.Or, exp.Add, exp.Mul)):
+        if isinstance(node, (exp.And, exp.Or)):
+            # Boolean AND/OR are associative and commutative in SQL's
+            # three-valued logic, so the whole chain may be flattened and
+            # sorted.
             operands = _flatten_chain(node, type(node))
             if len(operands) > 1:
                 return rebuild(type(node), sorted(operands, key=sort_rank))
+        elif isinstance(node, _ARITHMETIC):
+            # Arithmetic is COMMUTATIVE but not ASSOCIATIVE. Swapping the two
+            # operands of one + or * is exact for IEEE floats, integers and
+            # decimals alike; regrouping across nested nodes is not. The first
+            # version flattened `a + b + c` into a sorted chain, so
+            # SUM(a + b + c) and SUM(a + c + b) hashed identically and
+            # CERTIFIED — over DOUBLE values 1e16, -1e16, 1 they return 1 and
+            # 0. Integer reassociation can also move where an overflow
+            # happens. Evaluation structure is preserved; only each node's
+            # own two children are ordered.
+            if isinstance(node, (exp.Add, exp.Mul)):
+                left, right = node.this, node.args.get("expression")
+                if right is not None and sort_rank(left) > sort_rank(right):
+                    node = type(node)(this=right, expression=left)
+            # The tree is only half the story: equality is taken over the
+            # RENDERED text, and sqlglot's simplifier strips parentheses it
+            # deems mathematically redundant, so `a + (b + c)` and
+            # `(a + b) + c` both rendered `a + b + c` — different evaluation
+            # orders, one hash (found by the execution oracle: 1.6 vs 0.6).
+            # A right operand at the SAME precedence level is exactly the
+            # case the generator flattens, so it is parenthesized explicitly.
+            right = node.args.get("expression")
+            if isinstance(right, _same_level(node)):
+                node.set("expression", exp.Paren(this=right))
+            return node
         elif isinstance(node, (exp.EQ, exp.NEQ)):
             left, right = node.this, node.args.get("expression")
             if right is not None and sort_rank(left) > sort_rank(right):

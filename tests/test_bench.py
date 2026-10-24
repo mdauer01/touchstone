@@ -53,7 +53,10 @@ def test_dialect_restriction():
     result = run_bench(dialects=["duckdb"])
     assert result["dialects"] == ["duckdb"]
     assert list(result["by_dialect"]) == ["duckdb"]
-    assert result["equivalence_detection"]["of"] == 9
+    from semantix.bench import load_corpus
+    expected = sum(1 for c in load_corpus()["cases"]
+                   if c.get("expect") == "equivalent" and not c.get("known_gap"))
+    assert result["equivalence_detection"]["of"] == expected
 
 
 def test_broken_dialect_reports_unproven_not_distinguished():

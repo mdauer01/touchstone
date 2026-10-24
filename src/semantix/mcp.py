@@ -215,12 +215,15 @@ class McpServer:
         # says the estate has drifted.
         trusted, warnings = receipt_trust(args["receipt"])
         result["trusted"] = trusted
+        # Explicit for agents: a valid signature on a historical attestation
+        # is not permission to quote the definition as current.
+        result["current_use"] = trusted
         if warnings:
             result["warnings"] = warnings
         if not trusted:
             result["valid"] = False
             result["error"] = ("signature is valid but the receipt cannot be "
-                               "relied on: " + "; ".join(warnings))
+                               "relied on for current use: " + "; ".join(warnings))
         return result
 
     # ---------------------------------------------------------------- rpc core
