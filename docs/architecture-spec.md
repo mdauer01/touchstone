@@ -57,7 +57,7 @@ The v0 adapter set is one stack deep: dbt (manifest + compiled SQL), one warehou
 This is the technically hardest layer and the one your prior compiled-lineage work de-risks. The pipeline per artifact:
 
 1. **Parse** to AST with SQLGlot, dialect-aware.
-2. **Canonicalize**: qualify all identifiers, expand `SELECT *`, inline or hoist CTEs, resolve aliases to physical columns via catalog metadata, normalize predicates (constant folding, commutative ordering, De Morgan normalization), and strip semantics-neutral constructs (LIMIT, ORDER BY in non-window contexts, formatting functions).
+2. **Canonicalize**: qualify all identifiers against the catalog, expand `SELECT *`, inline or hoist CTEs, resolve aliases to physical columns, and normalize predicates (constant folding, commutative ordering of AND/OR and of comparison operands, De Morgan normalization). Relation identity is what the SQL wrote plus operator-supplied execution context (default database and schema); it is never inferred from a shared short catalog entry. Arithmetic is normalized only by swapping the two operands of a single `+` or `*`; it is never regrouped, because floating-point addition is not associative and integer overflow depends on evaluation order. Only genuinely semantics-neutral constructs are stripped: an ORDER BY that nothing bounds and no order-sensitive consumer reads. `LIMIT` and `OFFSET` change which rows a measure covers, so they are kept in the core together with the ordering that decides which rows survive.
 3. **Fingerprint**: emit one fingerprint per measure expression discovered, with this schema:
 
 ```
@@ -73,7 +73,7 @@ Fingerprint {
 }
 ```
 
-Canonicalization will not achieve perfect semantic equivalence — SQL equivalence is undecidable in general. The design accepts this: canonical-form equality is treated as *proof of sameness*, canonical-form difference is treated only as a *hypothesis of difference*, to be settled dynamically (§5). This asymmetry is what keeps precision high.
+Canonicalization will not achieve perfect semantic equivalence — SQL equivalence is undecidable in general. The design accepts this: canonical-form equality is treated as *proof of sameness* only within a stated scope (constructs the core models, relation identity resolved from explicit names or supplied context, a qualified parser version), and anything outside that scope blocks the conclusion rather than defaulting to sameness. Canonical-form difference is treated only as a *hypothesis of difference*, to be settled dynamically (§5). The equality claim is itself tested by execution: the oracle runs every pair the engine would certify as equal against adversarial data and requires exact agreement. This asymmetry is what keeps precision high, and the external reviews of October 2026 showed it holds only as well as it is tested.
 
 ## 4. Layer 3 — Fingerprint store (the core primitive)
 

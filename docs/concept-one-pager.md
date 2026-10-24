@@ -4,11 +4,11 @@
 
 ## The problem
 
-Enterprises are racing to give AI agents "business context" through ontologies, semantic layers, and knowledge graphs. The newest generation of these context layers is *inferred*: automatically extracted from tables, queries, dashboards, and documents, then ranked by authority signals such as source popularity, author seniority, and asset usage. This is consensus epistemology — the same approach that powers web-scale knowledge graphs — and it carries the same failure mode. Ranking the most *trusted* definition of a metric is not the same as verifying that the definition is *correct*. Meanwhile, the only artifact that cannot lie about what a metric actually computes is the transformation code itself. The compiled SQL is the de facto ontology of the business. Today, nothing systematically reconciles the two: what the organization *declares* its metrics mean, and what its pipelines *actually compute*. Agents inherit that gap and answer with false confidence.
+Enterprises are racing to give AI agents "business context" through ontologies, semantic layers, and knowledge graphs. The newest generation of these context layers is *inferred*: automatically extracted from tables, queries, dashboards, and documents, then ranked by authority signals such as source popularity, author seniority, and asset usage. This is consensus epistemology — the same approach that powers web-scale knowledge graphs — and it carries the same failure mode. Ranking the most *trusted* definition of a metric is not the same as verifying that the definition is *correct*. Meanwhile, the only artifact that cannot lie about what a metric actually computes is the transformation code itself. The compiled SQL is the de facto ontology of the business. In most stacks, nothing systematically reconciles the two: what the organization *declares* its metrics mean, and what its pipelines *actually compute*. Agents inherit that gap and answer with false confidence.
 
 ## The proposal
 
-A **semantic verification engine**: a system that continuously extracts the de facto semantics of a data estate from compiled transformation code, reconciles them against the declared or inferred ontology, and certifies — or contradicts — every definition with executable evidence.
+A **semantic verification engine**: a system that continuously extracts the de facto semantics of a data estate from compiled transformation code, reconciles them against the declared or inferred ontology, and reports, with evidence, where each definition it can read agrees or disagrees. It certifies sameness only within a stated scope and says plainly which definitions it could not verify.
 
 ## How it works
 
@@ -24,11 +24,11 @@ A **semantic verification engine**: a system that continuously extracts the de f
 
 **Metric change attribution.** Because the engine holds both fingerprint history and data, any KPI movement can be decomposed into definition change, pipeline change, and genuine business change — collapsing the most common fire drill in every data organization from days to seconds.
 
-**Bitemporal semantics.** Every fingerprint is versioned in time, so the system answers "what did this metric *mean* on this date." That enables semantic restatement detection: flagging when historical comparisons silently span a definition change. Data platforms have time travel; meaning does not. A recorded semantic history cannot be retroactively reconstructed, which makes it a first-mover asset.
+**Bitemporal semantics.** Every fingerprint is versioned in time, so the system answers "what did this metric *mean* on this date." That enables semantic restatement detection: flagging when historical comparisons silently span a definition change. Data platforms have time travel; meaning does not. That history has to be recorded as definitions change; it is hard to reconstruct afterwards from today's code.
 
 ## Why now
 
-Every major data platform shipped an inferred context layer this year, and enterprises are deploying agents against them. The verification gap becomes visible the first time an executive gets a confidently wrong number. Independent analysis of these launches has already converged on the critique: calculation validity lives in transformation code, which popularity-ranked graphs never read. Platform vendors are structurally unable to fill the gap credibly — a context layer certifying itself is the conflict of interest that creates the market. Verification must sit outside the systems it audits, and it must be cross-platform, because real estates span multiple warehouses, semantic layers, and BI tools.
+Every major data platform shipped an inferred context layer this year, and enterprises are deploying agents against them. The verification gap becomes visible the first time an executive gets a confidently wrong number. Calculation validity lives in transformation code, which popularity-ranked graphs do not read. Verification that sits outside the systems it audits avoids grading its own work, and it needs to be cross-platform, because real estates span multiple warehouses, semantic layers, and BI tools.
 
 ## Applications
 
@@ -36,4 +36,4 @@ Agent-rollout gating (certify the ontology before agents answer material questio
 
 ## The endgame
 
-The exhaust of continuous verification is itself a verified ontology — ground-truth semantics earned through reconciliation rather than approximated through popularity. The system enters the stack as the auditor and becomes the source: the certificate authority for what enterprise data actually means.
+The near-term role is narrower than the vision: a discrepancy investigator that finds where declared and computed definitions disagree, explains the difference, and verifies sameness only within a scope it states and tests. Over time, the exhaust of continuous verification could become a reference set of definitions earned through reconciliation rather than approximated through popularity.

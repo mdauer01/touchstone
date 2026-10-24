@@ -23,7 +23,7 @@ import pathlib
 from typing import Any, Callable, IO
 
 from semantix import __version__
-from semantix.signing import receipt_trust, verify_receipt_dict
+from semantix.signing import assess_receipt, verify_receipt_dict
 from semantix.store import Store
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -94,8 +94,13 @@ TOOLS = [
     ),
     _tool(
         "verify_receipt",
-        "Verify a semantic receipt's Ed25519 signature. Use to check a receipt "
-        "received from elsewhere before trusting its status.",
+        "Verify a semantic receipt before relying on it. Returns `valid` (signature "
+        "holds AND the receipt is valid as the kind of statement it makes), "
+        "`describes` (`current` or `as_of`), `historically_valid` (a true record of "
+        "its instant) and `current_use` (the definition may be relied on NOW — only "
+        "for a current receipt whose freshness re-check found the estate unchanged; "
+        "never for an as-of receipt). Quote a metric as current only if "
+        "`current_use` is true.",
         {"receipt": {"type": "object", "description": "the receipt JSON object"},
          "public_key": {"type": "string", "description": "optional pinned signer key (base64url)"}},
         ["receipt"],
@@ -213,17 +218,24 @@ class McpServer:
         # only — the decay check existed solely on the CLI, so the surface
         # agents actually use kept trusting receipts whose OWN freshness block
         # says the estate has drifted.
-        trusted, warnings = receipt_trust(args["receipt"])
-        result["trusted"] = trusted
-        # Explicit for agents: a valid signature on a historical attestation
-        # is not permission to quote the definition as current.
-        result["current_use"] = trusted
-        if warnings:
-            result["warnings"] = warnings
-        if not trusted:
+        # Two decisions, never one boolean: round eight copied historical
+        # validity into `current_use`, so a stale as-of receipt told agents
+        # `current_use: true` beside a warning saying it described the past.
+        a = assess_receipt(args["receipt"])
+        result.update({
+            "describes": a.describes,
+            "instant": a.instant,
+            "historically_valid": a.historical,
+            "current_use": a.current_use,
+            "trusted": a.valid_for_stated_use,
+            "reliance": a.reliance(),
+        })
+        if a.warnings:
+            result["warnings"] = list(a.warnings)
+        if not a.valid_for_stated_use:
             result["valid"] = False
-            result["error"] = ("signature is valid but the receipt cannot be "
-                               "relied on for current use: " + "; ".join(warnings))
+            result["error"] = ("signature is valid but the receipt cannot be relied "
+                               "on: " + "; ".join(a.warnings))
         return result
 
     # ---------------------------------------------------------------- rpc core

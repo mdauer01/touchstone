@@ -294,17 +294,36 @@ def _connect(estate: str, dataset: str | None):
     return con
 
 
-def _num(v):
-    return float(f"{float(v):.9g}") if math.isfinite(float(v)) else repr(float(v))
-
-
 def _norm(v):
-    if isinstance(v, bool) or v is None or isinstance(v, str):
+    """Exact normal form for comparison. Integers, decimals AND floats become
+    their exact Decimal value (a float's exact binary expansion), so
+    1000000001 and 1000000002 differ, 0.1 as DOUBLE differs from 0.1 as
+    DECIMAL, and 5 equals 5.0. The first comparator rounded every number to
+    nine significant digits and treated 1,000,000,001 and 1,000,000,002 as
+    equal — a harness that can call different results the same cannot vouch
+    for anything. NaN and infinities are named, since they have no Decimal
+    order."""
+    if v is None or isinstance(v, (bool, str)):
         return v
-    if isinstance(v, (int, float, decimal.Decimal)):
-        f = float(v)
-        return "nan" if math.isnan(f) else _num(v)
+    if isinstance(v, float):
+        if math.isnan(v):
+            return "NaN"
+        if math.isinf(v):
+            return "+inf" if v > 0 else "-inf"
+        return decimal.Decimal(v).normalize()
+    if isinstance(v, int):
+        return decimal.Decimal(v)
+    if isinstance(v, decimal.Decimal):
+        if v.is_nan():
+            return "NaN"
+        if v.is_infinite():
+            return "+inf" if v > 0 else "-inf"
+        return v.normalize()
     return str(v)
+
+
+def _key(row: tuple) -> str:
+    return repr(tuple(str(v) if isinstance(v, decimal.Decimal) else v for v in row))
 
 
 def _run(con, sql: str):
@@ -313,16 +332,20 @@ def _run(con, sql: str):
     except Exception as e:  # noqa: BLE001 — an error IS a result to compare
         return ("error", type(e).__name__)
     norm = [tuple(_norm(v) for v in row) for row in rows]
-    return ("rows", sorted(norm, key=repr))
+    return ("rows", sorted(norm, key=_key))
 
 
 def _same(r1, r2) -> bool:
+    """EXACT agreement. No numeric tolerance of any kind: execution runs
+    single-threaded, so summation order is the scan order and equivalent
+    queries are expected to agree bit-for-bit."""
     if r1[0] == "error" or r2[0] == "error":
         return r1[0] == r2[0]
     rows1, rows2 = r1[1], r2[1]
     if rows1 and rows2 and len(rows1[0]) != len(rows2[0]):
         # Different projection widths: compare the measure (last column).
-        return sorted((r[-1] for r in rows1), key=repr) == sorted((r[-1] for r in rows2), key=repr)
+        return (sorted((r[-1] for r in rows1), key=lambda v: _key((v,)))
+                == sorted((r[-1] for r in rows2), key=lambda v: _key((v,))))
     return rows1 == rows2
 
 

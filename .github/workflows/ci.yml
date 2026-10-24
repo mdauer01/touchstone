@@ -1,0 +1,39 @@
+name: ci
+
+# Every claim semantix makes about itself is re-checked here: the suite, the
+# canonicalization benchmark in four dialects, and the execution oracle, which
+# runs every pair the engine would certify as equal against adversarial data.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the qualified toolchain
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install --no-deps -e .
+      - name: Parser version is qualified
+        run: |
+          python -c "from semantix.toolchain import toolchain_status as t; s = t(); print(s); assert s['qualified'], s"
+      - name: Lint
+        run: ruff check --select F401,F811,F841,F821 src tests
+      - name: Test suite
+        run: pytest -q
+      - name: Equivalence benchmark (fails on any false certification)
+        run: semantix bench
+      - name: Execution oracle (fails on any disagreement)
+        run: semantix oracle

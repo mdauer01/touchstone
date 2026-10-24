@@ -1,25 +1,15 @@
 # semantix
 
-**A semantic verification engine.** semantix extracts the de facto semantics of a data
-estate from compiled SQL, reconciles them against the declared ontology, and certifies —
-or contradicts — every metric definition with evidence.
+semantix finds where a metric's declared definition and the SQL that computes it
+disagree, and explains each difference clause by clause. It certifies that two
+definitions are the same only within a narrow scope that it states and tests.
 
-Ranking the most *trusted* definition of a metric is not the same as verifying that the
-definition is *correct*. The compiled SQL is the de facto ontology of the business;
-semantix reads it and diffs it against what the organization claims its metrics mean.
+It reads computed definitions from dbt projects, plain SQL directories and view-DDL
+dumps, and declared definitions from metrics YAML, the dbt Semantic Layer, Apache
+Ossie documents, Unity Catalog metric views and Agents Schema tables.
 
 - Concept: [docs/concept-one-pager.md](docs/concept-one-pager.md)
 - Architecture: [docs/architecture-spec.md](docs/architecture-spec.md)
-
-This repository implements **Phase 0** of the architecture spec (§7): adapters (dbt,
-raw SQL directories, view-DDL dumps) → extraction & canonicalization → bitemporal
-fingerprint store → concept clustering → static reconciliation with **clause-level
-blame** → HTML report — plus the Phase 1/2 surfaces that were cheap to pull forward:
-derived valid-time history, as-of queries, restatement detection, a **DuckDB execution
-slice** that attaches measured dollar divergence to contradictions, **Ed25519-signed
-semantic receipts** (`attest` / `verify-receipt`), a scan-over-scan **`diff`** for CI
-(comment only newly introduced verdicts), an **attestation MCP server** so agents check
-the receipt before quoting a number, and an **open equivalence benchmark** (`bench`).
 
 ## Quickstart
 
@@ -53,6 +43,51 @@ engineered so one scan produces every verdict type:
 | `gmv` | **CERTIFIED + ALIASING** | `total_gmv` and `gross_merchandise_value` are canonically identical to the declared metric — CTE vs. inline, flipped predicate order, `NOT =` vs. `<>` and `SELECT *` all normalize away. |
 | `customer_ltv` | **ORPHAN_CLAIM** | Declared, never computed anywhere. |
 | `refund_rate` | **SHADOW_METRIC** | Computed in ops, absent from the ontology. |
+
+## Supported scope
+
+**What it reads.** SQL in four dialects: DuckDB, Databricks, Snowflake and BigQuery.
+Computed definitions come from dbt manifests, directories of `.sql` files, or
+`CREATE VIEW` dumps; declared definitions from the formats listed above. The only
+shipped warehouse driver is DuckDB, so other warehouses are read through exported
+files.
+
+**What a CERTIFIED verdict means.** The definitions' canonical cores are equal at
+proof grade; every construct they use is one the core models; relation identity came
+from names the SQL wrote or from `--default-database` / `--default-schema`; and the
+parser is a qualified sqlglot version. Full statement and limits:
+[What a certification guarantees](#what-a-certification-guarantees-stated-narrowly).
+
+**What it refuses rather than guesses.** A construct the core does not model makes a
+definition unverifiable: for example `TABLESAMPLE`, window-measure semantics,
+joined-table references in metric views, bind parameters, or an unqualified
+reference whose database depends on the session. It is reported with the reason and
+never certified.
+
+**What it does not cover.** Semantics the SQL text does not carry (session time
+zones, collations, user-defined functions), engine runtime behaviour beyond the
+DuckDB execution oracle, calculations done client-side that never reach the
+warehouse, and definitions the scan did not read.
+
+**How the claims are tested.**
+
+| Check | What it does |
+| --- | --- |
+| `pytest` | The suite, including one regression file per external review round |
+| `semantix bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal |
+| `semantix oracle` | Executes every pair the engine would certify equal against adversarial DuckDB data, compared exactly |
+
+## What is implemented
+
+This repository implements **Phase 0** of the architecture spec (§7): adapters (dbt,
+raw SQL directories, view-DDL dumps) → extraction & canonicalization → bitemporal
+fingerprint store → concept clustering → static reconciliation with **clause-level
+blame** → HTML report — plus the Phase 1/2 surfaces that were cheap to pull forward:
+derived valid-time history, as-of queries, restatement detection, a **DuckDB execution
+slice** that attaches measured dollar divergence to contradictions, **Ed25519-signed
+semantic receipts** (`attest` / `verify-receipt`), a scan-over-scan **`diff`** for CI
+(comment only newly introduced verdicts), an **attestation MCP server** so agents check
+the receipt before quoting a number, and an **open equivalence benchmark** (`bench`).
 
 ### The bitemporal store in action
 
@@ -383,11 +418,14 @@ engine would certify equal — and EXECUTES every member of every bucket in Duck
 against adversarial datasets: NULLs, float cancellation and overflow, integer
 overflow, ties, empty tables, and separate databases holding different data under the
 same short table name. Any two members whose results differ are a false
-certification. Every query is compared with every other, so cross-family collisions
+certification. Results are compared exactly: integers and decimals as exact values,
+floats as their exact binary values, with no tolerance of any kind; execution is
+single-threaded, so summation order is the scan order. Every query is compared with every other, so cross-family collisions
 surface too, and a self-test requires the datasets to tell apart pairs known to
 differ, so a quiet oracle has demonstrably been able to speak. Run against `ec4baff`
-it reports 45 false certifications covering every class above; on the current code
-it reports none. Its scope is DuckDB execution of DuckDB-dialect SQL; the other
+it reports 45 false certifications covering every class above. On the current code
+it reports none: 0 disagreements across 897 executed pairs by default and 91,769 in
+the full sweep, under exact comparison. Its scope is DuckDB execution of DuckDB-dialect SQL; the other
 dialects in the matrix are canonicalized by `bench`, not executed.
 
 ### What a certification guarantees, stated narrowly
@@ -402,9 +440,11 @@ one qualifies only through `scripts/qualify_sqlglot.sh`, which runs the suite, t
 benchmark and the full oracle). It does not cover semantics the SQL text does not
 carry (session time zones, collations, user-defined functions), engine-specific
 runtime behaviour beyond the DuckDB oracle, or definitions the scan did not reach. A
-receipt's `CERTIFIED` is a historical attestation as of `verified_as_of`; it is valid
-for current use only when its freshness check re-hashed every scanned source and
-found them unchanged.
+receipt answers two separate questions. It is a valid record of the instant it
+describes, and it may be relied on for current use only when it is a current receipt
+whose freshness check re-hashed every scanned source and found them unchanged. An
+`--as-of` receipt is never valid for current use; `verify-receipt --require-current`
+and the MCP tool's `current_use` field enforce that.
 
 ### The completeness gate
 

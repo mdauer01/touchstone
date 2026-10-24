@@ -263,7 +263,10 @@ def test_as_of_receipts_survive_current_estate_drift():
                              "estate_drift": {"changed": ["dbt:model.x"]}}}
     trusted, warnings = receipt_trust(receipt)
     assert trusted
-    assert any("remains valid" in w for w in warnings)
+    assert any("valid for that instant only" in w for w in warnings)
+    # Round nine: valid for its instant is not valid for current use.
+    from semantix.signing import assess_receipt
+    assert assess_receipt(receipt).current_use is False
 
 
 # ----------------------------------------------------------------- adapters

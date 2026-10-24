@@ -149,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_verify.add_argument("receipt", help="path to a receipt JSON file, or - for stdin")
     p_verify.add_argument(
+        "--require-current", dest="require_current", action="store_true",
+        help="exit 1 unless the receipt is valid for CURRENT use (an as-of or "
+             "unchecked receipt fails even when its signature holds)")
+    p_verify.add_argument(
         "--public-key",
         help="pin the expected signer (base64url Ed25519); omit to check "
              "tamper-evidence against the embedded key",
@@ -645,13 +649,8 @@ def _cmd_attest(args: argparse.Namespace) -> int:
     fr = receipt.freshness or {}
     if fr.get("status"):
         print(f"freshness: {fr['status']} — {fr.get('note', '')}", file=sys.stderr)
-    from semantix.signing import receipt_trust
-    current, _ = receipt_trust(receipt.as_dict())
-    print("reliance: " + ("valid for CURRENT use — the estate was re-checked and matches"
-                          if current else
-                          "HISTORICAL attestation only — not valid for current use "
-                          "until re-attested with every estate source"),
-          file=sys.stderr)
+    from semantix.signing import assess_receipt
+    print("reliance: " + assess_receipt(receipt.as_dict()).reliance(), file=sys.stderr)
     return 0
 
 
@@ -670,7 +669,7 @@ def _cmd_verify_receipt(args: argparse.Namespace) -> int:
     except json.JSONDecodeError as e:
         raise ValueError(f"{args.receipt}: is not valid JSON — {e}") from e
 
-    from semantix.signing import receipt_trust
+    from semantix.signing import assess_receipt
 
     ok, message = verify_receipt_dict(receipt, args.public_key)
     print(message)
@@ -685,12 +684,15 @@ def _cmd_verify_receipt(args: argparse.Namespace) -> int:
     if verified_as_of:
         print(f"  status {receipt.get('status')} · verified as of {verified_as_of}"
               + (f" · freshness {fresh_status}" if fresh_status else ""))
-    trusted, warnings = receipt_trust(receipt)
-    for warning in warnings:
+    a = assess_receipt(receipt)
+    print(f"  reliance: {a.reliance()}")
+    for warning in a.warnings:
         print(f"  WARNING: {warning}", file=sys.stderr)
-    if not trusted and not warnings:
-        print("  WARNING: receipt failed the trust evaluation", file=sys.stderr)
-    return 0 if trusted else 1
+    if getattr(args, "require_current", False):
+        # Pipelines gating CURRENT reliance must not pass on a receipt that is
+        # only valid for a past instant.
+        return 0 if a.current_use else 1
+    return 0 if a.valid_for_stated_use else 1
 
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
