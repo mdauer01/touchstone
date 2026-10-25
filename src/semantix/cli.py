@@ -1142,6 +1142,8 @@ def _print_monitor(result: dict) -> None:
                   f"observed {sides['observed']}")
         if f.get("calculation_matches"):
             print(f"      its calculation: {f['calculation_matches']}")
+        for note in f.get("suspected") or []:
+            print(f"      suspected (not a verdict): {note}")
         who = [x for x in (", ".join(f.get("executed_by") or []),
                            ", ".join(f.get("assets") or [])) if x]
         if who:

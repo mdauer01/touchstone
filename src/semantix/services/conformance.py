@@ -156,11 +156,17 @@ class Outcome:
     reasons: list[dict] = field(default_factory=list)
     variation: dict = field(default_factory=lambda: {"slices": [], "grain": []})
     shape: str | None = None                  # exact | A | B
+    # What WOULD have been a violation, had the query been inside the
+    # supported-SQL boundary. Context for a human, never a verdict.
+    suspected: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return {"status": self.status, "shape": self.shape,
-                "reasons": list(self.reasons), "variation": self.variation,
-                "rule_set": RULE_SET}
+        d = {"status": self.status, "shape": self.shape,
+             "reasons": list(self.reasons), "variation": self.variation,
+             "rule_set": RULE_SET}
+        if self.suspected:
+            d["suspected"] = list(self.suspected)
+        return d
 
     @property
     def codes(self) -> list[str]:
@@ -211,7 +217,15 @@ def raw_shape_problem(stmt: exp.Expression) -> str | None:
 
 def check_raw(core: SemanticCore, auth: Authority, dialect: str,
               shape_problem: str | None, models: set[str] = frozenset()) -> Outcome:
-    """Shape A: an observed proof-grade core against one authority."""
+    """Shape A: an observed proof-grade core against one authority.
+
+    Judgment order, as on the metric-view path: the supported-SQL BOUNDARY
+    (query shape, markers, joins, unreadable or unsupported conditions,
+    unsupported or undeclared groupings) is settled before any violation
+    may stand. A query outside it is unverifiable, and what would have been
+    a violation travels as `suspected` — an unsupported condition such as
+    `UPPER(status) = 'COMPLETED'` may stand in for the very required filter
+    a violation would call missing."""
     if core.hash() == auth.core.hash():
         return Outcome("conforming", shape="exact")
     base = auth.base_relation
@@ -219,21 +233,39 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
         return unverifiable("shape_unsupported",
                             "the authority definition reads a join graph — join "
                             "variations are not yet verified")
+    boundary: list[dict] = []
+    violations: list[dict] = []
+    undecided: list[dict] = []
+    empty = {"slices": [], "grain": []}
+    if shape_problem:
+        boundary.append(_reason("shape_unsupported", f"query {shape_problem}"))
+    markers = [f for f in (*core.filters, *auth.core.filters) if f.startswith(_MARKERS)]
+    if markers and not shape_problem:   # the shape problem already names it
+        boundary.append(_reason("shape_unsupported",
+                                f"carries {markers[0].split(' ')[0]} semantics, outside "
+                                f"this rule set"))
+    if auth.core.grain:
+        boundary.append(_reason("grained_definition",
+                                "the definition is itself grouped — re-grouping is "
+                                "not judged in this rule set"))
+
     if tuple(core.join_nodes) != (base,) or core.join_edges:
         if len(core.join_nodes) == 1 and not core.join_edges:
             rel = core.join_nodes[0]
             if {rel, base} & set(models):
-                return unverifiable(
+                boundary.append(_reason(
                     "through_model",
                     f"reads {rel}; the definition reads {base} — one of them is a "
-                    f"model, and through-model comparison is not made")
-            return Outcome("violation", [_reason(
-                "source_changed",
-                f"computed over {rel}; the definition reads {base}")], shape="A")
-        return unverifiable("shape_unsupported",
-                            "joins another relation — join slices are not yet verified")
+                    f"model, and through-model comparison is not made"))
+            else:
+                violations.append(_reason(
+                    "source_changed", f"computed over {rel}; the definition reads {base}"))
+        else:
+            boundary.append(_reason("shape_unsupported",
+                                    "joins another relation — join slices are not yet "
+                                    "verified"))
+        return _settle(boundary, violations, undecided, empty)
 
-    violations: list[dict] = []
     if core.measure_expr != auth.core.measure_expr \
             or tuple(core.source_columns) != tuple(auth.core.source_columns):
         transformed = (auth.core.measure_expr in core.measure_expr
@@ -245,47 +277,33 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
             if transformed else
             f"measure is {core.measure_expr}; the definition is "
             f"{auth.core.measure_expr}"))
-    if auth.core.grain:
-        if violations:
-            return Outcome("violation", violations, shape="A")
-        return unverifiable("grained_definition",
-                            "the definition is itself grouped — re-grouping is "
-                            "not judged in this rule set")
-    if shape_problem:
-        if violations:
-            return Outcome("violation", violations, shape="A")
-        return unverifiable("shape_unsupported", f"query {shape_problem}")
-    markers = [f for f in (*core.filters, *auth.core.filters) if f.startswith(_MARKERS)]
-    if markers:
-        return unverifiable("shape_unsupported",
-                            f"carries {markers[0].split(' ')[0]} semantics, outside "
-                            f"this rule set")
+    if boundary:
+        return _settle(boundary, violations, undecided, empty)
 
     parsed: dict[str, exp.Expression] = {}
     for text in (*core.filters, *auth.core.filters):
         if text not in parsed:
             node = _parse(text, dialect)
             if node is None:
-                return unverifiable("predicate_unsupported",
-                                    f"could not re-read condition {text!r}")
+                boundary.append(_reason("predicate_unsupported",
+                                        f"could not re-read condition {text!r}"))
+                return _settle(boundary, violations, undecided, empty)
             parsed[text] = node
 
     # Contradictory conditions fold to FALSE in canonicalization and take the
     # required conjuncts with them; "the required filter is not applied"
     # would then be a false statement about a query that selects no rows.
     if any(_is_false(parsed[f]) for f in core.filters):
-        if violations:
-            return Outcome("violation", violations, shape="A")
-        return unverifiable("predicate_unsupported",
-                            "the query's conditions are contradictory (they simplify "
-                            "to FALSE) — it selects no rows; not judged")
+        boundary.append(_reason("predicate_unsupported",
+                                "the query's conditions are contradictory (they simplify "
+                                "to FALSE) — it selects no rows; not judged"))
+        return _settle(boundary, violations, undecided, empty)
 
     required = list(auth.core.filters)
     observed = list(core.filters)
     extras = [f for f in observed if f not in required]
     required_cols = set().union(*(_columns(parsed[r]) for r in required)) if required else set()
     consumed: set[str] = set()
-    undecided: list[dict] = []
     for r in (r for r in required if r not in observed):
         rnode = parsed[r]
         rcols = _columns(rnode)
@@ -324,33 +342,33 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
                     f"condition {x} constrains column(s) the required filters use "
                     f"— whether it changes the definition is not decided"))
             else:
-                undecided.append(_reason(resolver.unknown_code(), resolver.unknown_detail(x)))
+                boundary.append(_reason(resolver.unknown_code(), resolver.unknown_detail(x)))
         else:
-            undecided.append(_reason(verdict.code, verdict.detail.format(x=x)))
+            boundary.append(_reason(verdict.code, verdict.detail.format(x=x)))
 
     grain: list[str] = []
     for g in core.grain:
         node = _parse(g, dialect)
         if node is None or isinstance(node, (exp.Rollup, exp.Cube, exp.GroupingSets)) \
                 or g.upper().startswith(("ROLLUP", "CUBE", "GROUPING SETS")):
-            undecided.append(_reason("shape_unsupported",
-                                     f"groups by {g} — ROLLUP/CUBE/GROUPING SETS are "
-                                     f"not judged in this rule set"))
+            boundary.append(_reason("shape_unsupported",
+                                    f"groups by {g} — ROLLUP/CUBE/GROUPING SETS are "
+                                    f"not judged in this rule set"))
             continue
         verdict = _classify_term(node, resolver)
         if verdict == "dimension":
             grain.append(g)
         elif verdict == "unsupported":
-            undecided.append(_reason("dimension_unsupported",
-                                     f"groups by {g}, a dimension this rule set does "
-                                     f"not model{resolver.hint(_columns(node))}"))
+            boundary.append(_reason("dimension_unsupported",
+                                    f"groups by {g}, a dimension this rule set does "
+                                    f"not model{resolver.hint(_columns(node))}"))
         elif resolver.dims is None or not resolver.fully_understood:
-            undecided.append(_reason(resolver.unknown_code(), resolver.unknown_detail(g)))
+            boundary.append(_reason(resolver.unknown_code(), resolver.unknown_detail(g)))
         else:
-            undecided.append(_reason("grouping_undeclared",
-                                     f"groups by {g}, which is not a declared dimension "
-                                     f"— grouping outside the governed model is not "
-                                     f"judged in this rule set"))
+            boundary.append(_reason("grouping_undeclared",
+                                    f"groups by {g}, which is not a declared dimension "
+                                    f"— grouping outside the governed model is not "
+                                    f"judged in this rule set"))
 
     # A measure that itself conditions on a required filter's columns —
     # `SUM(amount) FILTER (WHERE status = 'completed')`, a CASE on status —
@@ -368,12 +386,20 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
                 f"the measure conditions on {', '.join(sorted(moved))}, a column of "
                 f"the required filters — whether it carries them is not decided"))
 
-    variation = {"slices": slices, "grain": grain}
+    return _settle(boundary, violations, undecided, {"slices": slices, "grain": grain})
+
+
+def _settle(boundary: list[dict], violations: list[dict], undecided: list[dict],
+            variation: dict) -> Outcome:
+    """Boundary first, then violations, then undecided implications."""
+    if boundary:
+        return Outcome("unverifiable", boundary + undecided, variation, "A",
+                       suspected=[v["detail"] for v in violations])
     if violations:
-        return Outcome("violation", violations, variation, shape="A")
+        return Outcome("violation", violations, variation, "A")
     if undecided:
-        return Outcome("unverifiable", undecided, variation, shape="A")
-    return Outcome("conforming", [], variation, shape="A")
+        return Outcome("unverifiable", undecided, variation, "A")
+    return Outcome("conforming", [], variation, "A")
 
 
 def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list[str],
@@ -667,21 +693,25 @@ def check_metric_view(stmt: exp.Expression,
                     "below_proof_grade", f"the approved definition of "
                     f"{view_relation}/{m} could not be read at proof grade", shape="B"))
                 continue
-            if not bare:
-                presented_as_governed = output is None or output == m
-                if presented_as_governed:
-                    emit(m, Outcome("violation", [_reason(
-                        "transformed_governed_measure",
-                        f"presented as {m} but computed as {written} — a "
-                        f"transformation of the governed measure")], variation, "B"))
-                else:
-                    emit(m, unverifiable(
-                        "derived_expression",
-                        f"{output} = {written} is derived from the governed "
-                        f"measure {m}; no authority defines {output}", shape="B"))
-                continue
+            presented_as_governed = output is None or output == m
+            transformation = None if bare else (
+                f"presented as {m} but computed as {written} — a transformation of "
+                f"the governed measure" if presented_as_governed else
+                f"{output} = {written} is derived from the governed measure {m}; no "
+                f"authority defines {output}")
+            # The shared boundary (filters, groupings, projected dimensions)
+            # is settled BEFORE the projection's formula is judged: a
+            # transformed projection returned early and never saw it, so an
+            # unsupported filter became a violation.
             if shared:
-                emit(m, Outcome("unverifiable", list(shared), variation, "B"))
+                emit(m, Outcome("unverifiable", list(shared), variation, "B",
+                                suspected=[transformation] if transformation else []))
+                continue
+            if transformation and presented_as_governed:
+                emit(m, Outcome("violation", [_reason(
+                    "transformed_governed_measure", transformation)], variation, "B"))
+            elif transformation:
+                emit(m, unverifiable("derived_expression", transformation, shape="B"))
             else:
                 emit(m, Outcome("conforming", [], variation, "B"))
     return out

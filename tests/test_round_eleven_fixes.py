@@ -63,7 +63,7 @@ def test_wrong_metric_name_on_a_metric_view(tmp_path, sql, start_time, kind, cod
     if kind == "unverifiable":
         # The suspicion is kept as context, and no evidence claims more than
         # was established.
-        assert f["suspected"].startswith("presented as gross_revenue but computed as")
+        assert f["suspected"][0].startswith("presented as gross_revenue but computed as")
         assert "calculation_matches" not in f
         assert result["funnel"]["violations"] == 0
     else:

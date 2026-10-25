@@ -96,9 +96,10 @@ bucket is its most severe finding, judged as the metric the query claims to comp
 (its alias, an explicit `-- semantix: metric=` tag, or the asset map); a calculation
 that matches a *different* approved metric is evidence on that finding, not a second
 one. Judgment runs in a fixed order: definition evidence (for the referenced and the
-claimed metric), then the supported-SQL boundary, then the claimed metric. If an earlier
-step fails, the use is unverifiable and a suspected naming mismatch is kept as
-`suspected` context, never promoted to a violation. Findings are merged only when their
+claimed metric), then the supported-SQL boundary (shape, filters, groupings), then the
+claimed metric and the projection's formula. If an earlier step fails, the use is
+unverifiable, and anything that would have been a violation — a renamed or transformed
+measure, a dropped filter — is kept as `suspected` context, never promoted to a verdict. Findings are merged only when their
 verdicts are identical, so each carries only its own executions. Each bucket is shown as
 a share of all measure uses. Governed references (`MEASURE()` over an
 approved view) are counted alongside, never instead. `checked = conforming +

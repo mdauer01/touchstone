@@ -646,6 +646,8 @@ def _finding(base: dict, kind: str, severity: int, concept: str | None,
         f["shape"] = outcome.shape
         f["reasons"] = list(outcome.reasons)
         f["variation"] = outcome.variation
+        if outcome.suspected:
+            f["suspected"] = [*f.get("suspected", []), *outcome.suspected]
     f.update(extra)
     return f
 
@@ -902,7 +904,7 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
 
     out: list[dict] = []
     if claimed:
-        context = {**base, "suspected": suspected}
+        context = {**base, "suspected": [suspected]}
         for label in claimed:
             if outside:
                 out.append(_finding(context, "unverifiable", 0, label, "unverifiable",

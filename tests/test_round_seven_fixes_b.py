@@ -170,13 +170,22 @@ def test_monitor_other_concepts_name_on_matching_math_is_a_violation(monitored):
     kinds, _ = _kinds(store, registry,
                       ["SELECT SUM(amount - refunds) AS gross_revenue FROM db.main.orders "
                        "WHERE status = 'completed'"] * 3)
-    # The query CLAIMS gross_revenue: that violation is the finding. The match
-    # to net_revenue's definition is evidence on it, not a second, conforming
-    # finding that could stand in for it in the headline (round ten).
-    assert kinds == [("definition_violation", "gross_revenue")]
+    # The query CLAIMS gross_revenue; the match to net_revenue's definition is
+    # evidence on that finding, never a second, conforming finding that could
+    # stand in for it in the headline (round ten). Its extra filter cannot be
+    # judged without declared dimensions, so the boundary settles first and
+    # the changed measure is only suspected (round twelve): a filter such as
+    # `refunds = 0` can make SUM(amount - refunds) gross revenue on its rows.
+    assert kinds == [("unverifiable", "gross_revenue")]
     (f,) = _.get("findings")
     assert "rev_mart" in f["calculation_matches"]
-    assert _["funnel"]["violations"] == 3 and _["funnel"]["conforming"] == 0
+    assert any("measure is" in s for s in f["suspected"])
+    assert _["funnel"]["violations"] == 0 and _["funnel"]["conforming"] == 0
+    # Inside the boundary — no unjudgeable filter — the violation stands.
+    kinds, _ = _kinds(store, registry,
+                      ["SELECT SUM(amount - refunds) AS gross_revenue FROM db.main.orders"] * 3)
+    assert kinds == [("definition_violation", "gross_revenue")]
+    assert _["funnel"]["violations"] == 3
 
 
 def test_monitor_mixed_grade_reruns_kept_apart(monitored):
