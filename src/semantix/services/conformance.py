@@ -219,13 +219,22 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
               shape_problem: str | None, models: set[str] = frozenset()) -> Outcome:
     """Shape A: an observed proof-grade core against one authority.
 
-    Judgment order, as on the metric-view path: the supported-SQL BOUNDARY
-    (query shape, markers, joins, unreadable or unsupported conditions,
-    unsupported or undeclared groupings) is settled before any violation
-    may stand. A query outside it is unverifiable, and what would have been
-    a violation travels as `suspected` — an unsupported condition such as
+    Two passes, in order, and the first never returns a violation:
+
+    1. BOUNDARY — query shape and markers, the join graph, every condition's
+       syntax (including conditions on required-filter columns, which the
+       required-filter logic later reasons about), dimensions of the
+       remaining conditions, and every grouping term. Complete before
+       anything is judged.
+    2. JUDGMENT — source, measure, required filters, undeclared slices.
+
+    Outside the boundary the use is unverifiable and pass 2's violations
+    travel as `suspected`: an unsupported condition such as
     `UPPER(status) = 'COMPLETED'` may stand in for the very required filter
-    a violation would call missing."""
+    a violation would call missing, and a filter such as `refunds = 0` can
+    make a changed measure equal the definition on its rows. Round twelve
+    still returned from two branches (a changed source; conditions on
+    required-filter columns) before the boundary was complete."""
     if core.hash() == auth.core.hash():
         return Outcome("conforming", shape="exact")
     base = auth.base_relation
@@ -236,7 +245,8 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
     boundary: list[dict] = []
     violations: list[dict] = []
     undecided: list[dict] = []
-    empty = {"slices": [], "grain": []}
+
+    # ---- pass 1: the boundary --------------------------------------------
     if shape_problem:
         boundary.append(_reason("shape_unsupported", f"query {shape_problem}"))
     markers = [f for f in (*core.filters, *auth.core.filters) if f.startswith(_MARKERS)]
@@ -248,7 +258,7 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
         boundary.append(_reason("grained_definition",
                                 "the definition is itself grouped — re-grouping is "
                                 "not judged in this rule set"))
-
+    source_changed = None
     if tuple(core.join_nodes) != (base,) or core.join_edges:
         if len(core.join_nodes) == 1 and not core.join_edges:
             rel = core.join_nodes[0]
@@ -258,92 +268,61 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
                     f"reads {rel}; the definition reads {base} — one of them is a "
                     f"model, and through-model comparison is not made"))
             else:
-                violations.append(_reason(
-                    "source_changed", f"computed over {rel}; the definition reads {base}"))
+                source_changed = _reason(
+                    "source_changed", f"computed over {rel}; the definition reads {base}")
         else:
             boundary.append(_reason("shape_unsupported",
                                     "joins another relation — join slices are not yet "
                                     "verified"))
-        return _settle(boundary, violations, undecided, empty)
-
-    if core.measure_expr != auth.core.measure_expr \
-            or tuple(core.source_columns) != tuple(auth.core.source_columns):
-        transformed = (auth.core.measure_expr in core.measure_expr
-                       and core.measure_expr != auth.core.measure_expr)
-        violations.append(_reason(
-            "transformed_governed_measure" if transformed else "measure_changed",
-            (f"applies a transformation to the governed expression: "
-             f"{core.measure_expr} (definition: {auth.core.measure_expr})")
-            if transformed else
-            f"measure is {core.measure_expr}; the definition is "
-            f"{auth.core.measure_expr}"))
-    if boundary:
-        return _settle(boundary, violations, undecided, empty)
 
     parsed: dict[str, exp.Expression] = {}
-    for text in (*core.filters, *auth.core.filters):
-        if text not in parsed:
-            node = _parse(text, dialect)
-            if node is None:
-                boundary.append(_reason("predicate_unsupported",
-                                        f"could not re-read condition {text!r}"))
-                return _settle(boundary, violations, undecided, empty)
+    for text in dict.fromkeys((*core.filters, *auth.core.filters)):
+        if text.startswith(_MARKERS):
+            continue
+        node = _parse(text, dialect)
+        if node is None:
+            boundary.append(_reason("predicate_unsupported",
+                                    f"could not re-read condition {text!r}"))
+        else:
             parsed[text] = node
-
     # Contradictory conditions fold to FALSE in canonicalization and take the
     # required conjuncts with them; "the required filter is not applied"
     # would then be a false statement about a query that selects no rows.
-    if any(_is_false(parsed[f]) for f in core.filters):
+    if any(f in parsed and _is_false(parsed[f]) for f in core.filters):
         boundary.append(_reason("predicate_unsupported",
                                 "the query's conditions are contradictory (they simplify "
                                 "to FALSE) — it selects no rows; not judged"))
-        return _settle(boundary, violations, undecided, empty)
 
-    required = list(auth.core.filters)
-    observed = list(core.filters)
-    extras = [f for f in observed if f not in required]
+    required = [r for r in auth.core.filters if r in parsed]
+    extras = [f for f in core.filters if f in parsed and f not in auth.core.filters
+              and not _is_false(parsed[f])]
+    # Syntax of EVERY extra condition, whatever columns it touches.
+    for x in extras:
+        if not _supported_syntax(_unparen(parsed[x])):
+            boundary.append(_reason("predicate_unsupported",
+                                    f"{x}: predicate shape not supported in this rule set"))
     required_cols = set().union(*(_columns(parsed[r]) for r in required)) if required else set()
-    consumed: set[str] = set()
-    for r in (r for r in required if r not in observed):
-        rnode = parsed[r]
-        rcols = _columns(rnode)
-        related = [x for x in extras if _columns(parsed[x]) & rcols]
-        if not related:
-            violations.append(_reason("required_filter_missing",
-                                      f"required condition {r} is not applied"))
-            continue
-        consumed.update(related)
-        decided = _replacement(r, rnode, related, extras, parsed, dialect)
-        if decided is not None:
-            violations.append(decided)
-        else:
-            undecided.append(_reason(
-                "implication_undecided",
-                f"required condition {r} is not a top-level condition; the query "
-                f"has {' AND '.join(related)} instead — whether that implies it "
-                f"is not decided"))
+    missing = [r for r in required if r not in core.filters]
+    # Conditions the required-filter judgment will reason about (structural:
+    # they touch a missing required filter's columns).
+    related = {r: [x for x in extras if _columns(parsed[x]) & _columns(parsed[r])]
+               for r in missing}
+    consumed = {x for xs in related.values() for x in xs}
 
     resolver = _RawResolver(auth.dimensions)
     slices: list[str] = []
+    undeclared: list[tuple[str, set[str]]] = []
     for x in (x for x in extras if x not in consumed):
         verdict = _classify_predicate(parsed[x], resolver)
         if verdict.kind == "slice":
             slices.append(x)
         elif verdict.kind == "undeclared":
             cols = verdict.columns
-            if resolver.fully_understood and not (cols <= required_cols):
-                violations.append(_reason(
-                    "unpermitted_slice",
-                    f"filters {x}, on {', '.join(sorted(cols))} — not a declared "
-                    f"dimension of the definition{resolver.hint(cols)}"))
-            elif cols <= required_cols:
-                undecided.append(_reason(
-                    "implication_undecided",
-                    f"condition {x} constrains column(s) the required filters use "
-                    f"— whether it changes the definition is not decided"))
+            if resolver.fully_understood or cols <= required_cols:
+                undeclared.append((x, cols))      # judged in pass 2
             else:
                 boundary.append(_reason(resolver.unknown_code(), resolver.unknown_detail(x)))
-        else:
+        elif verdict.code != "predicate_unsupported":   # syntax already reported
             boundary.append(_reason(verdict.code, verdict.detail.format(x=x)))
 
     grain: list[str] = []
@@ -369,6 +348,49 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
                                     f"groups by {g}, which is not a declared dimension "
                                     f"— grouping outside the governed model is not "
                                     f"judged in this rule set"))
+    variation = {"slices": slices, "grain": grain}
+
+    # ---- pass 2: judgment --------------------------------------------------
+    if source_changed is not None:
+        # Measure and filters are compared against a different table's
+        # definition only through the source change itself.
+        return _settle(boundary, [source_changed], undecided, variation)
+    if core.measure_expr != auth.core.measure_expr \
+            or tuple(core.source_columns) != tuple(auth.core.source_columns):
+        transformed = (auth.core.measure_expr in core.measure_expr
+                       and core.measure_expr != auth.core.measure_expr)
+        violations.append(_reason(
+            "transformed_governed_measure" if transformed else "measure_changed",
+            (f"applies a transformation to the governed expression: "
+             f"{core.measure_expr} (definition: {auth.core.measure_expr})")
+            if transformed else
+            f"measure is {core.measure_expr}; the definition is "
+            f"{auth.core.measure_expr}"))
+    for r in missing:
+        if not related[r]:
+            violations.append(_reason("required_filter_missing",
+                                      f"required condition {r} is not applied"))
+            continue
+        decided = _replacement(r, parsed[r], related[r], extras, parsed, dialect)
+        if decided is not None:
+            violations.append(decided)
+        else:
+            undecided.append(_reason(
+                "implication_undecided",
+                f"required condition {r} is not a top-level condition; the query "
+                f"has {' AND '.join(related[r])} instead — whether that implies it "
+                f"is not decided"))
+    for x, cols in undeclared:
+        if cols <= required_cols:
+            undecided.append(_reason(
+                "implication_undecided",
+                f"condition {x} constrains column(s) the required filters use "
+                f"— whether it changes the definition is not decided"))
+        else:
+            violations.append(_reason(
+                "unpermitted_slice",
+                f"filters {x}, on {', '.join(sorted(cols))} — not a declared "
+                f"dimension of the definition{resolver.hint(cols)}"))
 
     # A measure that itself conditions on a required filter's columns —
     # `SUM(amount) FILTER (WHERE status = 'completed')`, a CASE on status —
@@ -386,7 +408,7 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
                 f"the measure conditions on {', '.join(sorted(moved))}, a column of "
                 f"the required filters — whether it carries them is not decided"))
 
-    return _settle(boundary, violations, undecided, {"slices": slices, "grain": grain})
+    return _settle(boundary, violations, undecided, variation)
 
 
 def _settle(boundary: list[dict], violations: list[dict], undecided: list[dict],
@@ -839,12 +861,24 @@ def _classify_predicate(node: exp.Expression, resolver: _Resolver) -> _Predicate
 
 
 def _supported_shape(node: exp.Expression, resolver: _Resolver) -> bool:
+    return _shape(node, lambda n: resolver.term(_unparen(n)) == "dimension")
+
+
+def _supported_syntax(node: exp.Expression) -> bool:
+    """The predicate grammar alone, before asking which columns are
+    dimensions: atoms over a bare column or a DATE_TRUNC of one."""
+    def is_term(n: exp.Expression) -> bool:
+        n = _unparen(n)
+        return isinstance(n, exp.Column) or truncation_of(n) is not None
+    return _shape(node, is_term)
+
+
+def _shape(node: exp.Expression, is_dim) -> bool:
     node = _unparen(node)
     if isinstance(node, (exp.And, exp.Or)):
-        return all(_supported_shape(c, resolver) for c in (node.left, node.right))
+        return all(_shape(c, is_dim) for c in (node.left, node.right))
     if isinstance(node, exp.Not):
-        return _supported_shape(node.this, resolver)
-    is_dim = lambda n: resolver.term(_unparen(n)) == "dimension"  # noqa: E731
+        return _shape(node.this, is_dim)
     if isinstance(node, _COMPARE):
         left, right = node.left, node.right
         return (is_dim(left) and _is_const(right)) or (is_dim(right) and _is_const(left))
