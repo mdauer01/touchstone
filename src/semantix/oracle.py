@@ -222,6 +222,15 @@ SPECIALS = [
     f"SELECT SUM(amount) AS m FROM (SELECT amount FROM {_O} ORDER BY amount ASC LIMIT 2) t",
     f"SELECT SUM(amount) AS m FROM (SELECT amount FROM {_O} ORDER BY amount DESC LIMIT 2 OFFSET 1) t",
     f"SELECT SUM(amount) AS m FROM (SELECT amount FROM {_O} ORDER BY amount DESC NULLS LAST LIMIT 2) t",
+    # ordering through another projection (alias / ordinal) under a bound:
+    # equivalent spellings must bucket together and execute identically
+    f"SELECT channel AS k, SUM(amount) AS m FROM {_O} GROUP BY channel ORDER BY k LIMIT 1",
+    f"SELECT channel AS k, SUM(amount) AS m FROM {_O} GROUP BY channel ORDER BY channel LIMIT 1",
+    f"SELECT channel AS k, SUM(amount) AS m FROM {_O} GROUP BY channel ORDER BY 1 LIMIT 1",
+    f"SELECT channel AS k, SUM(amount) AS m FROM {_O} GROUP BY channel ORDER BY k DESC LIMIT 1",
+    # plain DISTINCT over different projection tuples
+    f"SELECT DISTINCT SUM(amount) AS m FROM {_O} GROUP BY status",
+    f"SELECT DISTINCT status, SUM(amount) AS m FROM {_O} GROUP BY status",
     # distinct
     f"SELECT SUM(DISTINCT amount) AS m FROM {_O}",
     f"SELECT SUM(amount) AS m FROM (SELECT DISTINCT amount FROM {_O}) t",
@@ -253,6 +262,8 @@ SELF_TEST_PAIRS = [
     ("main", f"SELECT SUM(o.amount) AS m FROM {_O} o JOIN {_C} c ON o.customer_id = c.customer_id",
              f"SELECT SUM(o.amount) AS m FROM {_O} o LEFT JOIN {_C} c ON o.customer_id = c.customer_id"),
     ("main", f"SELECT SUM(amount) AS m FROM {_O}", f"SELECT SUM(DISTINCT amount) AS m FROM {_O}"),
+    ("main", f"SELECT channel AS k, SUM(amount) AS m FROM {_O} GROUP BY channel ORDER BY k LIMIT 1",
+             f"SELECT channel AS k, SUM(amount) AS m FROM {_O} GROUP BY channel ORDER BY k DESC LIMIT 1"),
     ("multidb", "SELECT SUM(amount) AS m FROM prod.raw.orders", "SELECT SUM(amount) AS m FROM dev.raw.orders"),
 ]
 
@@ -310,20 +321,37 @@ def _norm(v):
             return "NaN"
         if math.isinf(v):
             return "+inf" if v > 0 else "-inf"
-        return decimal.Decimal(v).normalize()
+        return _exact(decimal.Decimal(v))
     if isinstance(v, int):
-        return decimal.Decimal(v)
+        return _exact(decimal.Decimal(v))
     if isinstance(v, decimal.Decimal):
         if v.is_nan():
             return "NaN"
         if v.is_infinite():
             return "+inf" if v > 0 else "-inf"
-        return v.normalize()
+        return _exact(v)
     return str(v)
 
 
+def _exact(d: decimal.Decimal) -> tuple:
+    """A Decimal's exact value as (tag, sign, digits, exponent) with trailing
+    zeros stripped — so 1.10 == 1.1 and 5 == 5.0 — computed from its digit
+    tuple, never through the decimal CONTEXT. Decimal.normalize() rounds to
+    the context precision (28 digits by default) and made the DECIMAL(38,28)
+    values 1.0000000000000000000000000001 and …0002 compare equal. Both
+    zeros are one zero. The tag keeps a number from ever equalling a string."""
+    sign, digits, exponent = d.as_tuple()
+    digits = list(digits)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    if digits == [0]:
+        return ("num", 0, (0,), 0)
+    return ("num", sign, tuple(digits), exponent)
+
+
 def _key(row: tuple) -> str:
-    return repr(tuple(str(v) if isinstance(v, decimal.Decimal) else v for v in row))
+    return repr(tuple(row))
 
 
 def _run(con, sql: str):

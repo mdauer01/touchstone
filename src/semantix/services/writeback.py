@@ -58,10 +58,14 @@ declared one when it was verified; CONTRADICTION means competing definitions
 disagree — read `known_divergences` before answering, and say which
 definition you used.
 
-Rely on a CERTIFIED receipt for a CURRENT answer only when
-`freshness.status` is `fresh`. Any other freshness (`unchecked`, `partial`,
-`stale`, `unknown`) makes it a historical attestation: true as of
-`verified_as_of`, silent about the estate now — say so if you use it.
+`freshness.status` says whether the estate matched when this row was
+published (`freshness.checked_at`) — not whether it matches now. For a
+CURRENT answer, re-verify: the semantix MCP `verify_receipt` tool on a server
+configured with the estate sources, or `semantix verify-receipt
+--require-current --db … <estate sources>`; rely on CERTIFIED only when that
+live check reports `current_use`. Otherwise the receipt is a historical
+attestation: true as of `verified_as_of`, silent about the estate now — say
+so if you use it.
 `definition_version` pins the exact content-addressed definitions that were
 live. Verify the receipt offline with `semantix verify-receipt` against the
 publisher's pinned public key. Quote the `receipt_id` alongside the number.

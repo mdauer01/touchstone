@@ -462,8 +462,9 @@ single-threaded, so summation order is the scan order. Every query is compared w
 surface too, and a self-test requires the datasets to tell apart pairs known to
 differ, so a quiet oracle has demonstrably been able to speak. Run against `ec4baff`
 it reports 45 false certifications covering every class above. On the current code
-it reports none: 0 disagreements across 897 executed pairs by default and 91,769 in
-the full sweep, under exact comparison. Its scope is DuckDB execution of DuckDB-dialect SQL; the other
+it reports none: 0 disagreements across 913 executed pairs by default and 91,785 in
+the full sweep, under exact comparison (exact even beyond the 28 significant digits a
+default decimal context keeps). Its scope is DuckDB execution of DuckDB-dialect SQL; the other
 dialects in the matrix are canonicalized by `bench`, not executed.
 
 The same command then challenges the monitor's conformance rules. It generates
@@ -494,10 +495,13 @@ benchmark and the full oracle). It does not cover semantics the SQL text does no
 carry (session time zones, collations, user-defined functions), engine-specific
 runtime behaviour beyond the DuckDB oracle, or definitions the scan did not reach. A
 receipt answers two separate questions. It is a valid record of the instant it
-describes, and it may be relied on for current use only when it is a current receipt
-whose freshness check re-hashed every scanned source and found them unchanged. An
-`--as-of` receipt is never valid for current use; `verify-receipt --require-current`
-and the MCP tool's `current_use` field enforce that.
+describes, and it may be relied on for current use only when a LIVE re-check at
+verification time — against the snapshot of the receipt's own scan — re-hashes every
+scanned source and finds them unchanged. The freshness recorded at issuance says what
+was true then, not now: offline verification establishes signature integrity and
+historical validity only. `verify-receipt --require-current --db … <estate sources>`
+and the MCP tool on a server configured with the estate perform the live check; an
+`--as-of` receipt is never valid for current use.
 
 ### The completeness gate
 

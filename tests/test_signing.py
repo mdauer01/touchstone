@@ -70,13 +70,18 @@ def test_cli_verify_roundtrip(acme, tmp_path, capsys):
     receipt_path.write_text(json.dumps(store.issue_receipt("gmv").as_dict()))
     assert main(["verify-receipt", str(receipt_path)]) == 1
     assert "signature valid" in capsys.readouterr().out
-    # Re-checked against every scanned source: fresh, valid for current use.
+    # Issued fresh: still only historical OFFLINE — its freshness block says
+    # what was true at issuance, not now (round fourteen).
     fresh = check_freshness(store, dbt_path=str(acme / "dbt_project"),
                             metrics_path=str(acme / "metrics.yml"))
     assert fresh["status"] == "fresh", fresh
     receipt_path.write_text(json.dumps(store.issue_receipt("gmv", freshness=fresh).as_dict()))
-    assert main(["verify-receipt", str(receipt_path)]) == 0
+    assert main(["verify-receipt", str(receipt_path)]) == 1
     db = str(tmp_path / "s.db")
+    # Re-checked NOW against the receipt's own scan: valid for current use.
+    assert main(["verify-receipt", str(receipt_path), "--require-current", "--db", db,
+                 "--dbt", str(acme / "dbt_project"),
+                 "--metrics", str(acme / "metrics.yml")]) == 0
     assert main(["pubkey", "--db", db]) == 0
     out = capsys.readouterr().out
     assert "sk_" in out

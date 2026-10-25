@@ -73,6 +73,13 @@ def extract_fingerprints(
     filter_list += [f"QUALIFY {render(p, dialect)}" for p in flatten_conjuncts(qualify.this if qualify else None)]
 
     select_for_render = qselect
+    # ORDER BY decides which rows a bound or DISTINCT ON keeps, and it may
+    # name ANOTHER projection by alias or ordinal: `ORDER BY sort_key LIMIT
+    # 1` over `SUM(refund) AS sort_key` vs `-SUM(refund) AS sort_key` kept
+    # different rows (revenue 100 vs 900) while the core recorded only the
+    # alias. Terms are resolved to the expressions they name; what cannot be
+    # resolved is a gap, never an alias standing in for its expression.
+    ordering, order_gap = _order_terms(select, qselect, dialect)
     distinct = select.args.get("distinct")
     if distinct is not None:
         # DISTINCT ON (k) keeps one row per k; plain DISTINCT de-duplicates
@@ -83,18 +90,23 @@ def extract_fingerprints(
             # The ORDER BY decides WHICH row survives per key, so it is part
             # of the definition: asc/desc variants compute different rows and
             # previously hashed identically at proof grade.
-            order = select_for_render.args.get("order")
-            ordering = (" ORDER BY " + ", ".join(render(e, dialect)
-                                                 for e in order.expressions)
-                        if order is not None else "")
             q_on = select_for_render.args.get("distinct").args.get("on")
-            filter_list.append(f"SELECT DISTINCT ON ({render(q_on, dialect)}){ordering}")
+            order_sql = (" ORDER BY " + ", ".join(ordering)) if ordering else ""
+            filter_list.append(f"SELECT DISTINCT ON ({render(q_on, dialect)}){order_sql}")
         else:
-            filter_list.append("SELECT DISTINCT")
+            # Plain DISTINCT de-duplicates the WHOLE output row, so the tuple
+            # of every projection decides which measure values survive:
+            # `DISTINCT SUM(amount) … GROUP BY country` collapses equal sums,
+            # `DISTINCT country, SUM(amount)` does not. The bare tag hashed
+            # them equal (a false ALIASING). Names are not part of it, and
+            # neither are order or repetition — a set of expressions.
+            tuple_sql = sorted({render(p.this if isinstance(p, exp.Alias) else p, dialect)
+                                for p in select_for_render.expressions})
+            filter_list.append(f"SELECT DISTINCT ({', '.join(tuple_sql)})")
 
     # A bounded measure is a different measure, and its ordering is what
     # decides *which* rows survive — so both travel together.
-    bound = _render_bound(select_for_render, dialect)
+    bound = _render_bound(select_for_render, ordering, dialect)
     if bound:
         filter_list.append(bound)
 
@@ -113,7 +125,11 @@ def extract_fingerprints(
     # unread construct would otherwise read as "identical" to its absence.
     # Gaps the OPTIMIZER destroyed travel on the CanonResult: by the time we
     # see the optimized AST, a merged CTE's ORDER BY is simply gone.
-    gaps = tuple(sorted({*detect_gaps(select), *canon.gaps}))
+    gaps = tuple(sorted({*detect_gaps(select), *canon.gaps,
+                         *([order_gap] if order_gap and (select.args.get("limit") is not None
+                                                         or select.args.get("offset") is not None
+                                                         or select.args.get("distinct") is not None)
+                           else [])}))
     if set_op:
         gaps = tuple(sorted({*gaps, "set operation"}))
     level = canon.level.value
@@ -332,16 +348,68 @@ def _resolve_cte_sources(amap: dict[str, str], select: exp.Select,
             for alias, relation in amap.items()}
 
 
-def _render_bound(select: exp.Select, dialect: str) -> str | None:
+def _order_terms(select: exp.Select, qselect: exp.Select,
+                 dialect: str) -> tuple[list[str], str | None]:
+    """ORDER BY terms rendered as the expressions they mean, and a gap reason
+    for any term that could not be resolved.
+
+    After qualification a source column carries its table and an output
+    alias does not, so an unqualified column in `select`'s ORDER BY names a
+    projection; the matching term in the relation-qualified `qselect` (where
+    single-source columns are unqualified too) is replaced by that
+    projection's expression. An alias INSIDE a larger ORDER BY expression
+    resolves differently across engines, so it is a gap."""
+    order, q_order = select.args.get("order"), qselect.args.get("order")
+    if order is None or q_order is None:
+        return [], None
+    aliases = {p.alias.lower(): qp.this
+               for p, qp in zip(select.expressions, qselect.expressions)
+               if isinstance(p, exp.Alias) and p.alias and isinstance(qp, exp.Alias)}
+    terms: list[str] = []
+    for term, q_term in zip(order.expressions, q_order.expressions):
+        key = term.this if isinstance(term, exp.Ordered) else term
+        if isinstance(key, exp.Column) and not key.table:
+            target = aliases.get(key.name.lower())
+            if target is None:
+                return [], (f"ORDER BY {key.sql(dialect)} names neither a source "
+                            f"column nor a projection")
+            resolved = q_term.copy()
+            if isinstance(resolved, exp.Ordered):
+                resolved.set("this", target.copy())
+            else:
+                resolved = target.copy()
+            terms.append(render(resolved, dialect))
+            continue
+        if isinstance(key, exp.Literal) and key.is_int:
+            idx = int(key.name) - 1
+            if not 0 <= idx < len(qselect.expressions):
+                return [], f"ORDER BY {key.name} is not a projection ordinal"
+            proj = qselect.expressions[idx]
+            resolved = q_term.copy()
+            target = proj.this if isinstance(proj, exp.Alias) else proj
+            if isinstance(resolved, exp.Ordered):
+                resolved.set("this", target.copy())
+            else:
+                resolved = target.copy()
+            terms.append(render(resolved, dialect))
+            continue
+        if any(isinstance(c, exp.Column) and not c.table and c.name.lower() in aliases
+               for c in key.find_all(exp.Column)):
+            return [], (f"ORDER BY {key.sql(dialect)} uses a projection alias inside an "
+                        f"expression — resolution is engine-specific")
+        terms.append(render(q_term, dialect))
+    return terms, None
+
+
+def _render_bound(select: exp.Select, ordering: list[str], dialect: str) -> str | None:
     """LIMIT/OFFSET plus the ORDER BY that decides which rows they keep."""
     limit = select.args.get("limit")
     offset = select.args.get("offset")
     if limit is None and offset is None:
         return None
     parts = []
-    order = select.args.get("order")
-    if order is not None:
-        parts.append("ORDER BY " + ", ".join(render(e, dialect) for e in order.expressions))
+    if ordering:
+        parts.append("ORDER BY " + ", ".join(ordering))
     if limit is not None:
         parts.append(render(limit, dialect))
     if offset is not None:

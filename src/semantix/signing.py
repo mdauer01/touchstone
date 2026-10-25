@@ -161,6 +161,7 @@ class ReceiptAssessment:
     historical: bool
     current_use: bool
     warnings: tuple[str, ...] = ()
+    rechecked_at: str | None = None   # when the live estate check ran, if one did
 
     @property
     def valid_for_stated_use(self) -> bool:
@@ -176,18 +177,26 @@ class ReceiptAssessment:
             return (f"historical receipt for {self.instant}: valid for that instant "
                     f"only, not a statement about the current estate")
         if self.current_use:
-            return "valid for CURRENT use: the estate was re-checked and matches"
+            return (f"valid for CURRENT use: the estate was re-checked at "
+                    f"{self.rechecked_at} against this receipt's scan and matches")
         if not self.historical:
             return "NOT a valid attestation — " + "; ".join(self.warnings)
         return (f"historical attestation as of {self.instant} only: not valid for "
                 f"current use until re-attested with every estate source")
 
 
-def assess_receipt(receipt: dict) -> ReceiptAssessment:
+def assess_receipt(receipt: dict, live: dict | None = None) -> ReceiptAssessment:
     """Both decisions for a SIGNATURE-VALID receipt, in one place so every
     verification surface (CLI attest, verify-receipt, the MCP tool) applies
     the same rules. Never raises: malformed fields are a refusal with a
     reason, on exactly the arbitrary-JSON input class verification is for.
+
+    `live` is a freshness block computed NOW against the receipt's own scan
+    (services.freshness.check_freshness(scan_id=receipt["scan_id"], …)).
+    Current reliance needs it: the receipt's embedded freshness says what
+    was true when it was ISSUED, and a receipt issued fresh stayed "current"
+    after the model it certified was edited. Offline verification
+    establishes signature integrity and historical validity only.
     """
     is_as_of = bool(receipt.get("as_of"))
     describes = "as_of" if is_as_of else "current"
@@ -223,10 +232,18 @@ def assess_receipt(receipt: dict) -> ReceiptAssessment:
             f"and not for current use — {note}",))
 
     # A CURRENT receipt is a true record of verified_as_of either way; it may
-    # be relied on now only if someone looked, every scanned source re-hashed
-    # against the estate as it is and found unchanged.
+    # be relied on now only if someone looks NOW: every scanned source
+    # re-hashed against the snapshot of the receipt's own scan, unchanged.
+    if live is not None:
+        return _assess_live(receipt, describes, instant, live)
     if fresh_status == "fresh":
-        return ReceiptAssessment(describes, instant, True, True)
+        checked = (freshness or {}).get("checked_at") or "issuance"
+        return ReceiptAssessment(describes, instant, True, False, (
+            f"historical attestation only, not valid for current use without a live "
+            f"check: its freshness block says the estate matched when it was issued "
+            f"({checked}), which is not a statement about now. Verify with the estate "
+            f"sources (`semantix verify-receipt --db … --sql-dir/--dbt/…`, or an MCP "
+            f"server configured with them) to rely on it now",))
     if fresh_status == "stale" or (fresh_status == "partial" and drifted):
         warning = (f"this receipt's own freshness block reports `{fresh_status}` with "
                    "recorded drift — the estate has moved since it was issued; "
@@ -249,10 +266,36 @@ def assess_receipt(receipt: dict) -> ReceiptAssessment:
     return ReceiptAssessment(describes, instant, True, False, (warning,))
 
 
-def receipt_trust(receipt: dict) -> tuple[bool, list[str]]:
+def _assess_live(receipt: dict, describes: str, instant, live: dict) -> ReceiptAssessment:
+    """Current reliance from a live re-check bound to the receipt's scan."""
+    rechecked = live.get("checked_at") if isinstance(live, dict) else None
+    if not isinstance(live, dict) or live.get("scan_id") != receipt.get("scan_id"):
+        return ReceiptAssessment(describes, instant, True, False, (
+            "the live estate check was not made against this receipt's scan — "
+            "current reliance is not established",), rechecked)
+    status = live.get("status")
+    if status == "fresh":
+        return ReceiptAssessment(describes, instant, True, True, (), rechecked)
+    drift = live.get("estate_drift") or {}
+    if status == "stale":
+        moved = [f"{k} {', '.join(v)}" for k, v in drift.items() if v]
+        warning = (f"the estate has changed since this receipt's scan "
+                   f"({'; '.join(moved) or 'drift recorded'}) — re-scan and re-attest")
+    elif status == "partial":
+        warning = ("re-checked systems match, but not every scanned system was "
+                   "re-checked: " + (", ".join(live.get("unchecked_systems") or [])
+                                     or "not recorded")
+                   + " — verify with every estate source")
+    else:
+        warning = ("the live estate check could not answer"
+                   + (f" ({live.get('note')})" if live.get("note") else ""))
+    return ReceiptAssessment(describes, instant, True, False, (warning,), rechecked)
+
+
+def receipt_trust(receipt: dict, live: dict | None = None) -> tuple[bool, list[str]]:
     """(valid for the use the receipt states, warnings). Kept for callers
     that ask one question; anything deciding CURRENT reliance must read
     assess_receipt(...).current_use, which is never true for an as-of
-    receipt."""
-    a = assess_receipt(receipt)
+    receipt nor without a live check."""
+    a = assess_receipt(receipt, live)
     return a.valid_for_stated_use, list(a.warnings)

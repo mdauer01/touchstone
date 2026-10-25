@@ -145,13 +145,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p_verify = sub.add_parser(
         "verify-receipt",
-        help="verify a receipt's Ed25519 signature offline (no store needed)",
+        help="verify a receipt's Ed25519 signature offline (no store needed); "
+             "with --db and the estate sources, also re-check the estate NOW "
+             "against the receipt's scan — the only way to establish current use",
     )
     p_verify.add_argument("receipt", help="path to a receipt JSON file, or - for stdin")
     p_verify.add_argument(
         "--require-current", dest="require_current", action="store_true",
-        help="exit 1 unless the receipt is valid for CURRENT use (an as-of or "
-             "unchecked receipt fails even when its signature holds)")
+        help="exit 1 unless the receipt is valid for CURRENT use: a live re-check "
+             "(--db plus estate sources) must find the estate unchanged since the "
+             "receipt's scan")
+    p_verify.add_argument("--db", default="semantix.db",
+                          help="store holding the receipt's scan (for the live re-check)")
+    _add_estate_args(p_verify)
     p_verify.add_argument(
         "--public-key",
         help="pin the expected signer (base64url Ed25519); omit to check "
@@ -674,7 +680,10 @@ def _cmd_attest(args: argparse.Namespace) -> int:
     if fr.get("status"):
         print(f"freshness: {fr['status']} — {fr.get('note', '')}", file=sys.stderr)
     from semantix.signing import assess_receipt
-    print("reliance: " + assess_receipt(receipt.as_dict()).reliance(), file=sys.stderr)
+    # The freshness block attest just computed IS a live check, made now
+    # against the scan this receipt was issued from.
+    print("reliance: " + assess_receipt(receipt.as_dict(), receipt.freshness).reliance(),
+          file=sys.stderr)
     return 0
 
 
@@ -708,7 +717,18 @@ def _cmd_verify_receipt(args: argparse.Namespace) -> int:
     if verified_as_of:
         print(f"  status {receipt.get('status')} · verified as of {verified_as_of}"
               + (f" · freshness {fresh_status}" if fresh_status else ""))
-    a = assess_receipt(receipt)
+    live = None
+    estate = _estate_kwargs(args)
+    if estate is not None and isinstance(receipt.get("scan_id"), str):
+        from semantix.services.freshness import check_freshness
+
+        store = _open_existing(args.db)
+        estate.pop("dialect", None)   # the receipt's scan records its own
+        live = check_freshness(store, scan_id=receipt["scan_id"], **estate)
+        store.close()
+        print(f"  live re-check against scan {receipt['scan_id']}: {live.get('status')}"
+              + (f" — {live['note']}" if live.get("note") else ""))
+    a = assess_receipt(receipt, live)
     print(f"  reliance: {a.reliance()}")
     for warning in a.warnings:
         print(f"  WARNING: {warning}", file=sys.stderr)
@@ -1068,6 +1088,9 @@ def _print_monitor(result: dict) -> None:
           + (f" · contested: {', '.join(ref['contested_concepts'])}"
              if ref["contested_concepts"] else ""))
     print(f"comparison: {result['comparison']}")
+    if result["toolchain"]["positive_verdicts_withheld"]:
+        print("toolchain: positive verdicts WITHHELD — the parser is not a qualified "
+              "version (see `semantix/toolchain.py`)")
     ctx = result["context"]
     print("context: "
           + ("per-row catalog/schema present" if ctx["per_row"] else "no per-row context")

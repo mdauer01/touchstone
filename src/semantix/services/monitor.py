@@ -87,6 +87,7 @@ from semantix.services.relationships import _parse_statements  # same package: o
 # statement-splitting behavior for every history consumer, not two drifting ones.
 from semantix.services.resolution import normalize_name
 from semantix.store import Store, normalize_ts
+from semantix.toolchain import toolchain_status
 
 # Aliases the analyst did not write: sqlglot's positional names and the
 # extractor's synthesized `<agg>_<column>` names. Attributing them to a
@@ -306,6 +307,22 @@ def monitor_history(
             if outcome:
                 counts[outcome] += 1
 
+    # No positive verdict from a parser nobody qualified — this run's, or the
+    # one that produced the reference cores. The scan withholds CERTIFIED
+    # under the same condition; monitoring kept calling the same equality
+    # "conforming".
+    run_toolchain = toolchain_status()
+    scan_toolchain = (json.loads(scan.get("stats_json") or "{}") or {}).get("toolchain") or {}
+    unqualified = []
+    if not run_toolchain.get("qualified"):
+        unqualified.append(f"this run's parser, sqlglot {run_toolchain.get('sqlglot')}, "
+                           f"is not a qualified version")
+    if not scan_toolchain.get("qualified"):
+        unqualified.append(
+            f"the reference scan's parser, sqlglot {scan_toolchain.get('sqlglot', 'unrecorded')}, "
+            f"is not a qualified version" if scan_toolchain else
+            "the reference scan did not record a qualified parser version")
+
     recurring = [o for o in observed.values() if recurrence[o.base_key] >= min_runs]
     models = registry.known_models()
     label = pilot.comparison_label() if pilot is not None else (
@@ -316,6 +333,8 @@ def monitor_history(
     for obs in sorted(recurring, key=lambda o: (-o.uses, o.key)):
         out = _judge(obs, by_hash, by_name, by_concept, contested, computed_by_hash,
                      excluded, unreadable, models, dialect, as_of)
+        if unqualified:
+            out = [_withhold(f, unqualified) for f in out]
         # The use's headline outcome is its MOST SEVERE finding: a supporting
         # match must never outrank a violation of the metric it claims.
         primary = max(out, key=lambda f: _PRECEDENCE[f["kind"]])
@@ -336,6 +355,8 @@ def monitor_history(
         "reference": ref_meta,
         "rule_set": RULE_SET,
         "excluded_semantics": list(EXCLUDED),
+        "toolchain": {"run": run_toolchain, "reference_scan": scan_toolchain or None,
+                      "positive_verdicts_withheld": bool(unqualified)},
         "comparison": (pilot.comparison_label() if pilot is not None else
                        "latest scan's definitions"),
         "context": {"asserted": list(asserted) if any(asserted) else None,
@@ -709,7 +730,10 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
     exact = by_hash.get(obs.semantic_hash)
     out: list[dict] = []
     if exact:
-        auth = sorted(exact, key=lambda a: (a.concept, a.label))[0]
+        # Several authoritative metrics can share one definition; the one the
+        # query claims is the one it is judged as.
+        claimed_exact = [a for a in exact if a.concept in named]
+        auth = sorted(claimed_exact or exact, key=lambda a: (a.concept, a.label))[0]
         if named and auth.concept not in named:
             # The math is concept A's; the query CLAIMS concept B. B's verdict
             # is the finding, and the match to A is evidence on it — never a
@@ -912,7 +936,28 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
                                     f"named {label}, {suspected} — not judged: "
                                     f"{_reason_text(outcome)}", outcome))
                 continue
-            # 3. The claimed metric, with what the reference computes as evidence.
+            # 3. The claimed metric. Different NAMES alone do not establish
+            # different definitions: when the claimed metric's definition is
+            # identical to the referenced one, a bare reference IS the claimed
+            # metric (same view: same dimensions, so the slices hold too).
+            same = [a for a in by_concept[label] if a.core.hash() == auth.core.hash()]
+            if same and outcome.status == "conforming":
+                eq = next((a for a in same if a.view == auth.view), None)
+                variation = outcome.variation or {}
+                if eq is not None or not (variation.get("slices") or variation.get("grain")):
+                    out.append(_conforming(
+                        obs, {**base, "calculation_matches":
+                              f"{obs.view}/{obs.measure} — the same definition as {label}"},
+                        eq or same[0], outcome, contested, "alias"))
+                else:
+                    held = unverifiable(
+                        "dimension_unsupported",
+                        f"{label}'s definition equals {obs.view}/{obs.measure}, but it is "
+                        f"declared in another view — the slices were judged against "
+                        f"{obs.view}'s dimensions, not {label}'s", shape="B")
+                    out.append(_finding(base, "unverifiable", 0, label, "unverifiable",
+                                        "alias", f"named {label}: {_reason_text(held)}", held))
+                continue
             other = Outcome("violation", [{
                 "code": "presented_under_other_name", "detail": suspected}],
                 outcome.variation, "B")
@@ -936,6 +981,18 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
                             f"references {obs.view or '?'}/{obs.measure}: "
                             f"{_reason_text(outcome)}", outcome))
     return out
+
+
+def _withhold(f: dict, unqualified: list[str]) -> dict:
+    """A positive verdict under an unqualified parser becomes unverifiable;
+    what it would have said is kept, as context."""
+    if f.get("conformance") != "conforming":
+        return f
+    detail = "; ".join(unqualified) + " — equality under it is untested"
+    return {**f, "kind": "unverifiable", "severity": 0, "conformance": "unverifiable",
+            "reasons": [{"code": "toolchain_unqualified", "detail": detail}],
+            "withheld": f"{f['kind']}: {f['summary']}",
+            "summary": f"not judged: {detail}"}
 
 
 # A use's headline bucket is its most severe finding.

@@ -97,6 +97,7 @@ CATEGORY = {
     "not_a_measure": "unsupported shape",
     "derived_expression": "unsupported shape",
     "unapproved_view": "unsupported shape",
+    "toolchain_unqualified": "unqualified parser",
 }
 
 _MARKERS = ("HAVING ", "QUALIFY ", "SELECT DISTINCT", "BOUND ")

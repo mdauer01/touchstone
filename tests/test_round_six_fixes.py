@@ -242,8 +242,12 @@ def test_partial_no_drift_receipts_are_historical_not_drifted():
     assert not trusted
     assert not any("has drifted" in w for w in warnings)
     assert any("metrics_yaml" in w for w in warnings)
-    fresh = {"status": "CERTIFIED", "freshness": {"status": "fresh"}}
-    assert receipt_trust(fresh)[0] is True
+    fresh = {"status": "CERTIFIED", "scan_id": "scan_1", "freshness": {"status": "fresh"}}
+    # Issuance freshness alone is historical (round fourteen); a live check
+    # bound to the receipt's scan establishes current use.
+    assert receipt_trust(fresh)[0] is False
+    assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_1"})[0] is True
+    assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_2"})[0] is False
 
 
 def test_stale_with_drift_is_still_distrusted():

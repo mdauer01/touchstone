@@ -117,14 +117,27 @@ def check_freshness(
     osi_path: str | None = None,
     uc_metrics_path: str | None = None,
     dialect: str | None = None,
+    scan_id: str | None = None,
 ) -> dict:
-    """Freshness block for a receipt issued against the store's latest scan.
+    """Freshness block: does the estate, as it is now, match a scan's snapshot?
+
+    Against the store's latest scan by default (a receipt being ISSUED), or
+    against `scan_id` — the scan a receipt being VERIFIED was issued from, so
+    current reliance is bound to that receipt's own evidence rather than to
+    whatever was scanned since.
 
     dialect=None re-checks with the scan's own recorded dialect — re-hashing a
     views estate under a different dialect would report spurious drift.
     """
     checked_at = utcnow()
-    scan = store.latest_scan()
+    if scan_id is not None:
+        scan = store.finished_scan(scan_id)
+        if scan is None:
+            return {"status": "unknown", "checked_at": checked_at, "scan_id": scan_id,
+                    "note": f"scan {scan_id} is not in this store — the receipt's "
+                            f"evidence cannot be re-checked here"}
+    else:
+        scan = store.latest_scan()
     if scan is None:
         return {"status": "unknown", "checked_at": checked_at,
                 "note": "no scans recorded in this store"}

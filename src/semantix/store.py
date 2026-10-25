@@ -391,6 +391,13 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
+    def finished_scan(self, scan_id: str) -> dict | None:
+        """One FINISHED scan by id (a scan that died partway describes nothing)."""
+        row = self._conn.execute(
+            "SELECT * FROM scans WHERE scan_id = ? AND stats_json IS NOT NULL", (scan_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def scans(self) -> list[dict]:
         return [dict(r) for r in self._conn.execute("SELECT * FROM scans ORDER BY started_at")]
 

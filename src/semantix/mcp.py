@@ -204,6 +204,21 @@ class McpServer:
                              "`semantix mine-relationships` against query history"}
         return result
 
+    def _live_freshness(self, receipt: dict) -> dict | None:
+        """A freshness check NOW, against the receipt's own scan — only when
+        this server was started with estate sources. Without them there is
+        nothing to look at, and the receipt is historical."""
+        scan_id = receipt.get("scan_id") if isinstance(receipt, dict) else None
+        if not self.estate or not isinstance(scan_id, str):
+            return None
+        from semantix.services.freshness import check_freshness
+
+        try:
+            return check_freshness(self.store, scan_id=scan_id, **self.estate)
+        except Exception as e:  # noqa: BLE001 — degrade, never crash verification
+            return {"status": "unknown", "scan_id": scan_id,
+                    "note": f"estate re-check failed ({type(e).__name__}: {e})"}
+
     def _verify_receipt(self, args: dict) -> Any:
         ok, message = verify_receipt_dict(args["receipt"], args.get("public_key"))
         # A receipt that does not verify is an ERROR result, not a successful
@@ -221,7 +236,11 @@ class McpServer:
         # Two decisions, never one boolean: round eight copied historical
         # validity into `current_use`, so a stale as-of receipt told agents
         # `current_use: true` beside a warning saying it described the past.
-        a = assess_receipt(args["receipt"])
+        live = self._live_freshness(args["receipt"])
+        a = assess_receipt(args["receipt"], live)
+        if live is not None:
+            result["live_freshness"] = {k: live.get(k) for k in
+                                        ("status", "checked_at", "scan_id", "note")}
         result.update({
             "describes": a.describes,
             "instant": a.instant,
