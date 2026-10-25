@@ -91,8 +91,12 @@ a context was asserted.
 ## Reading the report
 
 Every measure use lands in exactly one bucket: conforming, contested, violation,
-candidate, unregistered, unverifiable, or below the recurrence threshold. Each bucket
-is shown as a share of all measure uses. Governed references (`MEASURE()` over an
+candidate, unregistered, unverifiable, or below the recurrence threshold. A use's
+bucket is its most severe finding, judged as the metric the query claims to compute
+(its alias, an explicit `-- semantix: metric=` tag, or the asset map); a calculation
+that matches a *different* approved metric is evidence on that finding, not a second
+one. Findings are merged only when their verdicts are identical, so each carries only
+its own executions. Each bucket is shown as a share of all measure uses. Governed references (`MEASURE()` over an
 approved view) are counted alongside, never instead. `checked = conforming +
 violations` is the share the rules could decide. Unverifiable uses are broken down
 by reason, which shows where the next bottleneck is:
@@ -114,6 +118,7 @@ It says nothing beyond that rule set. Excluded from the claim:
 - joins and joined dimensions
 - window measures
 - LIMIT, HAVING, QUALIFY and DISTINCT
+- TABLESAMPLE and time travel
 - CTEs and subqueries around a variation
 - unsupported dimension expressions
 - Databricks runtime behaviour of `MEASURE()` beyond its declared definition

@@ -170,8 +170,13 @@ def test_monitor_other_concepts_name_on_matching_math_is_a_violation(monitored):
     kinds, _ = _kinds(store, registry,
                       ["SELECT SUM(amount - refunds) AS gross_revenue FROM db.main.orders "
                        "WHERE status = 'completed'"] * 3)
-    assert ("definition_violation", "gross_revenue") in kinds
-    assert ("conforming_use", "net_revenue") in kinds
+    # The query CLAIMS gross_revenue: that violation is the finding. The match
+    # to net_revenue's definition is evidence on it, not a second, conforming
+    # finding that could stand in for it in the headline (round ten).
+    assert kinds == [("definition_violation", "gross_revenue")]
+    (f,) = _.get("findings")
+    assert "rev_mart" in f["calculation_matches"]
+    assert _["funnel"]["violations"] == 3 and _["funnel"]["conforming"] == 0
 
 
 def test_monitor_mixed_grade_reruns_kept_apart(monitored):

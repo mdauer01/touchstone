@@ -31,9 +31,11 @@ definition D when:
        is built from literals, intervals and the current date/time,
     4. every grouping term is such a dimension, and D itself is ungrained;
 * SHAPE B (metric view): it is one SELECT over an approved, fully
-  qualified metric view whose measure projections are exactly `MEASURE(m)`,
-  with filters and groupings over supported dimension names, and nothing
-  consumes the result.
+  qualified metric view, built ENTIRELY from an allow-list of constructs
+  (anything else — TABLESAMPLE, time travel, joins, windows, subqueries,
+  raw aggregates — is unverifiable), whose measure projections are exactly
+  `MEASURE(m)` or `AGG(m)`, with filters and groupings over supported
+  dimension names, and nothing consumes the result.
 
 Violations are stated only with reasons that are true of the SQL as
 written: a changed measure expression, a required filter that is absent,
@@ -72,6 +74,7 @@ EXCLUDED = (
     "joins and joined dimensions",
     "window measures",
     "LIMIT, HAVING, QUALIFY and DISTINCT",
+    "TABLESAMPLE and time travel",
     "CTEs, subqueries and derived tables around a variation",
     "unsupported dimension expressions",
     "Databricks runtime behaviour of MEASURE() beyond its declared definition",
@@ -125,11 +128,14 @@ class Authority:
     applies_from: str | None = None
     applies_to: str | None = None
     where: str | None = None
+    kind: str = "declared"           # "computed" when an operator names a model system
 
     @property
     def label(self) -> str:
         if self.view:
             return f"declared definition {self.system}:{self.view}/{self.measure}"
+        if self.kind == "computed":
+            return f"computed definition at {self.where} ({self.system}, named authoritative)"
         return f"declared definition {self.system}:{self.name}"
 
     @property
@@ -407,9 +413,93 @@ def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list
 
 # ----------------------------------------------------------------- shape B
 
-def measure_calls(node: exp.Expression) -> list[exp.Anonymous]:
-    return [a for a in node.find_all(exp.Anonymous)
-            if str(a.this).upper() == "MEASURE"]
+# Databricks spells a metric-view measure reference MEASURE(m) or, from
+# Runtime 18.1, AGG(m). Recognizing only one made the other vanish from the
+# measure denominator: coverage depended on which spelling a client emitted.
+MEASURE_FUNCTIONS = frozenset({"MEASURE", "AGG"})
+
+
+# sqlglot 30.12 parses both as anonymous calls; 30.24 gives AGG a dedicated
+# node (exp.Agg, argument in `this`). Both shapes are read, as split_group
+# reads both GROUP BY shapes — a parser upgrade must not make a spelling
+# vanish again.
+_MEASURE_NODES = tuple(c for c in (getattr(exp, "Agg", None), getattr(exp, "Measure", None))
+                       if isinstance(c, type))
+
+
+def _is_measure_ref(node: exp.Expression) -> bool:
+    if isinstance(node, exp.Anonymous):
+        return str(node.this).upper() in MEASURE_FUNCTIONS
+    return bool(_MEASURE_NODES) and isinstance(node, _MEASURE_NODES)
+
+
+def measure_calls(node: exp.Expression) -> list[exp.Expression]:
+    return [n for n in node.walk() if _is_measure_ref(n)]
+
+
+def outside_measure_refs(node: exp.Expression) -> bool:
+    parent = node.parent
+    while parent is not None:
+        if _is_measure_ref(parent):
+            return False
+        parent = parent.parent
+    return True
+
+
+def measure_ref(call: exp.Expression) -> tuple[str, exp.Expression | None]:
+    """(function name, its single argument or None) in either AST shape."""
+    if isinstance(call, exp.Anonymous):
+        args = list(call.expressions)
+        return str(call.this).upper(), (args[0] if len(args) == 1 else None)
+    args = [a for a in (call.this, *call.expressions) if a is not None]
+    return type(call).__name__.upper(), (args[0] if len(args) == 1 else None)
+
+
+# Shape B grants conformity only to a statement built ENTIRELY from these
+# constructs (measure projections are judged separately). An allow-list, not
+# a list of known-bad shapes: TABLESAMPLE and time travel passed the old
+# deny-list as conforming because nobody had thought to name them.
+_VIEW_NODES = (exp.Select, exp.From, exp.Table, exp.TableAlias, exp.Identifier,
+               exp.Column, exp.Alias, exp.Where, exp.Group, exp.Order, exp.Ordered,
+               exp.And, exp.Or, exp.Not, exp.Paren, exp.In, exp.Between, exp.Is,
+               exp.DateTrunc, exp.TimestampTrunc, exp.DatetimeTrunc)
+_VIEW_ARGS = {
+    exp.Select: frozenset({"expressions", "from", "from_", "where", "group", "order"}),
+    exp.Table: frozenset({"this", "db", "catalog", "alias"}),
+    exp.Group: frozenset({"expressions", "all"}),
+}
+_ARG_NAMES = {"sample": "TABLESAMPLE", "version": "time travel (VERSION/TIMESTAMP AS OF)",
+              "joins": "a join", "laterals": "LATERAL", "pivots": "PIVOT",
+              "limit": "LIMIT", "offset": "OFFSET", "distinct": "DISTINCT",
+              "having": "HAVING", "qualify": "QUALIFY", "with": "a CTE",
+              "rollup": "ROLLUP", "cube": "CUBE", "grouping_sets": "GROUPING SETS"}
+_NODE_NAMES = {"TableSample": "TABLESAMPLE", "Version": "time travel", "Agg": "AGG()",
+               "Window": "a window function", "Subquery": "a subquery",
+               "Placeholder": "a bind parameter", "Parameter": "a bind parameter"}
+
+
+def _view_construct_problem(node: exp.Expression, skip: set[int]) -> str | None:
+    """The first construct outside Shape B's allow-list, or None."""
+    if id(node) in skip:
+        return None
+    if not isinstance(node, (*_VIEW_NODES, *_COMPARE, *_CONST_LEAVES, *_CONST_OPS)):
+        if isinstance(node, exp.Anonymous):
+            return f"uses {node.name}()"
+        if isinstance(node, exp.AggFunc):
+            return f"mixes a raw aggregate ({node.sql()}) with governed measures"
+        name = type(node).__name__
+        return f"uses {_NODE_NAMES.get(name, name)}"
+    allowed = _VIEW_ARGS.get(type(node))
+    if allowed is not None:
+        extra = sorted(k for k, v in node.args.items()
+                       if v not in (None, [], False) and k not in allowed)
+        if extra:
+            return "uses " + ", ".join(_ARG_NAMES.get(k, k) for k in extra)
+    for child in node.iter_expressions():
+        problem = _view_construct_problem(child, skip)
+        if problem:
+            return problem
+    return None
 
 
 @dataclass
@@ -418,6 +508,7 @@ class ViewProjection:
     output: str | None      # the name the query presents it under
     outcome: Outcome
     governed_reference: bool = True
+    expression: str | None = None   # the projection as written
 
 
 def metric_view_relation(stmt: exp.Expression) -> str | None:
@@ -444,14 +535,21 @@ def check_metric_view(stmt: exp.Expression,
     top = stmt if isinstance(stmt, exp.Select) else None
     view_relation = metric_view_relation(stmt)
     view = approved.get(view_relation or "")
-    names = []
+    # Each call with the name its projection presents it under, so every
+    # early return still carries the claimed identity.
+    refs: dict[tuple, str | None] = {}
     for call in calls:
-        arg = call.expressions[0] if len(call.expressions) == 1 else None
-        names.append(arg.name.lower() if isinstance(arg, exp.Column) else None)
+        _, arg = measure_ref(call)
+        m = arg.name.lower() if isinstance(arg, exp.Column) else "?"
+        alias = call.find_ancestor(exp.Alias)
+        output = alias.alias.lower() if alias is not None and alias.alias else None
+        refs.setdefault((m, output), (alias.this if alias is not None else call).sql(dialect))
 
-    def every(outcome_fn) -> list[ViewProjection]:
-        return [ViewProjection(m or "?", None, outcome_fn(m), view is not None)
-                for m in dict.fromkeys(names)]
+    def every(outcome_fn, governed: bool | None = None) -> list[ViewProjection]:
+        return [ViewProjection(m, output, outcome_fn(m),
+                               view is not None if governed is None else governed,
+                               expression=written)
+                for (m, output), written in refs.items()]
 
     if top is None or any(c.find_ancestor(exp.Select) is not top for c in calls) \
             or top.args.get("with") is not None or top.args.get("joins"):
@@ -460,19 +558,19 @@ def check_metric_view(stmt: exp.Expression,
             "the governed calculation is consumed by an outer query, CTE or "
             "join — subsequent transformations are not verified", shape="B"))
     if view is None and view_relation and len(view_relation.split(".")) < 3:
-        return [ViewProjection(m or "?", None, unverifiable(
+        return every(lambda m: unverifiable(
             "context_unresolved",
-            f"MEASURE() over {view_relation}, which is not fully qualified and no "
-            f"session context is evidenced — which metric view it reads is unknown",
-            shape="B"), False) for m in dict.fromkeys(names)]
+            f"a measure reference over {view_relation}, which is not fully qualified "
+            f"and no session context is evidenced — which metric view it reads is "
+            f"unknown", shape="B"), governed=False)
     if view is None:
-        return [ViewProjection(m or "?", None, unverifiable(
+        return every(lambda m: unverifiable(
             "unapproved_view",
-            f"MEASURE() over {view_relation or 'an unnamed relation'}, which is not "
-            f"an approved metric view (approved views are named by a pilot "
-            f"package)", shape="B"), False)
-            for m in dict.fromkeys(names)]
-    problem = raw_shape_problem(top)
+            f"a measure reference over {view_relation or 'an unnamed relation'}, which "
+            f"is not an approved metric view (approved views are named by a pilot "
+            f"package)", shape="B"), governed=False)
+    measure_projections = {id(p) for p in top.expressions if measure_calls(p)}
+    problem = _view_construct_problem(top, measure_projections)
     if problem:
         return every(lambda m: unverifiable("shape_unsupported", f"query {problem}",
                                             shape="B"))
@@ -549,41 +647,43 @@ def check_metric_view(stmt: exp.Expression,
             continue
         alias = proj.alias if isinstance(proj, exp.Alias) and proj.alias else None
         output = alias.lower() if alias else None
+        written = inner.sql(dialect)
         bare = (inner is calls_here[0] and len(calls_here) == 1
-                and len(inner.expressions) == 1
-                and isinstance(inner.expressions[0], exp.Column))
+                and isinstance(measure_ref(inner)[1], exp.Column))
+
+        def emit(m: str, outcome: Outcome) -> None:
+            out.append(ViewProjection(m, output, outcome, expression=written))
+
         for call in calls_here:
-            arg = call.expressions[0] if len(call.expressions) == 1 else None
+            fn, arg = measure_ref(call)
             m = arg.name.lower() if isinstance(arg, exp.Column) else None
             if m is None or m not in measure_names:
-                out.append(ViewProjection(m or "?", output, unverifiable(
-                    "not_a_measure", f"MEASURE({arg.sql(dialect) if arg else ''}) does "
-                    f"not name a measure of {view_relation}", shape="B")))
+                emit(m or "?", unverifiable(
+                    "not_a_measure", f"{fn}({arg.sql(dialect) if arg else ''}) does "
+                    f"not name a measure of {view_relation}", shape="B"))
                 continue
             if view[m] is None:
-                out.append(ViewProjection(m, output, unverifiable(
+                emit(m, unverifiable(
                     "below_proof_grade", f"the approved definition of "
-                    f"{view_relation}/{m} could not be read at proof grade", shape="B")))
+                    f"{view_relation}/{m} could not be read at proof grade", shape="B"))
                 continue
             if not bare:
                 presented_as_governed = output is None or output == m
                 if presented_as_governed:
-                    out.append(ViewProjection(m, output, Outcome("violation", [_reason(
+                    emit(m, Outcome("violation", [_reason(
                         "transformed_governed_measure",
-                        f"presented as {m} but computed as {inner.sql(dialect)} — a "
-                        f"transformation of the governed measure")], variation, "B")))
+                        f"presented as {m} but computed as {written} — a "
+                        f"transformation of the governed measure")], variation, "B"))
                 else:
-                    out.append(ViewProjection(m, output, unverifiable(
+                    emit(m, unverifiable(
                         "derived_expression",
-                        f"{output} = {inner.sql(dialect)} is derived from the governed "
-                        f"measure {m}; no authority defines {output}", shape="B")))
+                        f"{output} = {written} is derived from the governed "
+                        f"measure {m}; no authority defines {output}", shape="B"))
                 continue
             if shared:
-                out.append(ViewProjection(m, output, Outcome(
-                    "unverifiable", list(shared), variation, "B")))
+                emit(m, Outcome("unverifiable", list(shared), variation, "B"))
             else:
-                out.append(ViewProjection(m, output, Outcome(
-                    "conforming", [], variation, "B")))
+                emit(m, Outcome("conforming", [], variation, "B"))
     return out
 
 

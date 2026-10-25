@@ -73,6 +73,7 @@ from semantix.services.conformance import (
     check_raw,
     measure_calls,
     metric_view_relation,
+    outside_measure_refs,
     raw_shape_problem,
     unverifiable,
 )
@@ -136,6 +137,12 @@ class _Observed:
 
     key: str
     shape: str                      # "A" | "B"
+    # What is judged together shares a calculation AND a claimed identity:
+    # two analysts computing the same SUM under different metric names are
+    # two observations, or one analyst's verdict lands on the other. The
+    # base key (calculation, grade, shape, evidence) gates recurrence.
+    base_key: str = ""
+    identity: str = "none"          # alias:<name> | tag:<name> | output:<name> | none
     semantic_hash: str = ""
     proof_grade: bool = False
     core: SemanticCore | None = None
@@ -147,6 +154,7 @@ class _Observed:
     measure: str | None = None
     output: str | None = None
     view_outcome: Outcome | None = None
+    expression: str | None = None   # the metric-view projection as written
     governed_reference: bool = False
     uses: int = 0
     names: set[str] = field(default_factory=set)
@@ -257,9 +265,10 @@ def monitor_history(
     as_of = pilot is not None and pilot.compare_against == "as_of_execution"
 
     observed: dict[str, _Observed] = {}
+    recurrence: dict[str, int] = {}   # base key -> statements using the calculation
     counts = {"statements": 0, "parsed": 0, "unparseable": 0, "non_query": 0,
               "unreadable": 0, "no_measure": 0, "nested_measure": 0,
-              "without_time": 0}
+              "without_time": 0, "mixed_measures": 0}
     executions_read = 0
     for ex in intake.executions:
         statements, unparseable = _parse_statements(ex.statement_text, dialect)
@@ -285,31 +294,43 @@ def monitor_history(
                 continue
             qualify_tables(stmt, catalog, schema, depth)
             if measure_calls(stmt):
-                _observe_view(stmt, ex, approved, evidence, observed, dialect)
+                if any(outside_measure_refs(a) for a in stmt.find_all(exp.AggFunc)):
+                    # Raw aggregates beside governed ones: the measure
+                    # references are judged (unverifiable), the raw ones are
+                    # not read — say so rather than drop them silently.
+                    counts["mixed_measures"] += 1
+                _observe_view(stmt, ex, approved, evidence, observed, recurrence, dialect)
                 continue
             outcome = _observe_core(stmt, ex, history_registry, dialect, evidence,
-                                    explicit, observed)
+                                    explicit, observed, recurrence)
             if outcome:
                 counts[outcome] += 1
 
-    recurring = [o for o in observed.values() if o.uses >= min_runs]
+    recurring = [o for o in observed.values() if recurrence[o.base_key] >= min_runs]
     models = registry.known_models()
-    findings: list[dict] = []
+    label = pilot.comparison_label() if pilot is not None else (
+        "compared against the latest scan's definitions; not verified as of "
+        "execution time")
+    judged: list[tuple[dict, _Observed]] = []
     funnel = _Funnel()
     for obs in sorted(recurring, key=lambda o: (-o.uses, o.key)):
         out = _judge(obs, by_hash, by_name, by_concept, contested, computed_by_hash,
                      excluded, unreadable, models, dialect, as_of)
-        label = pilot.comparison_label() if pilot is not None else (
-            "compared against the latest scan's definitions; not verified as of "
-            "execution time")
+        # The use's headline outcome is its MOST SEVERE finding: a supporting
+        # match must never outrank a violation of the metric it claims.
+        primary = max(out, key=lambda f: _PRECEDENCE[f["kind"]])
         for f in out:
             f["compare_against"] = label
-        funnel.add(obs, out[0])
-        findings.extend(out)
+            f["role"] = "primary" if f is primary else "additional"
+            judged.append((f, obs))
+        funnel.add(obs, primary)
     for obs in observed.values():
-        if obs.uses < min_runs:
+        if recurrence[obs.base_key] < min_runs:
             funnel.add_below(obs)
-    findings.sort(key=lambda f: (-f["severity"], -f["uses"], f["kind"]))
+    findings = _aggregate(judged)
+    findings.sort(key=lambda f: (-f["severity"], -f["uses"], f["kind"], f["concept"] or ""))
+    bases = {o.base_key for o in observed.values()}
+    recurring_bases = {b for b in bases if recurrence[b] >= min_runs}
     return {
         "scan_id": scan["scan_id"],
         "reference": ref_meta,
@@ -332,9 +353,10 @@ def monitor_history(
         "unreadable_statements": counts["unreadable"],
         "statements_without_measures": counts["no_measure"],
         "statements_with_nested_measures": counts["nested_measure"],
-        "observed_definitions": len(observed),
-        "recurring_definitions": len(recurring),
-        "below_min_runs": len(observed) - len(recurring),
+        "statements_mixing_raw_aggregates": counts["mixed_measures"],
+        "observed_definitions": len(bases),
+        "recurring_definitions": len(recurring_bases),
+        "below_min_runs": len(bases) - len(recurring_bases),
         "min_runs": min_runs,
         "funnel": funnel.as_dict(),
         "findings": findings,
@@ -345,7 +367,8 @@ def monitor_history(
 # ------------------------------------------------------------ observation
 
 def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
-                  dialect: str, evidence, explicit, observed: dict) -> str | None:
+                  dialect: str, evidence, explicit, observed: dict,
+                  recurrence: dict) -> str | None:
     """Shape A intake for one statement. Returns a disclosure counter name
     when the statement yields no measure to judge."""
     sql_text = stmt.sql(dialect=dialect)
@@ -375,24 +398,27 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
     referenced = {c.name.lower() for c in ast.find_all(exp.Column)}
     reagg = sorted(rel for rel in reads
                    if {c.lower() for c in registry.aggregate_outputs(rel)} & referenced)
-    by_core: dict[str, list] = {}
-    for fp in fps:
-        by_core.setdefault(fp.core.hash(), []).append(fp)
     # An explicit identity names ONE metric; on a multi-measure statement it
     # is ambiguous which projection it means, so it is not applied.
-    explicit = explicit if len(by_core) == 1 else None
-    for core_hash, group in by_core.items():
+    explicit = explicit if len(fps) == 1 else None
+    groups: dict[tuple[str, str], list] = {}
+    for fp in fps:
+        groups.setdefault((fp.core.hash(), _identity(fp.concept_candidate, explicit)),
+                          []).append(fp)
+    counted: set[str] = set()
+    for (core_hash, identity), group in groups.items():
         fp = group[0]
         gaps = set(fp.gaps)
         if reagg:
             gaps.add(f"reads the aggregate output of {', '.join(reagg)} — "
                      f"through-model comparison not made")
         proof = fp.canon_level in PROOF_LEVELS and not gaps
-        key = "|".join(["A", core_hash, "proof" if proof else "gapped",
-                        shape_problem or "", _evidence_key(evidence),
-                        ":".join(explicit) if explicit else ""])
+        base_key = "|".join(["A", core_hash, "proof" if proof else "gapped",
+                             shape_problem or "", _evidence_key(evidence)])
+        key = f"{base_key}|{identity}"
         obs = observed.setdefault(key, _Observed(
-            key=key, shape="A", semantic_hash=core_hash, proof_grade=proof,
+            key=key, shape="A", base_key=base_key, identity=identity,
+            semantic_hash=core_hash, proof_grade=proof,
             core=fp.core, components=core_components(fp.core),
             shape_problem=shape_problem, evidence=evidence, explicit=explicit))
         obs.uses += 1
@@ -403,27 +429,45 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
         obs.attribute(ex)
         if obs.sample_sql is None:
             obs.sample_sql = fp.canonical_sql
+        if base_key not in counted:
+            counted.add(base_key)
+            recurrence[base_key] = recurrence.get(base_key, 0) + 1
     return None
+
+
+def _identity(alias: str | None, explicit: tuple[str, str] | None) -> str:
+    if explicit:
+        return f"{explicit[0]}:{normalize_name(explicit[1])}"
+    if alias and not _SYNTHESIZED.match(alias.lower()):
+        return f"alias:{normalize_name(alias)}"
+    return "none"
 
 
 def _observe_view(stmt: exp.Expression, ex: Execution,
                   approved: dict[str, dict[str, Authority]], evidence,
-                  observed: dict, dialect: str) -> None:
-    """Shape B intake: one observation per MEASURE() projection."""
+                  observed: dict, recurrence: dict, dialect: str) -> None:
+    """Shape B intake: one observation per measure-reference projection."""
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
     view = metric_view_relation(stmt)
+    counted: set[str] = set()
     for proj in check_metric_view(stmt, approved, dialect):
         signature = json.dumps(proj.outcome.as_dict(), sort_keys=True)
-        key = "|".join(["B", view or "", proj.measure, proj.output or "",
-                        hashlib.sha256(signature.encode()).hexdigest()[:16],
-                        _evidence_key(evidence)])
+        base_key = "|".join(["B", view or "", proj.measure,
+                             hashlib.sha256(signature.encode()).hexdigest()[:16],
+                             _evidence_key(evidence), proj.expression or ""])
+        identity = f"output:{normalize_name(proj.output)}" if proj.output else "none"
+        key = f"{base_key}|{identity}"
         obs = observed.setdefault(key, _Observed(
-            key=key, shape="B", view=view, measure=proj.measure,
-            output=proj.output, view_outcome=proj.outcome, evidence=evidence,
+            key=key, shape="B", base_key=base_key, identity=identity, view=view,
+            measure=proj.measure, output=proj.output, view_outcome=proj.outcome,
+            expression=proj.expression, evidence=evidence,
             governed_reference=proj.governed_reference,
             semantic_hash=hashlib.sha256(f"{view}/{proj.measure}".encode()).hexdigest()))
         obs.uses += 1
+        if base_key not in counted:
+            counted.add(base_key)
+            recurrence[base_key] = recurrence.get(base_key, 0) + 1
         if proj.output:
             obs.names.add(proj.output)
         if view:
@@ -501,7 +545,7 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
             if is_authority(r):
                 authorities.append(Authority(
                     concept=r.concept_label, system=r.system, name=r.name,
-                    core=r.core, where=r.where))
+                    core=r.core, where=r.where, kind=r.kind))
         computed = [r for r in refs if not is_authority(r)]
         chosen = sorted(systems) if systems else sorted(
             {r.system for r in refs if r.kind == "declared"})
@@ -664,11 +708,17 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
     out: list[dict] = []
     if exact:
         auth = sorted(exact, key=lambda a: (a.concept, a.label))[0]
+        if named and auth.concept not in named:
+            # The math is concept A's; the query CLAIMS concept B. B's verdict
+            # is the finding, and the match to A is evidence on it — never a
+            # separate conforming finding that could stand in for it.
+            evidence = {**base, "calculation_matches": auth.label}
+            return [_judge_against(obs, evidence, label, by_concept[label], contested,
+                                   models, dialect, as_of, identity)
+                    for label in sorted(named)]
         out.append(_judge_against(obs, base, auth.concept, [auth], contested, models,
                                   dialect, as_of, "definition_match"
                                   if auth.concept not in named else identity))
-        # The math is concept A's; a NAME on it claiming concept B is judged
-        # against B's definition — hidden before under the sev-0 match.
         for label in sorted(named - {auth.concept}):
             out.append(_judge_against(obs, base, label, by_concept[label], contested,
                                       models, dialect, as_of, identity))
@@ -770,10 +820,13 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
     if violated:
         auth, outcome = sorted(violated, key=lambda t: (len(t[1].reasons), t[0].label))[0]
         diff = _diff(auth.core, obs.components)
+        matched = (f" — its calculation is the {base['calculation_matches']}"
+                   if base.get("calculation_matches") else "")
         return _finding(base, "definition_violation", _violation_severity(obs.uses),
                         concept, "violation", identity,
                         f"computed under the name {concept} but does not preserve the "
-                        f"{auth.label}: {_reason_text(outcome)}", outcome, diff=diff)
+                        f"{auth.label}: {_reason_text(outcome)}{matched}", outcome,
+                        diff=diff)
     auth, outcome = judged[0]
     return _finding(base, "unverifiable", 0, concept, "unverifiable", identity,
                     f"named {concept}; {_reason_text(outcome)}", outcome,
@@ -809,6 +862,26 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
                                f"no definition of {obs.view}/{obs.measure} is evidenced "
                                f"for the execution time", shape="B")
     out: list[dict] = []
+    # Presented under ANOTHER authoritative metric's name: that claim is the
+    # finding; what the reference computes is evidence on it. Only for an
+    # approved, readable measure — over an unknown view the identity of
+    # what was computed is itself unknown.
+    claimed = (sorted(by_name.get(normalize_name(obs.output), set()) - {concept})
+               if obs.output and concept is not None else [])
+    if claimed:
+        computed = f"{obs.view}/{obs.measure} ({outcome.status})"
+        for label in claimed:
+            other = Outcome("violation", [{
+                "code": "presented_under_other_name",
+                "detail": f"presented as {obs.output} but computed as "
+                          f"{obs.expression} over {obs.view}"}],
+                outcome.variation, "B")
+            out.append(_finding({**base, "calculation_matches": computed},
+                                "definition_violation", _violation_severity(obs.uses),
+                                label, "violation", "alias",
+                                f"computed under the name {label}: "
+                                f"{_reason_text(other)}", other))
+        return out
     if outcome.status == "conforming" and auth is not None:
         out.append(_conforming(obs, base, auth, outcome, contested, "measure_invocation"))
     elif outcome.status == "violation":
@@ -821,18 +894,44 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
                             "measure_invocation",
                             f"references {obs.view or '?'}/{obs.measure}: "
                             f"{_reason_text(outcome)}", outcome))
-    # The governed measure presented under ANOTHER authoritative metric's name.
-    if obs.output and concept is not None and outcome.status == "conforming":
-        for label in sorted(by_name.get(normalize_name(obs.output), set()) - {concept}):
-            other = Outcome("violation", [{
-                "code": "presented_under_other_name",
-                "detail": f"presented as {obs.output} but computed as "
-                          f"MEASURE({obs.measure}) of {obs.view}"}],
-                outcome.variation, "B")
-            out.append(_finding(base, "definition_violation",
-                                _violation_severity(obs.uses), label, "violation",
-                                "alias", f"computed under the name {label}: "
-                                         f"{_reason_text(other)}", other))
+    return out
+
+
+# A use's headline bucket is its most severe finding.
+_PRECEDENCE = {"definition_violation": 5, "contested_use": 4,
+               "candidate_alt_definition": 3, "unverifiable": 2,
+               "unregistered_recurring_measure": 1, "conforming_use": 0}
+_ATTRIBUTION = frozenset({"uses", "distinct_statements", "names_used", "relations_read",
+                          "sample_sql", "executed_by", "clients", "assets",
+                          "execution_ids", "severity", "summary"})
+
+
+def _aggregate(judged: list[tuple[dict, _Observed]]) -> list[dict]:
+    """Merge findings that genuinely share a verdict — same kind, concept,
+    reasons, identity source, calculation and role — and nothing else, so
+    one analyst's attribution never lands on another's finding."""
+    groups: dict[str, list[tuple[dict, _Observed]]] = {}
+    for f, obs in judged:
+        sig = json.dumps({k: v for k, v in f.items() if k not in _ATTRIBUTION},
+                         sort_keys=True, default=str)
+        groups.setdefault(sig, []).append((f, obs))
+    out = []
+    for items in groups.values():
+        f = dict(items[0][0])
+        if len(items) > 1:
+            obss = [o for _, o in items]
+            f["uses"] = sum(o.uses for o in obss)
+            f["distinct_statements"] = len(set().union(*(o.statements for o in obss)))
+            f["names_used"] = sorted(set().union(*(set(g["names_used"]) for g, _ in items)))
+            f["relations_read"] = sorted(set().union(*(o.relations for o in obss)))
+            for key in ("executed_by", "clients", "assets"):
+                f[key] = sorted(set().union(*(getattr(o, key) for o in obss)))[:_SAMPLE]
+            f["execution_ids"] = [i for o in obss for i in o.execution_ids][:_SAMPLE]
+            if f["kind"] == "definition_violation":
+                f["severity"] = _violation_severity(f["uses"])
+            elif f["kind"] == "candidate_alt_definition":
+                f["severity"] = min(85, SEV_CANDIDATE_BASE + min(30, f["uses"]))
+        out.append(f)
     return out
 
 

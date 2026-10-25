@@ -521,11 +521,12 @@ def test_governed_measure_under_another_metrics_name_is_flagged(tmp_path):
     view = VIEW.format(extra="") + "  - name: gross_revenue\n    expr: SUM(amount)\n"
     q = ("SELECT MEASURE(net_revenue) AS gross_revenue FROM main.finance.revenue_mv")
     result = run(tmp_path, _rows(q), view_text=view)
-    kinds = {(f["kind"], f["concept"]) for f in result["findings"]}
-    assert ("conforming_use", "net_revenue") in kinds
-    assert ("definition_violation", "gross_revenue") in kinds
-    (f,) = [f for f in result["findings"] if f["concept"] == "gross_revenue"]
+    (f,) = result["findings"]
+    assert (f["kind"], f["concept"]) == ("definition_violation", "gross_revenue")
     assert codes(f) == ["presented_under_other_name"]
+    assert f["calculation_matches"] == "main.finance.revenue_mv/net_revenue (conforming)"
+    assert f["governed_reference"] is True
+    assert result["funnel"]["violations"] == 1 and result["funnel"]["conforming"] == 0
 
 
 def test_metric_view_outside_a_pilot_is_not_a_governed_reference(tmp_path):

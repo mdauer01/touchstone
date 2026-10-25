@@ -1079,7 +1079,9 @@ def _print_monitor(result: dict) -> None:
                        ("unreadable_statements", "unreadable"),
                        ("statements_without_measures", "no measure"),
                        ("statements_with_nested_measures",
-                        "measure in a nested scope — not read")):
+                        "measure in a nested scope — not read"),
+                       ("statements_mixing_raw_aggregates",
+                        "raw aggregates beside governed measures — raw ones not read")):
         if result[key]:
             parts.append(f"{result[key]} {label}")
     print(f"history: {h['executions']} execution(s)"
@@ -1103,7 +1105,7 @@ def _print_monitor(result: dict) -> None:
 
     print(f"measure uses: {n} — every use counted once below; governed references "
           f"counted alongside")
-    line("governed references (MEASURE over approved view)", f["governed_references"])
+    line("governed references (MEASURE/AGG, approved view)", f["governed_references"])
     shapes = f["conforming_by_shape"]
     line("conforming", f["conforming"],
          f"  exact {shapes['exact']} · raw-table slice {shapes['A']} · "
@@ -1138,6 +1140,8 @@ def _print_monitor(result: dict) -> None:
             # definition named for this run, whatever the scan concluded.
             print(f"      {component}: reference {sides['reference']} · "
                   f"observed {sides['observed']}")
+        if f.get("calculation_matches"):
+            print(f"      its calculation: {f['calculation_matches']}")
         who = [x for x in (", ".join(f.get("executed_by") or []),
                            ", ".join(f.get("assets") or [])) if x]
         if who:

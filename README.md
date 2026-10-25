@@ -240,14 +240,19 @@ grouped by channel. Some of it is a definition quietly changed. It tells them ap
 
 | Finding | Meaning |
 | --- | --- |
-| CONFORMING | Exact canonical equality with an authoritative definition, **or** one of the listed shapes: the definition's own measure over its base table, every required filter kept as a top-level AND condition, extra conditions only on *supported declared dimensions*, grouping only by them — or a bare `MEASURE(m)` over an approved metric view, filtered and grouped by its dimensions |
+| CONFORMING | Exact canonical equality with an authoritative definition, **or** one of the listed shapes: the definition's own measure over its base table, every required filter kept as a top-level AND condition, extra conditions only on *supported declared dimensions*, grouping only by them — or a bare `MEASURE(m)` / `AGG(m)` over an approved metric view, filtered and grouped by its dimensions, in a statement built entirely from an allow-listed set of constructs |
 | VIOLATION | A true statement about the SQL as written: the measure changed or transformed, a required filter absent / weakened through OR / broadened / replaced, a slice on a column the model does not declare as a dimension, a different source, or a governed measure presented under another metric's name |
 | CANDIDATE | The same measure over the same columns, unnamed, that would be a violation — a hypothesis, ranked lower |
 | UNVERIFIABLE | Everything outside the rules, with the reason: joins, CTEs or joins around a governed calculation, HAVING/LIMIT/DISTINCT, unsupported dimension expressions, a short table name with no evidenced session context, no definition evidenced for the execution time, or a query below proof grade |
 | UNREGISTERED | A recurring measure no authoritative definition covers |
 
 Referencing an approved metric is tracked **separately** from preserving it:
-`MEASURE(net_revenue) * 2 AS net_revenue` is a governed reference *and* a violation. A
+`MEASURE(net_revenue) * 2 AS net_revenue` is a governed reference *and* a violation.
+A query is judged as the metric it **claims** to compute: two analysts running the same
+`SUM(amount)` as `gross_revenue` and as `net_revenue` get separate findings, each with only
+their own executions, and the second one's match to gross revenue's definition is
+evidence on its violation (`its calculation: …`), never a conforming finding that could
+stand in for it. Each use's headline bucket is its most severe finding. A
 filter on `amount` is permitted only when the governed model declares `amount` a
 dimension. A short table name resolves only from its own history row's catalog/schema, or
 from a context asserted to cover every execution (`--assert-context-for-all-executions`,
@@ -259,7 +264,7 @@ Every measure use lands in exactly one bucket, reported against an explicit deno
 
 ```
 measure uses: 12 — every use counted once below; governed references counted alongside
-  governed references (MEASURE over approved view)        4/12 (33%)
+  governed references (MEASURE/AGG, approved view)        4/12 (33%)
   conforming                                              4/12 (33%)  exact 0 · raw-table slice 2 · metric view 2
   definition violations                                   4/12 (33%)
   candidates (unnamed near misses)                        2/12 (17%)
