@@ -86,7 +86,7 @@ from semantix.services.history import (
 from semantix.services.relationships import _parse_statements  # same package: one
 # statement-splitting behavior for every history consumer, not two drifting ones.
 from semantix.services.resolution import normalize_name
-from semantix.store import Store, normalize_ts
+from semantix.store import Store
 from semantix.toolchain import toolchain_status
 
 # Aliases the analyst did not write: sqlglot's positional names and the
@@ -108,6 +108,7 @@ SEV_CONTESTED = 55           # exact match to one side of an authority dispute
 SEV_UNREGISTERED = 25
 _SAMPLE = 10                 # attribution lists are capped in the output
 _NO_TIME = "<no start time>"
+_BAD_TIME = "<unreadable start time>"
 
 
 @dataclass
@@ -151,6 +152,9 @@ class _Observed:
     shape_problem: str | None = None
     evidence: frozenset | None = None   # views whose window covers the run
     explicit: tuple[str, str] | None = None   # (source, name)
+    # Aliases the analyst WROTE: identity even when they look synthesized
+    # (`sum_revenue`), which the regex alone dropped.
+    explicit_aliases: set[str] = field(default_factory=set)
     view: str | None = None
     measure: str | None = None
     output: str | None = None
@@ -248,8 +252,6 @@ def monitor_history(
     for view in (pilot.views if pilot is not None else []):
         for spec in view.specs:
             approved.setdefault(view.name, {}).setdefault(spec.name.lower(), None)
-    contested = {c for c, defs in by_concept.items()
-                 if len({d.core.hash() for d in defs}) > 1}
     computed_by_hash: dict[str, list[_RefDef]] = {}
     for ref in computed:
         computed_by_hash.setdefault(ref.semantic_hash, []).append(ref)
@@ -269,7 +271,9 @@ def monitor_history(
     recurrence: dict[str, int] = {}   # base key -> statements using the calculation
     counts = {"statements": 0, "parsed": 0, "unparseable": 0, "non_query": 0,
               "unreadable": 0, "no_measure": 0, "nested_measure": 0,
-              "without_time": 0, "mixed_measures": 0}
+              "without_time": 0, "bad_time": 0, "mixed_measures": 0,
+              "outside_window": 0, "after_session_change": 0}
+    windowed = pilot is not None and (pilot.window_from or pilot.window_to)
     executions_read = 0
     for ex in intake.executions:
         statements, unparseable = _parse_statements(ex.statement_text, dialect)
@@ -279,20 +283,40 @@ def monitor_history(
         executions_read += (len(statements) + unparseable) if intake.format == "sql" else 1
         catalog = ex.catalog or asserted[0]
         schema = ex.schema or asserted[1]
+        ts, time_state = _execution_time(ex)
+        if windowed and ts is not None and not pilot.in_window(ts):
+            # Outside the window the package says its export covers: not
+            # judged, and counted, so a mismatched export shows itself.
+            counts["outside_window"] += 1
+            continue
         evidence = None
         if as_of:
-            ts = _execution_time(ex)
-            if ts is None:
+            if time_state == "missing":
                 counts["without_time"] += 1
                 evidence = frozenset({_NO_TIME})
+            elif time_state == "unreadable":
+                counts["bad_time"] += 1
+                evidence = frozenset({_BAD_TIME})
             else:
-                evidence = frozenset(a.view for a in authorities
-                                     if a.view and a.applies_at(ts))
-        explicit = _explicit_identity(ex, asset_map or {})
+                # Every approved view whose window covers the run — readable
+                # or not, so an unreadable applicable definition is known.
+                evidence = frozenset(v.name for v in pilot.views if v.applies_at(ts))
+        queries = [st for st in statements if isinstance(st, exp.Query)]
+        # A query tag or asset belongs to the EXECUTION; it names one metric
+        # only when the execution holds one query.
+        row_identity = (_row_identity(ex, asset_map or {}) if len(queries) == 1 else None)
+        session_changed = False
         for stmt in statements:
             if not isinstance(stmt, exp.Query):
                 counts["non_query"] += 1
+                # USE / SET / CREATE [TEMP] VIEW … change what later names
+                # resolve to; nothing after them in this execution has a
+                # relation identity the row's context establishes.
+                session_changed = True
                 continue
+            if session_changed:
+                counts["after_session_change"] += 1
+            explicit = _statement_tag(stmt) or row_identity
             qualify_tables(stmt, catalog, schema, depth)
             if measure_calls(stmt):
                 if any(outside_measure_refs(a) for a in stmt.find_all(exp.AggFunc)):
@@ -300,10 +324,11 @@ def monitor_history(
                     # references are judged (unverifiable), the raw ones are
                     # not read — say so rather than drop them silently.
                     counts["mixed_measures"] += 1
-                _observe_view(stmt, ex, approved, evidence, observed, recurrence, dialect)
+                _observe_view(stmt, ex, approved, evidence, observed, recurrence, dialect,
+                              explicit, session_changed)
                 continue
             outcome = _observe_core(stmt, ex, history_registry, dialect, evidence,
-                                    explicit, observed, recurrence)
+                                    explicit, observed, recurrence, session_changed)
             if outcome:
                 counts[outcome] += 1
 
@@ -331,7 +356,7 @@ def monitor_history(
     judged: list[tuple[dict, _Observed]] = []
     funnel = _Funnel()
     for obs in sorted(recurring, key=lambda o: (-o.uses, o.key)):
-        out = _judge(obs, by_hash, by_name, by_concept, contested, computed_by_hash,
+        out = _judge(obs, by_hash, by_name, by_concept, computed_by_hash,
                      excluded, unreadable, models, dialect, as_of)
         if unqualified:
             out = [_withhold(f, unqualified) for f in out]
@@ -366,7 +391,10 @@ def monitor_history(
                     "empty_rows": intake.empty_rows,
                     "ignored_columns": intake.ignored_columns,
                     "executions": executions_read,
-                    "executions_without_time": counts["without_time"]},
+                    "executions_without_time": counts["without_time"],
+                    "executions_with_unreadable_time": counts["bad_time"],
+                    "executions_outside_window": counts["outside_window"],
+                    "statements_after_session_change": counts["after_session_change"]},
         "statements": counts["statements"],
         "parsed_statements": counts["parsed"],
         "skipped_statements": counts["unparseable"],
@@ -389,9 +417,10 @@ def monitor_history(
 
 def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
                   dialect: str, evidence, explicit, observed: dict,
-                  recurrence: dict) -> str | None:
+                  recurrence: dict, session_changed: bool = False) -> str | None:
     """Shape A intake for one statement. Returns a disclosure counter name
     when the statement yields no measure to judge."""
+    written = _written_aliases(stmt)
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
     shape_problem = raw_shape_problem(stmt)
@@ -424,7 +453,8 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
     explicit = explicit if len(fps) == 1 else None
     groups: dict[tuple[str, str], list] = {}
     for fp in fps:
-        groups.setdefault((fp.core.hash(), _identity(fp.concept_candidate, explicit)),
+        groups.setdefault((fp.core.hash(),
+                           _identity(fp.concept_candidate, explicit, written)),
                           []).append(fp)
     counted: set[str] = set()
     for (core_hash, identity), group in groups.items():
@@ -433,6 +463,8 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
         if reagg:
             gaps.add(f"reads the aggregate output of {', '.join(reagg)} — "
                      f"through-model comparison not made")
+        if session_changed:
+            gaps.add(_SESSION_GAP)
         proof = fp.canon_level in PROOF_LEVELS and not gaps
         base_key = "|".join(["A", core_hash, "proof" if proof else "gapped",
                              shape_problem or "", _evidence_key(evidence)])
@@ -444,6 +476,7 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
             shape_problem=shape_problem, evidence=evidence, explicit=explicit))
         obs.uses += 1
         obs.names.update(f.concept_candidate for f in group)
+        obs.explicit_aliases |= {f.concept_candidate.lower() for f in group} & written
         obs.relations.update(reads)
         obs.statements.add(stmt_id)
         obs.gaps.update(gaps)
@@ -456,33 +489,53 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
     return None
 
 
-def _identity(alias: str | None, explicit: tuple[str, str] | None) -> str:
+_SESSION_GAP = ("relation identity depends on the session: an earlier statement in this "
+                "execution (USE / SET / CREATE …) can change what its names resolve to")
+
+
+def _written_aliases(stmt: exp.Expression) -> set[str]:
+    return {p.alias.lower() for p in getattr(stmt, "selects", [])
+            if isinstance(p, exp.Alias) and p.alias}
+
+
+def _identity(alias: str | None, explicit: tuple[str, str] | None,
+              written: set[str] = frozenset()) -> str:
     if explicit:
         return f"{explicit[0]}:{normalize_name(explicit[1])}"
-    if alias and not _SYNTHESIZED.match(alias.lower()):
+    if alias and (alias.lower() in written or not _SYNTHESIZED.match(alias.lower())):
         return f"alias:{normalize_name(alias)}"
     return "none"
 
 
 def _observe_view(stmt: exp.Expression, ex: Execution,
                   approved: dict[str, dict[str, Authority]], evidence,
-                  observed: dict, recurrence: dict, dialect: str) -> None:
+                  observed: dict, recurrence: dict, dialect: str,
+                  explicit: tuple[str, str] | None = None,
+                  session_changed: bool = False) -> None:
     """Shape B intake: one observation per measure-reference projection."""
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
     view = metric_view_relation(stmt)
     counted: set[str] = set()
-    for proj in check_metric_view(stmt, approved, dialect):
+    projections = check_metric_view(stmt, approved, dialect)
+    # An explicit identity names one metric: applied only to a single use.
+    explicit = explicit if len(projections) == 1 else None
+    for proj in projections:
+        if session_changed:
+            # Which metric view a name reads is itself in question.
+            proj.outcome = unverifiable("context_unresolved", _SESSION_GAP, shape="B")
+            proj.governed_reference = False
         signature = json.dumps(proj.outcome.as_dict(), sort_keys=True)
         base_key = "|".join(["B", view or "", proj.measure,
                              hashlib.sha256(signature.encode()).hexdigest()[:16],
                              _evidence_key(evidence), proj.expression or ""])
-        identity = f"output:{normalize_name(proj.output)}" if proj.output else "none"
+        identity = (_identity(None, explicit) if explicit else
+                    f"output:{normalize_name(proj.output)}" if proj.output else "none")
         key = f"{base_key}|{identity}"
         obs = observed.setdefault(key, _Observed(
             key=key, shape="B", base_key=base_key, identity=identity, view=view,
             measure=proj.measure, output=proj.output, view_outcome=proj.outcome,
-            expression=proj.expression, evidence=evidence,
+            expression=proj.expression, evidence=evidence, explicit=explicit,
             governed_reference=proj.governed_reference,
             semantic_hash=hashlib.sha256(f"{view}/{proj.measure}".encode()).hexdigest()))
         obs.uses += 1
@@ -505,19 +558,30 @@ def _evidence_key(evidence) -> str:
     return "window:" + ",".join(sorted(evidence))
 
 
-def _execution_time(ex: Execution) -> str | None:
+def _execution_time(ex: Execution) -> tuple[str | None, str]:
+    """(instant at nanosecond width, "ok" | "missing" | "unreadable")."""
+    from semantix.services.pilot import precise_ts
+
     if not ex.start_time:
-        return None
+        return None, "missing"
     try:
-        return normalize_ts(ex.start_time.replace(" ", "T", 1))
+        return precise_ts(ex.start_time), "ok"
     except ValueError:
-        return None
+        return None, "unreadable"
 
 
-def _explicit_identity(ex: Execution, asset_map: dict[str, str]) -> tuple[str, str] | None:
-    m = _TAG.search(ex.statement_text)
-    if m:
-        return ("tag", m.group(1))
+def _statement_tag(stmt: exp.Expression) -> tuple[str, str] | None:
+    """A `semantix: metric=` comment written on THIS statement — not anywhere
+    in the execution text, where one statement's tag named every other."""
+    for node in stmt.walk():
+        for comment in node.comments or []:
+            m = _TAG.search(comment)
+            if m:
+                return ("tag", m.group(1))
+    return None
+
+
+def _row_identity(ex: Execution, asset_map: dict[str, str]) -> tuple[str, str] | None:
     if ex.query_tag:
         m = _QUERY_TAG.search(ex.query_tag)
         if m:
@@ -534,7 +598,10 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
     """(authorities, non-authoritative computed refs, excluded, meta)."""
     refs, excluded, contradicted = _reference(store, scan_id)
     authorities: list[Authority] = []
-    unreadable: dict[str, str] = {}   # normalized metric name -> why
+    # normalized metric name -> approved definitions that could not be read,
+    # with their windows: an unreadable definition can still be the one that
+    # applies, and saying "no definition is evidenced" then is false.
+    unreadable: dict[str, list[dict]] = {}
     if pilot is not None:
         from semantix.engine import build_claim
 
@@ -546,10 +613,13 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
                     why = (f"approved metric view {view.name}/{spec.name} "
                            f"({claim.error or claim.canon_level})")
                     excluded.setdefault(f"pilot:{view.name}/{spec.name}", why)
-                    unreadable.setdefault(normalize_name(spec.name), why)
+                    unreadable.setdefault(normalize_name(spec.name), []).append(
+                        {"why": why, "view": view.name, "current": view.applies_to is None})
                     continue
+                # Case variants (`Net_Revenue`, `net_revenue`) are one metric,
+                # as the scan already treats them: one concept key.
                 authorities.append(Authority(
-                    concept=spec.name, system=spec.system, name=spec.name,
+                    concept=normalize_name(spec.name), system=spec.system, name=spec.name,
                     core=claim.core, dimensions=spec.dimensions, view=view.name,
                     measure=spec.name.lower(), applies_from=view.applies_from,
                     applies_to=view.applies_to, where=spec.path))
@@ -571,13 +641,21 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
         chosen = sorted(systems) if systems else sorted(
             {r.system for r in refs if r.kind == "declared"})
     concepts = {a.concept for a in authorities}
+    # Comparing against CURRENT definitions, only those still applicable can
+    # disagree with each other.
+    current_mode = pilot is not None and pilot.compare_against == "current"
+    pool = [a for a in authorities if a.applies_to is None] if current_mode else authorities
     meta = {"concepts": len(concepts), "definitions": len(authorities),
             "authority_systems": chosen,
             "non_authoritative_definitions": len(computed),
             "excluded_below_proof": len(excluded),
+            # Definitions that differ but never apply at the same time are
+            # VERSIONS of a metric, not a dispute about it.
             "contested_concepts": sorted(
                 c for c in concepts
-                if len({a.core.hash() for a in authorities if a.concept == c}) > 1),
+                if any(a.core.hash() != b.core.hash() and _overlap(a, b)
+                       for a in pool if a.concept == c
+                       for b in pool if b.concept == c)),
             "scan_contradicted_concepts": sorted(contradicted)}
     return authorities, computed, excluded, unreadable, meta
 
@@ -632,8 +710,9 @@ def _reference(store: Store, scan_id: str
 
 # ---------------------------------------------------------------- judging
 
-def _attributable(names: set[str]) -> list[str]:
-    return sorted(n for n in names if not _SYNTHESIZED.match(n.lower()))
+def _attributable(names: set[str], written: set[str] = frozenset()) -> list[str]:
+    return sorted(n for n in names
+                  if n.lower() in written or not _SYNTHESIZED.match(n.lower()))
 
 
 def _diff(reference: SemanticCore, observed: dict) -> dict:
@@ -691,11 +770,58 @@ def _variation_text(outcome: Outcome) -> str:
     return (" — " + "; ".join(parts)) if parts else ""
 
 
-def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_hash,
+def _eligible(obs: _Observed, defs: list[Authority], as_of: bool) -> list[Authority]:
+    """The definitions that APPLY to this observation's executions. Every
+    match candidate — exact, claimed, equivalent, contested — is drawn from
+    these first: an expired definition matching the calculation is history,
+    not evidence about the run (it chose a definition that ended October 1
+    for an October 2 execution)."""
+    if as_of:
+        return [a for a in defs if _covered(obs, a)]
+    # Against CURRENT definitions: those with no recorded end (all of them,
+    # outside a pilot or when no windows are given).
+    return [a for a in defs if a.applies_to is None]
+
+
+def _applicable_unreadable(obs: _Observed, claim: str, unreadable: dict,
+                           as_of: bool) -> str | None:
+    """Why the approved definition of `claim` that applies here could not be
+    read, if one applies."""
+    for entry in unreadable.get(claim, []):
+        applies = (obs.evidence is not None and entry["view"] in obs.evidence) if as_of \
+            else entry["current"]
+        if applies:
+            return entry["why"]
+    return None
+
+
+def _no_evidence_detail(obs: _Observed, what: str) -> str:
+    detail = f"no definition of {what} is evidenced for the execution time"
+    if obs.evidence and _NO_TIME in obs.evidence:
+        detail += " (the executions carry no start time)"
+    elif obs.evidence and _BAD_TIME in obs.evidence:
+        detail += " (the executions' start time could not be read)"
+    return detail
+
+
+def _overlap(a: Authority, b: Authority) -> bool:
+    return ((a.applies_from is None or b.applies_to is None or a.applies_from < b.applies_to)
+            and (b.applies_from is None or a.applies_to is None
+                 or b.applies_from < a.applies_to))
+
+
+def _contested_now(obs: _Observed, by_concept: dict, as_of: bool) -> set[str]:
+    """Concepts whose definitions applicable to THIS observation disagree."""
+    return {c for c, defs in by_concept.items()
+            if len({a.core.hash() for a in _eligible(obs, defs, as_of)}) > 1}
+
+
+def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
            excluded, unreadable, models, dialect, as_of) -> list[dict]:
+    contested = _contested_now(obs, by_concept, as_of)
     if obs.shape == "B":
-        return _judge_view(obs, by_name, by_concept, contested, as_of)
-    names = _attributable(obs.names)
+        return _judge_view(obs, by_name, by_concept, contested, as_of, unreadable)
+    names = _attributable(obs.names, obs.explicit_aliases)
     base = _base(obs, names)
 
     if not obs.proof_grade:
@@ -710,24 +836,45 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
                          f"recurring measure could not be read at proof grade "
                          f"({reason}) — no comparison made", out)]
 
+    # What the query CLAIMS to compute: an explicit tag / query tag / asset
+    # map first, else its own (analyst-written) aliases.
+    claims = [normalize_name(n) for n in names]
+    identity = "alias"
     if obs.explicit:
         source, name = obs.explicit
-        named = set(by_name.get(normalize_name(name), ()))
-        identity = source
-        if not named:
+        if normalize_name(name) in by_name or normalize_name(name) in unreadable:
+            claims, identity = [normalize_name(name)], source
+        else:
             base = {**base, "identity_note": f"{source} names {name}, which is not "
                                              f"an authoritative metric"}
-            named = {label for alias in names
-                     for label in by_name.get(normalize_name(alias), ())}
-            identity = "alias"
-    else:
-        named = {label for alias in names for label in by_name.get(normalize_name(alias), ())}
-        identity = "alias"
+    named = {label for c in claims for label in by_name.get(c, ())}
+    # A claimed metric whose APPLICABLE definition could not be read cannot
+    # be judged — and the query is still named: it must not fall through to
+    # "unnamed" and conform to whatever else its calculation matches.
+    dark = {c: why for c in claims
+            if (why := _applicable_unreadable(obs, c, unreadable, as_of))}
     also = [r.label for r in computed_by_hash.get(obs.semantic_hash, [])]
     if also:
         base = {**base, "also_matches": also}
 
-    exact = by_hash.get(obs.semantic_hash)
+    exact_all = by_hash.get(obs.semantic_hash) or []
+    exact = _eligible(obs, exact_all, as_of)
+    if exact_all and not exact:
+        # The calculation matches only definitions that do not apply to these
+        # executions: context, never a match. Judging continues against the
+        # definitions that do.
+        base = {**base, "calculation_matches": "; ".join(sorted(
+            f"{a.label} as snapshotted — not evidenced for the execution time"
+            for a in exact_all))}
+    if dark:
+        evidence = base
+        if exact:
+            evidence = {**base, "calculation_matches": sorted(
+                exact, key=lambda a: (a.concept, a.label))[0].label}
+        return [_finding(evidence, "unverifiable", 0, c, "unverifiable", identity,
+                         f"named {c}, whose applicable definition could not be read: "
+                         f"{why}", unverifiable("below_proof_grade", why))
+                for c, why in sorted(dark.items())]
     out: list[dict] = []
     if exact:
         # Several authoritative metrics can share one definition; the one the
@@ -737,11 +884,8 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
         if named and auth.concept not in named:
             # The math is concept A's; the query CLAIMS concept B. B's verdict
             # is the finding, and the match to A is evidence on it — never a
-            # separate conforming finding that could stand in for it. The
-            # match is only evidence if A's definition applied at the time.
-            matched = auth.label if not as_of or _covered(obs, auth) else (
-                f"{auth.label} as snapshotted — not evidenced for the execution time")
-            evidence = {**base, "calculation_matches": matched}
+            # separate conforming finding that could stand in for it.
+            evidence = {**base, "calculation_matches": auth.label}
             return [_judge_against(obs, evidence, label, by_concept[label], contested,
                                    models, dialect, as_of, identity)
                     for label in sorted(named)]
@@ -759,32 +903,24 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
                                       models, dialect, as_of, identity))
         return out
 
-    # Named after an authoritative metric whose definition could not be
-    # read: the comparison cannot be made, which is not the same as there
-    # being nothing to compare against.
-    dark = sorted((n, unreadable[normalize_name(n)]) for n in names
-                  if normalize_name(n) in unreadable)
-    if dark:
-        name, why = dark[0]
-        return [_finding(base, "unverifiable", 0, name, "unverifiable", identity,
-                         f"named after an authoritative metric whose definition "
-                         f"could not be read: {why}",
-                         unverifiable("below_proof_grade", why))]
-
     # Nobody named it. Same math over the same physical columns as an
-    # authority: if the bounded rules say it IS that definition sliced, it
-    # conforms (identity established by the definition, as for an exact
-    # match); if they say it differs, it is a CANDIDATE — a hypothesis.
-    near = [a for defs in by_concept.values() for a in defs
-            if a.core.measure_expr == obs.core.measure_expr
-            and a.core.source_columns == obs.core.source_columns]
+    # APPLICABLE authority: if the bounded rules say it IS that definition
+    # sliced, it conforms (identity established by the definition, as for an
+    # exact match); if they say it differs, it is a CANDIDATE — a hypothesis.
+    def same_measure(a: Authority) -> bool:
+        return (a.core.measure_expr == obs.core.measure_expr
+                and a.core.source_columns == obs.core.source_columns)
+    near = [a for defs in by_concept.values() for a in _eligible(obs, defs, as_of)
+            if same_measure(a)]
+    stale_near = [a for defs in by_concept.values() for a in defs
+                  if same_measure(a) and a not in near]
+    if stale_near and not near:
+        base = {**base, "calculation_matches": "; ".join(sorted(
+            f"near {a.label} as snapshotted — not evidenced for the execution time"
+            for a in stale_near))}
     if near:
-        judged = []
-        for auth in near:
-            if as_of and not _covered(obs, auth):
-                continue
-            judged.append((auth, check_raw(obs.core, auth, dialect,
-                                           obs.shape_problem, models)))
+        judged = [(auth, check_raw(obs.core, auth, dialect, obs.shape_problem, models))
+                  for auth in near]
         conforming = [(a, o) for a, o in judged if o.status == "conforming"]
         if conforming:
             auth, outcome = sorted(conforming, key=lambda t: t[0].concept)[0]
@@ -800,9 +936,7 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
                 "not_applicable", "similarity",
                 f"same measure as {auth.concept} over the same columns, "
                 f"unnamed — {_reason_text(outcome)}", outcome, diff=diff)]
-        auth = near[0]
-        outcome = (judged[0][1] if judged else unverifiable(
-            "no_definition_evidence", "no definition window covers these executions"))
+        auth, outcome = sorted(judged, key=lambda t: (t[0].concept, t[0].label))[0]
         return [_finding(base, "unverifiable", 0, auth.concept, "unverifiable",
                          "similarity",
                          f"near {auth.concept}, unnamed — {_reason_text(outcome)}",
@@ -828,17 +962,15 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
                    contested: set[str], models, dialect, as_of, identity) -> dict:
     """One identified concept: judge the observed core against each of its
     authoritative definitions and report the strongest true statement."""
-    if as_of:
-        covered = [a for a in defs if _covered(obs, a)]
-        if not covered:
-            outcome = unverifiable(
-                "no_definition_evidence",
-                f"no definition of {concept} is evidenced for the execution time"
-                + (" (the executions carry no start time)"
-                   if obs.evidence and _NO_TIME in obs.evidence else ""))
-            return _finding(base, "unverifiable", 0, concept, "unverifiable", identity,
-                            f"{concept}: {_reason_text(outcome)}", outcome)
-        defs = covered
+    applicable = _eligible(obs, defs, as_of)
+    if not applicable:
+        outcome = unverifiable(
+            "no_definition_evidence",
+            _no_evidence_detail(obs, concept) if as_of else
+            f"no current definition of {concept} (every recorded one has ended)")
+        return _finding(base, "unverifiable", 0, concept, "unverifiable", identity,
+                        f"{concept}: {_reason_text(outcome)}", outcome)
+    defs = applicable
     judged = [(a, check_raw(obs.core, a, dialect, obs.shape_problem, models))
               for a in defs]
     conforming = [(a, o) for a, o in judged if o.status == "conforming"]
@@ -876,20 +1008,26 @@ def _conforming(obs: _Observed, base: dict, auth: Authority, outcome: Outcome,
                     f"{how} {auth.label}{_variation_text(outcome)}", outcome)
 
 
-def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[dict]:
+def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of,
+                unreadable: dict | None = None) -> list[dict]:
     """Shape B, in a fixed order — each step can only narrow what the next
     may conclude:
 
     1. definition evidence, for the REFERENCED metric and for any metric the
-       output name CLAIMS;
+       use CLAIMS (an explicit tag / query tag / asset map, else its output
+       name) — in as-of mode the windows covering the run, in current mode
+       the definitions still applicable; an applicable definition that could
+       not be read is said to be unreadable, not missing;
     2. the supported-SQL boundary (the conformance rules' verdict on the
        statement);
-    3. the claimed metric;
+    3. the claimed metric — a bare reference is judged by DEFINITION
+       (identical definitions under different names conform); a derived
+       expression under another metric's name is not decided;
     4. the primary finding, chosen by the caller from these conclusions.
 
     A naming mismatch found before evidence or the boundary failed is kept
-    as context (`suspected`), never promoted to a violation: round ten's
-    name branch ran last and overwrote "unverifiable" unconditionally."""
+    as context (`suspected`), never promoted to a violation."""
+    unreadable = unreadable or {}
     names = sorted(obs.names)
     base = _base(obs, names)
     outcome = obs.view_outcome
@@ -899,28 +1037,42 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
             if a.view == obs.view and a.measure == obs.measure:
                 auth = a
     concept = auth.concept if auth else None
-    # Presented under ANOTHER authoritative metric's name. Only for an
-    # approved, readable measure — over an unknown view the identity of what
-    # was computed is itself unknown.
-    claimed = (sorted(by_name.get(normalize_name(obs.output), set()) - {concept})
-               if obs.output and concept is not None else [])
-    suspected = (f"presented as {obs.output} but computed as {obs.expression} over "
+    # What the use claims to be. Only for an approved, readable measure —
+    # over an unknown view the identity of what was computed is unknown.
+    claim_name, identity = obs.output, "alias"
+    if obs.explicit:
+        source, name = obs.explicit
+        if normalize_name(name) in by_name or normalize_name(name) in unreadable:
+            claim_name, identity = name, source
+        else:
+            base = {**base, "identity_note": f"{source} names {name}, which is not "
+                                             f"an authoritative metric"}
+    claim = normalize_name(claim_name) if claim_name else None
+    claimed = (sorted(by_name.get(claim, set()) - {concept})
+               if claim and concept is not None else [])
+    dark_claim = (_applicable_unreadable(obs, claim, unreadable, as_of)
+                  if claim and concept is not None and claim != concept else None)
+    if dark_claim and not claimed:
+        claimed = [claim]
+    suspected = (f"presented as {claim_name} but computed as {obs.expression} over "
                  f"{obs.view}") if claimed else None
 
     # 1. Definition evidence, referenced and claimed.
-    if as_of:
-        missing = []
-        if auth is not None and not _covered(obs, auth):
-            missing.append(f"{obs.view}/{obs.measure}")
-        missing += [label for label in claimed
-                    if not any(_covered(obs, a) for a in by_concept[label])]
-        if missing:
-            outcome = unverifiable(
-                "no_definition_evidence",
-                f"no definition of {', '.join(missing)} is evidenced for the execution "
-                f"time" + (" (the executions carry no start time)"
-                           if obs.evidence and _NO_TIME in obs.evidence else ""),
-                shape="B")
+    missing = []
+    if auth is not None and not _eligible(obs, [auth], as_of):
+        missing.append(f"{obs.view}/{obs.measure}")
+    missing += [label for label in claimed
+                if label in by_concept and not _eligible(obs, by_concept[label], as_of)
+                and not _applicable_unreadable(obs, label, unreadable, as_of)]
+    if missing:
+        outcome = unverifiable(
+            "no_definition_evidence",
+            _no_evidence_detail(obs, ", ".join(missing)) if as_of else
+            f"no current definition of {', '.join(missing)}", shape="B")
+    elif dark_claim:
+        outcome = unverifiable("below_proof_grade",
+                               f"the applicable definition of {claim} could not be read: "
+                               f"{dark_claim}", shape="B")
 
     # 2. The supported-SQL boundary. `derived_expression` is not a boundary:
     # it is the projection's own formula, which step 3 judges.
@@ -932,23 +1084,36 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
         for label in claimed:
             if outside:
                 out.append(_finding(context, "unverifiable", 0, label, "unverifiable",
-                                    "alias",
+                                    identity,
                                     f"named {label}, {suspected} — not judged: "
                                     f"{_reason_text(outcome)}", outcome))
+                continue
+            if outcome.status != "conforming":
+                # A derived expression under another metric's name may compute
+                # that metric exactly (`MEASURE(gross) - MEASURE(refunds) AS
+                # net_revenue`): whether it does is not decided here.
+                held = unverifiable(
+                    "implication_undecided",
+                    f"presented as {claim_name}, computed as {obs.expression} from "
+                    f"governed measures — whether that equals {label}'s definition is "
+                    f"not decided", shape="B")
+                out.append(_finding(context, "unverifiable", 0, label, "unverifiable",
+                                    identity, f"named {label}: {_reason_text(held)}", held))
                 continue
             # 3. The claimed metric. Different NAMES alone do not establish
             # different definitions: when the claimed metric's definition is
             # identical to the referenced one, a bare reference IS the claimed
             # metric (same view: same dimensions, so the slices hold too).
-            same = [a for a in by_concept[label] if a.core.hash() == auth.core.hash()]
-            if same and outcome.status == "conforming":
+            same = [a for a in _eligible(obs, by_concept[label], as_of)
+                    if a.core.hash() == auth.core.hash()]
+            if same:
                 eq = next((a for a in same if a.view == auth.view), None)
                 variation = outcome.variation or {}
                 if eq is not None or not (variation.get("slices") or variation.get("grain")):
                     out.append(_conforming(
                         obs, {**base, "calculation_matches":
                               f"{obs.view}/{obs.measure} — the same definition as {label}"},
-                        eq or same[0], outcome, contested, "alias"))
+                        eq or same[0], outcome, contested, identity))
                 else:
                     held = unverifiable(
                         "dimension_unsupported",
@@ -956,7 +1121,8 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
                         f"declared in another view — the slices were judged against "
                         f"{obs.view}'s dimensions, not {label}'s", shape="B")
                     out.append(_finding(base, "unverifiable", 0, label, "unverifiable",
-                                        "alias", f"named {label}: {_reason_text(held)}", held))
+                                        identity, f"named {label}: {_reason_text(held)}",
+                                        held))
                 continue
             other = Outcome("violation", [{
                 "code": "presented_under_other_name", "detail": suspected}],
@@ -964,7 +1130,7 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
             out.append(_finding({**base, "calculation_matches":
                                  f"{obs.view}/{obs.measure} ({outcome.status})"},
                                 "definition_violation", _violation_severity(obs.uses),
-                                label, "violation", "alias",
+                                label, "violation", identity,
                                 f"computed under the name {label}: "
                                 f"{_reason_text(other)}", other))
         return out
@@ -999,9 +1165,12 @@ def _withhold(f: dict, unqualified: list[str]) -> dict:
 _PRECEDENCE = {"definition_violation": 5, "contested_use": 4,
                "candidate_alt_definition": 3, "unverifiable": 2,
                "unregistered_recurring_measure": 1, "conforming_use": 0}
+# The summary is NOT attribution: it names the definition a verdict was
+# reached against, and merging findings judged against different versions
+# kept one version's label for all of them.
 _ATTRIBUTION = frozenset({"uses", "distinct_statements", "names_used", "relations_read",
                           "sample_sql", "executed_by", "clients", "assets",
-                          "execution_ids", "severity", "summary"})
+                          "execution_ids", "severity"})
 
 
 def _aggregate(judged: list[tuple[dict, _Observed]]) -> list[dict]:
@@ -1055,7 +1224,7 @@ class _Funnel:
             self.governed += obs.uses
         kind = primary["kind"]
         self.by_kind[kind] += obs.uses
-        if kind in ("conforming_use", "contested_use") and primary.get("shape"):
+        if kind == "conforming_use" and primary.get("shape"):
             self.conforming_by_shape[primary["shape"]] += obs.uses
         if kind == "unverifiable":
             code = (primary.get("reasons") or [{"code": "below_proof_grade"}])[0]["code"]

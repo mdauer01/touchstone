@@ -32,14 +32,15 @@ read is a statement about the run that would silently not hold.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from semantix.adapters.base import DeclaredSpec, spec_content_text
 from semantix.adapters.loadutil import load_yaml
 from semantix.adapters.uc_metrics import load_uc_metrics
-from semantix.store import Store, normalize_ts
+from semantix.store import Store
 
 _TOP_KEYS = frozenset({"history", "window", "execution_context", "authority",
                        "compare_against", "snapshots_taken_at", "catalog",
@@ -65,6 +66,11 @@ class PilotView:
                 and (self.applies_to is None or ts < self.applies_to))
 
     @property
+    def current(self) -> bool:
+        """Still applicable now (no end recorded) — what `current` compares against."""
+        return self.applies_to is None
+
+    @property
     def measure_names(self) -> set[str]:
         return {s.name.lower() for s in self.specs}
 
@@ -84,6 +90,11 @@ class Pilot:
     catalog: Path | None = None
     asset_map: dict[str, str] = field(default_factory=dict)
     system: str = "uc_metrics"
+
+    def in_window(self, ts: str) -> bool:
+        """Inside the export window the package declares (None bounds: open)."""
+        return ((self.window_from is None or self.window_from <= ts)
+                and (self.window_to is None or ts < self.window_to))
 
     def view(self, relation: str) -> PilotView | None:
         want = relation.lower()
@@ -181,23 +192,29 @@ def load_pilot(directory: str | Path, dialect: str) -> Pilot:
                              f"this definition applied, an execution cannot be "
                              f"judged against it (or set compare_against: current)")
         specs, _ = load_uc_metrics(snapshot, dialect)
+        applies_from = _ts(applies.get("from"), f"{where}.applies.from")
+        applies_to = _ts(applies.get("to"), f"{where}.applies.to")
+        if applies_from is not None and applies_to is not None and applies_from >= applies_to:
+            raise ValueError(f"{where}: applies.from is not before applies.to — an empty "
+                             f"or inverted window evidences nothing")
         views.append(PilotView(
             name=name, snapshot=snapshot, sha256=actual_sha,
-            applies_from=_ts(applies.get("from"), f"{where}.applies.from"),
-            applies_to=_ts(applies.get("to"), f"{where}.applies.to"),
-            specs=specs))
+            applies_from=applies_from, applies_to=applies_to, specs=specs))
     names = [v.name for v in views]
     if len(set(names)) != len(names):
         raise ValueError("pilot.yml: a metric view is listed twice")
 
+    window_from = _ts(window.get("from"), "pilot.yml window.from")
+    window_to = _ts(window.get("to"), "pilot.yml window.to")
+    if window_from is not None and window_to is not None and window_from >= window_to:
+        raise ValueError("pilot.yml: window.from is not before window.to")
     asset_map = data.get("asset_map") or {}
     if not isinstance(asset_map, dict):
         raise ValueError("pilot.yml: asset_map must map asset ids to metric names")
     catalog = data.get("catalog")
     return Pilot(
         root=root, history=history, compare_against=compare, views=views,
-        window_from=_ts(window.get("from"), "pilot.yml window.from"),
-        window_to=_ts(window.get("to"), "pilot.yml window.to"),
+        window_from=window_from, window_to=window_to,
         context_catalog=_str(ctx.get("catalog")), context_schema=_str(ctx.get("schema")),
         context_asserted=asserted,
         snapshots_taken_at=_ts(data.get("snapshots_taken_at"), "pilot.yml snapshots_taken_at"),
@@ -259,6 +276,29 @@ def _ts(value: object, what: str) -> str | None:
     elif isinstance(value, date):
         value = f"{value.isoformat()}T00:00:00Z"
     try:
-        return normalize_ts(str(value))
+        return precise_ts(str(value))
     except ValueError as e:
         raise ValueError(f"{what}: {e}") from None
+
+
+_FRACTION = re.compile(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?(.*)$")
+
+
+def precise_ts(text: str) -> str:
+    """An instant as UTC text with NANOSECOND width, so window comparisons
+    are exact. The store's own format keeps milliseconds, which moved a
+    boundary at .0005 s and judged an execution 0.4 ms before a version's
+    start against that version. Raises on unreadable input."""
+    raw = text.strip()
+    m = _FRACTION.match(raw)
+    if m is None:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        fraction = ""
+    else:
+        base, fraction, rest = m.group(1), m.group(2) or "", m.group(3) or ""
+        if len(fraction) > 9:
+            raise ValueError(f"unreadable instant {text!r}: more than nanosecond precision")
+        parsed = datetime.fromisoformat((base.replace(" ", "T") + rest).replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S") + "." + fraction.ljust(9, "0") + "Z"

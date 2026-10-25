@@ -80,6 +80,7 @@ def extract_fingerprints(
     # alias. Terms are resolved to the expressions they name; what cannot be
     # resolved is a gap, never an alias standing in for its expression.
     ordering, order_gap = _order_terms(select, qselect, dialect)
+    on_gap = None
     distinct = select.args.get("distinct")
     if distinct is not None:
         # DISTINCT ON (k) keeps one row per k; plain DISTINCT de-duplicates
@@ -90,9 +91,14 @@ def extract_fingerprints(
             # The ORDER BY decides WHICH row survives per key, so it is part
             # of the definition: asc/desc variants compute different rows and
             # previously hashed identically at proof grade.
+            # The ON keys may name a projection too (`DISTINCT ON (k)` over
+            # `SUM(refund) AS k` vs `SUM(refund) % 2 AS k` keep different
+            # rows), so they resolve exactly like ORDER BY terms.
             q_on = select_for_render.args.get("distinct").args.get("on")
+            keys, on_gap = _resolve_projection_refs(
+                select, qselect, _tuple_items(on), _tuple_items(q_on), "DISTINCT ON", dialect)
             order_sql = (" ORDER BY " + ", ".join(ordering)) if ordering else ""
-            filter_list.append(f"SELECT DISTINCT ON ({render(q_on, dialect)}){order_sql}")
+            filter_list.append(f"SELECT DISTINCT ON ({', '.join(keys)}){order_sql}")
         else:
             # Plain DISTINCT de-duplicates the WHOLE output row, so the tuple
             # of every projection decides which measure values survive:
@@ -125,11 +131,19 @@ def extract_fingerprints(
     # unread construct would otherwise read as "identical" to its absence.
     # Gaps the OPTIMIZER destroyed travel on the CanonResult: by the time we
     # see the optimized AST, a merged CTE's ORDER BY is simply gone.
-    gaps = tuple(sorted({*detect_gaps(select), *canon.gaps,
+    merged_constants = [
+        "GROUP BY item " + g.sql(dialect) + " was rewritten into a bare identifier by the "
+        "optimizer (a merged constant) — its meaning is not established"
+        for grp in canon.ast.find_all(exp.Group) for g in grp.expressions
+        if isinstance(g, exp.Identifier)]
+    duplicate_refs = _duplicate_name_refs(canon.ast)
+    gaps = tuple(sorted({*detect_gaps(select), *canon.gaps, *merged_constants[:1],
+                         *duplicate_refs,
                          *([order_gap] if order_gap and (select.args.get("limit") is not None
                                                          or select.args.get("offset") is not None
                                                          or select.args.get("distinct") is not None)
-                           else [])}))
+                           else []),
+                         *([on_gap] if on_gap else [])}))
     if set_op:
         gaps = tuple(sorted({*gaps, "set operation"}))
     level = canon.level.value
@@ -348,6 +362,32 @@ def _resolve_cte_sources(amap: dict[str, str], select: exp.Select,
             for alias, relation in amap.items()}
 
 
+def _duplicate_name_refs(ast: exp.Expression) -> list[str]:
+    """Any scope whose ORDER BY or DISTINCT ON names an output that more than
+    one projection carries — an explicit duplicate alias, or a user alias
+    colliding with sqlglot's synthetic `_col_N`. Inside a CTE body the
+    digest carried only the name, so different targets hashed equal."""
+    for select in ast.find_all(exp.Select):
+        names = [p.alias.lower() for p in select.expressions
+                 if isinstance(p, exp.Alias) and p.alias]
+        dupes = {n for n in names if names.count(n) > 1}
+        if not dupes:
+            continue
+        keys: list[exp.Expression] = []
+        order = select.args.get("order")
+        if order is not None:
+            keys += list(order.expressions)
+        distinct = select.args.get("distinct")
+        if isinstance(distinct, exp.Expression) and distinct.args.get("on") is not None:
+            keys += _tuple_items(distinct.args.get("on"))
+        for key in keys:
+            for col in key.find_all(exp.Column):
+                if not col.table and col.name.lower() in dupes:
+                    return [f"ORDER BY / DISTINCT ON names {col.name}, an output name more "
+                            f"than one projection carries"]
+    return []
+
+
 def _order_terms(select: exp.Select, qselect: exp.Select,
                  dialect: str) -> tuple[list[str], str | None]:
     """ORDER BY terms rendered as the expressions they mean, and a gap reason
@@ -362,43 +402,66 @@ def _order_terms(select: exp.Select, qselect: exp.Select,
     order, q_order = select.args.get("order"), qselect.args.get("order")
     if order is None or q_order is None:
         return [], None
-    aliases = {p.alias.lower(): qp.this
-               for p, qp in zip(select.expressions, qselect.expressions)
-               if isinstance(p, exp.Alias) and p.alias and isinstance(qp, exp.Alias)}
-    terms: list[str] = []
-    for term, q_term in zip(order.expressions, q_order.expressions):
+    return _resolve_projection_refs(select, qselect, list(order.expressions),
+                                    list(q_order.expressions), "ORDER BY", dialect)
+
+
+def _tuple_items(node: exp.Expression | None) -> list[exp.Expression]:
+    if node is None:
+        return []
+    return list(node.expressions) if isinstance(node, exp.Tuple) else [node]
+
+
+def _resolve_projection_refs(select: exp.Select, qselect: exp.Select,
+                             terms: list[exp.Expression], q_terms: list[exp.Expression],
+                             clause: str, dialect: str) -> tuple[list[str], str | None]:
+    """Terms of a clause that may name OUTPUT columns (ORDER BY, DISTINCT
+    ON), rendered as the expressions they mean, plus a gap reason for any
+    term that could not be resolved. `terms` come from the qualified select,
+    where a source column carries its table and an output alias does not;
+    `q_terms` are the same positions in the relation-qualified copy."""
+    aliases: dict[str, list[exp.Expression]] = {}
+    for p, qp in zip(select.expressions, qselect.expressions):
+        if isinstance(p, exp.Alias) and p.alias and isinstance(qp, exp.Alias):
+            aliases.setdefault(p.alias.lower(), []).append(qp.this)
+
+    def substituted(q_term: exp.Expression, target: exp.Expression) -> str:
+        resolved = q_term.copy()
+        if isinstance(resolved, exp.Ordered):
+            resolved.set("this", target.copy())
+        else:
+            resolved = target.copy()
+        return render(resolved, dialect)
+
+    if len(terms) != len(q_terms):
+        return [], f"{clause} terms could not be aligned for resolution"
+    out: list[str] = []
+    for term, q_term in zip(terms, q_terms):
         key = term.this if isinstance(term, exp.Ordered) else term
+        if isinstance(key, exp.Identifier):
+            return [], (f"{clause} term {key.sql(dialect)} was rewritten into a bare "
+                        f"identifier by the optimizer — its meaning is not established")
         if isinstance(key, exp.Column) and not key.table:
-            target = aliases.get(key.name.lower())
-            if target is None:
-                return [], (f"ORDER BY {key.sql(dialect)} names neither a source "
+            targets = aliases.get(key.name.lower())
+            if not targets:
+                return [], (f"{clause} {key.sql(dialect)} names neither a source "
                             f"column nor a projection")
-            resolved = q_term.copy()
-            if isinstance(resolved, exp.Ordered):
-                resolved.set("this", target.copy())
-            else:
-                resolved = target.copy()
-            terms.append(render(resolved, dialect))
+            if len(targets) > 1:
+                return [], (f"{clause} {key.sql(dialect)} names more than one projection "
+                            f"(duplicate output name) — which one is not established")
+            out.append(substituted(q_term, targets[0]))
             continue
-        if isinstance(key, exp.Literal) and key.is_int:
-            idx = int(key.name) - 1
-            if not 0 <= idx < len(qselect.expressions):
-                return [], f"ORDER BY {key.name} is not a projection ordinal"
-            proj = qselect.expressions[idx]
-            resolved = q_term.copy()
-            target = proj.this if isinstance(proj, exp.Alias) else proj
-            if isinstance(resolved, exp.Ordered):
-                resolved.set("this", target.copy())
-            else:
-                resolved = target.copy()
-            terms.append(render(resolved, dialect))
-            continue
+        # An integer literal still present AFTER qualification is a constant,
+        # never an ordinal: qualify already rewrote every true ordinal into an
+        # alias reference, and what survives came from constant folding or a
+        # merged CTE column pinned to a number. Resolving it as an ordinal
+        # recorded a constant sort key as a real one.
         if any(isinstance(c, exp.Column) and not c.table and c.name.lower() in aliases
                for c in key.find_all(exp.Column)):
-            return [], (f"ORDER BY {key.sql(dialect)} uses a projection alias inside an "
+            return [], (f"{clause} {key.sql(dialect)} uses a projection alias inside an "
                         f"expression — resolution is engine-specific")
-        terms.append(render(q_term, dialect))
-    return terms, None
+        out.append(render(q_term, dialect))
+    return out, None
 
 
 def _render_bound(select: exp.Select, ordering: list[str], dialect: str) -> str | None:

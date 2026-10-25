@@ -63,19 +63,25 @@ def test_transformed_or_renamed_projection_outside_the_boundary_is_unverifiable(
     headline_consistent(result)
 
 
-@pytest.mark.parametrize("projection, code", [
-    ("MEASURE(net_revenue) * 2 AS net_revenue", "transformed_governed_measure"),
-    ("AGG(net_revenue) * 2 AS net_revenue", "transformed_governed_measure"),
-    ("MEASURE(net_revenue) * 2 AS gross_revenue", "presented_under_other_name"),
-    ("AGG(net_revenue) * 2 AS gross_revenue", "presented_under_other_name"),
+@pytest.mark.parametrize("projection, kind, code", [
+    ("MEASURE(net_revenue) * 2 AS net_revenue", "definition_violation",
+     "transformed_governed_measure"),
+    ("AGG(net_revenue) * 2 AS net_revenue", "definition_violation",
+     "transformed_governed_measure"),
+    ("MEASURE(net_revenue) AS gross_revenue", "definition_violation",
+     "presented_under_other_name"),
+    # Under ANOTHER metric's name a derived expression may compute it exactly
+    # (round fifteen) — not decided, never a violation.
+    ("MEASURE(net_revenue) * 2 AS gross_revenue", "unverifiable", "implication_undecided"),
+    ("AGG(net_revenue) * 2 AS gross_revenue", "unverifiable", "implication_undecided"),
 ])
-def test_inside_the_boundary_the_violation_still_stands(tmp_path, projection, code):
+def test_inside_the_boundary_the_violation_still_stands(tmp_path, projection, kind, code):
     """Controls: a supported slice and grouping do not shield a transformation."""
     sql = f"SELECT channel, {projection} FROM {V} WHERE country = 'US' GROUP BY channel"
     result = run(tmp_path, _rows(sql), view_text=VIEW_WITH)
     (f,) = result["findings"]
-    assert f["kind"] == "definition_violation" and codes(f) == [code]
-    assert result["funnel"]["violations"] == 1
+    assert f["kind"] == kind and codes(f) == [code]
+    assert result["funnel"]["violations"] == (1 if kind == "definition_violation" else 0)
     headline_consistent(result)
 
 

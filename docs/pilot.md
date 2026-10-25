@@ -40,14 +40,23 @@ catalog: catalog.yml
 asset_map: {"dashboard:01ef…": net_revenue}   # optional identity hints
 ```
 
-Unknown keys are refused. `compare_against` is required, because the two modes make
-different claims:
+Unknown keys are refused, and so is a window whose `from` is not before its `to`.
+`compare_against` is required, because the two modes make different claims:
 
-- **`as_of_execution`**: every view needs `applies.from`. An execution whose
-  `start_time` falls outside its definition's window, or that has no start time, is
-  unverifiable ("no definition evidence for execution time").
-- **`current`**: no windows are needed, and every finding says "compared against the
+- **`as_of_execution`**: every view needs `applies.from`. Every match is drawn from the
+  definitions whose window covers the execution; an expired definition is never
+  matched, and versions that never apply at the same time are not "contested". An
+  execution no window covers, one with no start time, or one whose start time cannot
+  be read is unverifiable, and the report says which. Windows compare at nanosecond
+  precision (`applies.to` is exclusive). An approved definition that applies but could
+  not be read makes a claim on it unverifiable ("could not be read"), never "missing".
+- **`current`**: no windows are needed. Findings are judged against the definitions
+  still applicable (no `applies.to`), and every finding says "compared against the
   definition snapshot taken …; not verified as of execution time".
+
+The `window` is applied: executions outside it are not judged, and are counted in the
+report (`executions_outside_window`), so an export that does not match its package
+shows itself.
 
 ## Steps
 
@@ -87,6 +96,17 @@ The published Databricks history schema has no per-query default catalog or sche
 Assert a context only when it holds for the whole export, for example when every
 dashboard in the window runs against one catalog and schema. The report states whether
 a context was asserted.
+
+A statement that follows a session-changing one in the same execution (`USE`, `SET`,
+`CREATE [TEMP] VIEW`, any other non-query statement) has no established relation
+identity and is unverifiable; the report counts them
+(`statements_after_session_change`).
+
+**Identity.** A query is judged as the metric it claims. A `-- semantix: metric=<name>`
+comment names only the statement it is written on. A query tag or an `asset_map` entry
+belongs to the execution and names a metric only when the execution holds one query.
+Otherwise the projection's own alias is the claim, including aliases that look
+generated (`sum_revenue`) when the analyst wrote them.
 
 ## Reading the report
 

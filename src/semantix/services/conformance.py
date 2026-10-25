@@ -427,37 +427,83 @@ def _settle(boundary: list[dict], violations: list[dict], undecided: list[dict],
 
 def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list[str],
                  parsed: dict[str, exp.Expression], dialect: str) -> dict | None:
-    """A provable change to a required condition, or None (not decided)."""
+    """A provable change to a required condition, or None (not decided).
+
+    Decided by VALUE, never by literal text: `discount = 0.0`, `0E0` and
+    `CAST(0 AS DOUBLE)` select the rows `discount = 0` selects, and
+    `IN ('completed', NULL)` admits nothing more than 'completed' — all were
+    called replaced or broadened. A comparison whose literal kinds differ
+    (a string against a number) depends on coercion and is not decided."""
+    rcols = _columns(rnode)
     for x in related:
         node = _unparen(parsed[x])
         if isinstance(node, exp.Or):
             disjuncts = list(node.flatten())
             if r in {render(_unparen(d), dialect) for d in disjuncts}:
-                others = set().union(*(_columns(d) for d in disjuncts
-                                       if render(_unparen(d), dialect) != r))
-                constrained = any(_columns(parsed[y]) & others
+                others = [d for d in disjuncts if render(_unparen(d), dialect) != r]
+                other_cols = set().union(*(_columns(d) for d in others))
+                # Weakened only if another branch can admit rows the required
+                # condition excludes: a branch on the required column itself
+                # (`status = 'completed' AND …`) may imply it, and a branch
+                # that compares with NULL admits nothing.
+                independent = (not (other_cols & rcols)
+                               and not any(d.find(exp.Null) for d in others))
+                constrained = any(_columns(parsed[y]) & other_cols
                                   for y in extras if y != x)
-                if not constrained:
+                if independent and not constrained:
                     return _reason("required_filter_not_preserved",
                                    f"required condition {r} is weakened through OR: {x}")
     eq = _column_equals_literal(rnode)
     if eq is not None and len(related) == 1:
         col, lit = eq
+        want = _literal_value(lit)
         node = _unparen(parsed[related[0]])
-        if isinstance(node, exp.In) and not node.args.get("query") \
+        if want is not None and isinstance(node, exp.In) and not node.args.get("query") \
                 and _same_column(node.this, col) \
                 and all(_is_literal(e) for e in node.expressions):
-            values = {e.sql() for e in node.expressions}
-            if lit.sql() in values and len(values) > 1:
+            values = [_literal_value(e) for e in node.expressions
+                      if not isinstance(_unparen(e), exp.Null)]
+            if values and all(v is not None and v[0] == want[0] for v in values) \
+                    and want in values and any(v != want for v in values):
                 return _reason("required_filter_not_preserved",
                                f"required condition {r} is broadened: {related[0]} "
                                f"admits values the definition excludes")
         other = _column_equals_literal(node)
-        if other is not None and _same_column(other[0], col) and other[1].sql() != lit.sql():
-            return _reason("required_filter_not_preserved",
-                           f"required condition {r} is replaced: {related[0]} selects "
-                           f"rows the definition excludes")
+        if want is not None and other is not None and _same_column(other[0], col):
+            got = _literal_value(other[1])
+            if got is not None and got[0] == want[0] and got != want:
+                return _reason("required_filter_not_preserved",
+                               f"required condition {r} is replaced: {related[0]} selects "
+                               f"rows the definition excludes")
     return None
+
+
+def _literal_value(node: exp.Expression) -> tuple[str, object] | None:
+    """("num", Decimal) or ("str", text) for a literal (through casts that do
+    not change its kind), else None — never decided from SQL text."""
+    import decimal
+
+    node = _unparen(node)
+    negate = False
+    while isinstance(node, (exp.Neg, exp.Cast, exp.TryCast, exp.Paren)):
+        if isinstance(node, exp.Neg):
+            negate = not negate
+        elif isinstance(node, (exp.Cast, exp.TryCast)):
+            inner = _unparen(node.this)
+            to = node.args.get("to")
+            numeric_target = to is not None and to.is_type(*exp.DataType.NUMERIC_TYPES)
+            if isinstance(inner, exp.Literal) and inner.is_string == numeric_target:
+                return None   # the cast converts between kinds: coercion-dependent
+        node = node.this
+    if not isinstance(node, exp.Literal):
+        return None
+    if node.is_string:
+        return None if negate else ("str", node.name)
+    try:
+        value = decimal.Decimal(node.name)
+    except decimal.InvalidOperation:
+        return None
+    return ("num", -value if negate else value)
 
 
 # ----------------------------------------------------------------- shape B
@@ -697,8 +743,21 @@ def check_metric_view(stmt: exp.Expression,
         alias = proj.alias if isinstance(proj, exp.Alias) and proj.alias else None
         output = alias.lower() if alias else None
         written = inner.sql(dialect)
-        bare = (inner is calls_here[0] and len(calls_here) == 1
-                and isinstance(measure_ref(inner)[1], exp.Column))
+        core_expr = _unparen(inner)   # `(MEASURE(m))` is still a bare reference
+        bare = (core_expr is calls_here[0] and len(calls_here) == 1
+                and isinstance(measure_ref(core_expr)[1], exp.Column))
+        if len(calls_here) > 1:
+            # One projection is one measure use, however many governed
+            # measures it combines; a derived expression is never judged as
+            # any one of them.
+            fn, arg = measure_ref(calls_here[0])
+            first = arg.name.lower() if isinstance(arg, exp.Column) else "?"
+            out.append(ViewProjection(first, output, unverifiable(
+                "derived_expression",
+                f"{output or written} = {written} combines governed measures; whether it "
+                f"equals any one definition is not decided", shape="B"),
+                expression=written))
+            continue
 
         def emit(m: str, outcome: Outcome) -> None:
             out.append(ViewProjection(m, output, outcome, expression=written))

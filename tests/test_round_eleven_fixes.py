@@ -51,8 +51,10 @@ def one(sql, start_time=T_IN):
     (VIEW_RENAMED, OUTSIDE, "unverifiable", "no_definition_evidence"),
     (VIEW_RENAMED, None, "unverifiable", "no_definition_evidence"),
     (VIEW_RENAMED + " TABLESAMPLE (50 PERCENT)", T_IN, "unverifiable", "shape_unsupported"),
+    # A derived expression under another metric's name may compute that
+    # metric exactly (round fifteen): not decided, never a violation.
     ("SELECT MEASURE(net_revenue) * 2 AS gross_revenue FROM main.finance.revenue_mv",
-     T_IN, "definition_violation", "presented_under_other_name"),
+     T_IN, "unverifiable", "implication_undecided"),
     ("SELECT MEASURE(net_revenue) * 2 AS gross_revenue FROM main.finance.revenue_mv",
      OUTSIDE, "unverifiable", "no_definition_evidence"),
 ])

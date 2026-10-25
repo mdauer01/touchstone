@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer import optimize
+from sqlglot.optimizer.pushdown_projections import pushdown_projections
 from sqlglot.optimizer.qualify import qualify
 
 from semantix.models import CanonLevel
@@ -97,6 +98,21 @@ def _has_distinct_on(select: exp.Select) -> bool:
     return isinstance(distinct, exp.Expression) and bool(distinct.args.get("on"))
 
 
+def _inherits_input_order(select: exp.Select) -> bool:
+    """A select whose surviving rows depend on the order of its INPUT.
+
+    DISTINCT ON keeps one row per key: unless its own ORDER BY breaks every
+    tie, the input order decides which — and an ORDER BY that only repeats
+    the key breaks none (it certified asc/desc staging CTEs as equal). Not
+    being able to prove the ties broken, every DISTINCT ON counts. A
+    LIMIT/OFFSET with no ORDER BY of its own keeps whichever rows arrive
+    first, so top-N and bottom-N over an ordered CTE certified equal."""
+    if _has_distinct_on(select):
+        return True
+    bounded = select.args.get("limit") is not None or select.args.get("offset") is not None
+    return bounded and select.args.get("order") is None
+
+
 def _order_sensitive_names(parsed: exp.Expression) -> set[str]:
     """Normalized names of order-sensitive functions used OUTSIDE windows.
 
@@ -150,8 +166,7 @@ def _pre_optimization_gaps(parsed: exp.Expression, dialect: str) -> tuple[str, .
     # DISTINCT ON without its own ORDER BY is a consumer too — the gate
     # enumerated only functions and windows here, so the chain below was
     # never even examined for it and asc/desc variants certified equal.
-    inherits_order = any(_has_distinct_on(s) and s.args.get("order") is None
-                         for s in parsed.find_all(exp.Select))
+    inherits_order = any(_inherits_input_order(s) for s in parsed.find_all(exp.Select))
     if not (_order_sensitive_names(parsed) or _window_gaps(parsed) or inherits_order):
         return ()
     # The gap fires only when an inner ORDER BY sits in a scope a consumer
@@ -201,6 +216,11 @@ def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
     _pin_short_references(parsed, schema)
     _strip_neutral(parsed)
     pre_gaps = pre_gaps + _resolve_group_ordinals(parsed)
+    # GROUP BY ALL / ORDER BY ALL mean "every projection": spelled out before
+    # projection pruning can remove the very projections they stand for.
+    pre_gaps = pre_gaps + _expand_all_shorthand(parsed)
+    pre_gaps = pre_gaps + _ambiguous_output_refs(parsed, schema, dialect)
+    pre_gaps = pre_gaps + _pruning_hazards(parsed, schema, dialect)
 
     error = None
     try:
@@ -351,7 +371,7 @@ def _order_bearing_selects(ast: exp.Expression) -> set[int]:
         # keep-set; both STRIPPING sites knew this, the consumer enumeration
         # did not, and asc/desc variants certified equal.
         for select in ast.find_all(exp.Select):
-            if _has_distinct_on(select) and select.args.get("order") is None:
+            if _inherits_input_order(select):
                 out.append(select)
         return out
 
@@ -633,3 +653,191 @@ def _normalize_symmetric(ast: exp.Expression, dialect: str) -> exp.Expression:
         return node
 
     return norm(ast)
+
+
+def _is_all(node: exp.Expression | None) -> bool:
+    return isinstance(node, (exp.Var, exp.Column)) and not getattr(node, "table", None) \
+        and str(node.name).upper() == "ALL"
+
+
+_CONSTANT_NODES = (exp.Literal, exp.Null, exp.Boolean, exp.Neg, exp.Paren, exp.Cast,
+                   exp.TryCast, exp.DataType, exp.DataTypeParam)
+
+
+def _is_constant(node: exp.Expression) -> bool:
+    """Literals and casts of literals only — not `RANDOM()` or `NOW()`."""
+    return all(isinstance(n, _CONSTANT_NODES) for n in node.walk())
+
+
+def _has_aggregate(node: exp.Expression) -> bool:
+    return any(a.find_ancestor(exp.Window) is None for a in node.find_all(exp.AggFunc))
+
+
+def _expand_all_shorthand(ast: exp.Expression) -> tuple[str, ...]:
+    """Spell GROUP BY ALL and ORDER BY ALL out as the projections they mean.
+
+    sqlglot's projection pruning removes CTE projections the outer query
+    does not read; it guards DISTINCT and ORDER BY column references, not
+    these shorthands. Pruned, a CTE `GROUP BY ALL` over (country, refund)
+    collapsed to grouping by nothing, and `ORDER BY ALL LIMIT 1` lost its
+    sort keys — and at the top level ORDER BY ALL was recorded as the bare
+    word ALL. Explicit expressions survive pruning and resolve like any
+    other term. A shorthand over `*` or a window cannot be spelled out here,
+    so it is a gap."""
+    gaps: list[str] = []
+    for select in list(ast.find_all(exp.Select)):
+        projections = list(select.expressions)
+        unknowable = any(isinstance(p, exp.Star) or (isinstance(p, exp.Column)
+                                                      and isinstance(p.this, exp.Star))
+                         or p.find(exp.Window) is not None for p in projections)
+        bare = [p.this if isinstance(p, exp.Alias) else p for p in projections]
+        # A constant key orders/groups nothing beside other keys, and spelled
+        # out as an integer it would be re-read as an ORDINAL — so constants
+        # are dropped. A grouping made ONLY of constants is not the same as
+        # no grouping (an empty input yields no row instead of one): a gap.
+        keys = [b for b in bare if not _has_aggregate(b) and not _is_constant(b)]
+        group = select.args.get("group")
+        if group is not None and group.args.get("all"):
+            constants_only = not keys and any(not _has_aggregate(b) for b in bare)
+            if unknowable or constants_only:
+                gaps.append("GROUP BY ALL over *, a window or only constants — its keys "
+                            "are not established")
+            elif keys:
+                group.set("all", None)
+                group.set("expressions", [k.copy() for k in keys])
+            else:
+                select.set("group", None)   # nothing to group by: a total
+        order = select.args.get("order")
+        if order is not None and any(_is_all(o.this if isinstance(o, exp.Ordered) else o)
+                                     for o in order.expressions):
+            if unknowable:
+                gaps.append("ORDER BY ALL over * or a window — its keys are not established")
+                continue
+            expanded: list[exp.Expression] = []
+            for o in order.expressions:
+                key = o.this if isinstance(o, exp.Ordered) else o
+                if not _is_all(key):
+                    expanded.append(o)
+                    continue
+                for b in bare:
+                    if _is_constant(b):
+                        continue
+                    term = o.copy() if isinstance(o, exp.Ordered) else exp.Ordered()
+                    term.set("this", b.copy())
+                    expanded.append(term)
+            order.set("expressions", expanded)
+    return tuple(gaps)
+
+
+def _output_names(select: exp.Select, schema, bodies: dict, dialect: str,
+                  depth: int = 0) -> set[str] | None:
+    """Lower-cased output column names of a select, or None if unknowable."""
+    if depth > 8:
+        return None
+    names: set[str] = set()
+    for p in select.expressions:
+        star = isinstance(p, exp.Star) or (isinstance(p, exp.Column)
+                                           and isinstance(p.this, exp.Star))
+        if star:
+            inner = _source_names(select, schema, bodies, dialect, depth + 1)
+            if inner is None:
+                return None
+            names |= inner
+        else:
+            names.add(p.alias_or_name.lower())
+    return names
+
+
+def _source_names(select: exp.Select, schema, bodies: dict, dialect: str,
+                  depth: int = 0) -> set[str] | None:
+    """Lower-cased column names a select's FROM/JOIN sources provide."""
+    names: set[str] = set()
+    for src in scope_sources(select):
+        if isinstance(src, exp.Table):
+            key = src.name.lower()
+            if not src.args.get("db") and key in bodies:
+                body = unwrap_select(bodies[key])
+                got = _output_names(body, schema, bodies, dialect, depth + 1) if body else None
+            else:
+                try:
+                    got = {c.lower() for c in schema.column_names(src, dialect=dialect)}
+                except Exception:  # noqa: BLE001 — unknown table: not knowable here
+                    got = None
+                got = got or None
+        elif isinstance(src, exp.Subquery):
+            body = unwrap_select(src.this)
+            got = _output_names(body, schema, bodies, dialect, depth + 1) if body else None
+        else:
+            got = None
+        if got is None:
+            return None
+        names |= got
+    return names
+
+
+def _ambiguous_output_refs(ast: exp.Expression, schema, dialect: str) -> tuple[str, ...]:
+    """A HAVING or QUALIFY name that is BOTH a projection alias and a source
+    column binds differently across engines: sqlglot's alias expansion
+    rewrites it to the projection, while DuckDB binds the source column in
+    several positions (a grouped key, an aggregate's argument, a window's
+    PARTITION BY). The core then stated a predicate the SQL does not apply.
+    An alias that is the identity of the same-named column is unambiguous.
+    WHERE and GROUP BY bind the source column in both, so they are left
+    alone."""
+    if not hasattr(schema, "column_names"):
+        return ()
+    bodies = {cte.alias_or_name.lower(): cte.this for cte in ast.find_all(exp.CTE)}
+    for select in ast.find_all(exp.Select):
+        aliases = {p.alias.lower() for p in select.expressions
+                   if isinstance(p, exp.Alias) and p.alias
+                   and not (isinstance(p.this, exp.Column) and not p.this.table
+                            and p.this.name.lower() == p.alias.lower())}
+        if not aliases:
+            continue
+        refs = set()
+        for clause in (select.args.get("having"), select.args.get("qualify")):
+            if clause is None:
+                continue
+            refs |= {c.name.lower() for c in clause.find_all(exp.Column)
+                     if not c.table and c.find_ancestor(exp.Select) is select}
+        hit = refs & aliases
+        if not hit:
+            continue
+        sources = _source_names(select, schema, bodies, dialect)
+        if sources is None or hit & sources:
+            names = ", ".join(sorted(hit & sources if sources else hit))
+            return (f"HAVING/QUALIFY name {names} is both a projection alias and a source "
+                    f"column — engines bind it differently",)
+    return ()
+
+
+def _pruning_hazards(ast: exp.Expression, schema, dialect: str) -> tuple[str, ...]:
+    """Run the optimizer's projection pruning on a copy and see what it does
+    to aggregate subqueries. An UNGROUPED aggregate (`SELECT 'all' AS seg,
+    SUM(x) AS total FROM t`, one row) whose aggregate output nobody reads is
+    pruned to `SELECT 'all' AS seg FROM t` — one row per input — and then
+    certified equal to a plain table scan (COUNT(*) 1 vs 5). Detected, not
+    repaired: the measure over it is not proof grade."""
+    outermost = unwrap_select(ast)
+    candidates = [s for s in ast.find_all(exp.Select)
+                  if s is not outermost and s.args.get("group") is None
+                  and any(_has_aggregate(p) for p in s.expressions)]
+    if not candidates:
+        return ()
+    try:
+        copy = qualify(ast.copy(), schema=schema, dialect=dialect)
+    except Exception:  # noqa: BLE001 — optimize will degrade for the same reason
+        return ()
+    outer = unwrap_select(copy)
+    marked = [s for s in copy.find_all(exp.Select)
+              if s is not outer and s.args.get("group") is None
+              and any(_has_aggregate(p) for p in s.expressions)]
+    try:
+        pushdown_projections(copy, schema=schema, dialect=dialect)
+    except Exception:  # noqa: BLE001
+        return ()
+    for select in marked:
+        if not any(_has_aggregate(p) for p in select.expressions):
+            return ("an aggregate subquery loses its only aggregate to projection "
+                    "pruning — its row count changes (one row becomes one per input)",)
+    return ()

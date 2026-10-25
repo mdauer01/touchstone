@@ -237,8 +237,10 @@ EQUIV = VIEW.format(extra="") + ("  - name: total_revenue\n"
      "conforming_use"),
     ("SELECT channel, MEASURE(net_revenue) AS total_revenue FROM main.finance.revenue_mv "
      "WHERE country = 'US' GROUP BY channel", "conforming_use"),
+    # A transformation under another approved name is not decided (round
+    # fifteen: it can compute that metric exactly).
     ("SELECT MEASURE(net_revenue) * 2 AS total_revenue FROM main.finance.revenue_mv",
-     "definition_violation"),
+     "unverifiable"),
     ("SELECT MEASURE(net_revenue) AS gross_revenue FROM main.finance.revenue_mv",
      "definition_violation"),
     (f"SELECT {GOVERNED} AS total_revenue FROM main.finance.orders "
