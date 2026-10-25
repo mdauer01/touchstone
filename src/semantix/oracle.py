@@ -443,3 +443,282 @@ def run_oracle(full: bool = False) -> OracleReport:
             report.self_test_failures.append({"estate": estate, "a": a, "b": b,
                                               "why": "no dataset tells these apart"})
     return report
+
+
+# --------------------------------------------- conformance challenger ------
+#
+# The monitor's CONFORMING verdict comes from bounded rules
+# (services.conformance), not from execution. This section challenges those
+# rules: every query the rules call a conforming variation of an authority
+# is executed against the expected query — the authority's measure over its
+# base table under its required filters AND the variation the rules
+# identified — on every adversarial dataset, exactly. A disagreement means
+# the rules mis-decomposed the query (a conjunct that was not one, a
+# grouping term that was not a dimension, NULL semantics). Generated near
+# misses — weakened, dropped, broadened or replaced required filters,
+# transformed or changed measures, undeclared slices, unsupported shapes —
+# must never come out conforming.
+#
+# What agreement establishes, stated plainly: that on these datasets the
+# rules' decomposition held. It does not prove the rules correct in general,
+# and it says nothing about whether a slice is PERMITTED — that is policy,
+# covered by the acceptance tests. Shape B (MEASURE() over a metric view) is
+# Databricks-only and is not executed here.
+
+CONFORMANCE_AUTHORITIES = [
+    {"name": "net_revenue", "expr": "SUM(amount) - SUM(refund_amount)",
+     "filters": ["status = 'completed'"],
+     "dimensions": ["channel", "order_date", "customer_id", "qty",
+                    ("month", "DATE_TRUNC('MONTH', order_date)")]},
+    {"name": "units", "expr": "SUM(qty)", "filters": ["status <> 'cancelled'"],
+     "dimensions": ["channel", "order_date", "customer_id"]},
+    {"name": "orders_count", "expr": "COUNT(*)",
+     "filters": ["status = 'completed'", "channel IS NOT NULL"],
+     "dimensions": ["channel", "order_date"]},
+]
+CONFORMANCE_SLICES = [
+    "channel = 'web'", "channel IN ('web', 'app')", "NOT channel = 'web'",
+    "channel IS NULL", "channel IS NOT NULL", "channel <> 'app'",
+    "customer_id BETWEEN 10 AND 11", "customer_id IN (10, 12)",
+    "order_date >= DATE '2026-02-01'", "order_date < CAST('2026-03-01' AS DATE)",
+    "DATE_TRUNC('MONTH', order_date) = DATE '2026-01-01'",
+    "(channel = 'web' OR customer_id = 11)", "NOT (channel = 'web' AND customer_id = 10)",
+    "qty > 1", "qty IS NULL",
+    "order_date >= CURRENT_DATE - INTERVAL 36500 DAY",
+]
+CONFORMANCE_GRAINS = [
+    [], ["channel"], ["DATE_TRUNC('MONTH', order_date)"], ["channel", "customer_id"],
+    ["order_date"], ["customer_id", "DATE_TRUNC('MONTH', order_date)"],
+]
+
+
+@dataclass
+class ConformanceReport:
+    queries: int = 0
+    conforming: int = 0
+    executions: int = 0
+    near_misses: int = 0
+    near_miss_conformed: list[dict] = field(default_factory=list)
+    # Generated ordinary cases are the authority's own definition under
+    # declared-dimension slices and groupings — legitimate by construction —
+    # so a VIOLATION verdict on one is a false accusation.
+    false_accusations: list[dict] = field(default_factory=list)
+    mismatches: list[dict] = field(default_factory=list)
+    self_test_failures: list[dict] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not (self.near_miss_conformed or self.false_accusations
+                    or self.mismatches or self.self_test_failures)
+
+
+def _conformance_authorities():
+    from semantix.adapters.base import DeclaredSpec, DimensionSpec
+    from semantix.engine import build_claim
+    from semantix.services.conformance import Authority
+
+    registry = SchemaRegistry(MAIN_CATALOG)
+    registry.set_estate_depth([_O])
+    out = []
+    for a in CONFORMANCE_AUTHORITIES:
+        dims = []
+        for d in a["dimensions"]:
+            if isinstance(d, tuple):
+                dims.append(DimensionSpec(name=d[0], expr=d[1], column="order_date",
+                                          truncation="MONTH", supported=True))
+            else:
+                dims.append(DimensionSpec(name=d, expr=d, column=d, supported=True))
+        spec = DeclaredSpec(system="oracle", name=a["name"], model=_O, expr=a["expr"],
+                            filters=list(a["filters"]), dimensions=dims)
+        claim = build_claim(spec, registry, DIALECT)
+        if not claim.expressible or claim.core is None:
+            raise RuntimeError(f"oracle authority {a['name']} is not expressible: {claim.error}")
+        out.append((a, Authority(concept=a["name"], system="oracle", name=a["name"],
+                                 core=claim.core, dimensions=dims)))
+    return registry, out
+
+
+def _dimension_columns(a: dict) -> set[str]:
+    return {d if isinstance(d, str) else "order_date" for d in a["dimensions"]}
+
+
+def _slice_columns(text: str) -> set[str]:
+    import sqlglot
+    from sqlglot import exp
+
+    return {c.name.lower() for c in sqlglot.parse_one(text, read=DIALECT).find_all(exp.Column)}
+
+
+def _qualified(text: str, alias: str) -> str:
+    import sqlglot
+
+    from semantix.extraction.sqlutil import requalify_columns
+
+    node = sqlglot.parse_one(text, read=DIALECT)
+    requalify_columns(node, alias, only_qualified=False)
+    return node.sql(dialect=DIALECT)
+
+
+def _conformance_query(a: dict, grain: list[str], where: list[str], measure: str | None = None,
+                       tail: str = "") -> str:
+    sel = "".join(f"{g}, " for g in grain)
+    sql = f"SELECT {sel}{measure or a['expr']} AS m FROM {_O}"
+    if where:
+        sql += " WHERE " + " AND ".join(f"({w})" for w in where)
+    if grain:
+        sql += " GROUP BY " + ", ".join(grain)
+    return sql + tail
+
+
+def generate_conformance_cases(full: bool = False) -> list[tuple[dict, str, bool]]:
+    """(authority, observed SQL, must_not_conform) triples."""
+    from itertools import combinations
+
+    cases: list[tuple[dict, str, bool]] = []
+    for a in CONFORMANCE_AUTHORITIES:
+        dims = _dimension_columns(a)
+        slices = [s for s in CONFORMANCE_SLICES if _slice_columns(s) <= dims]
+        grains = [g for g in CONFORMANCE_GRAINS
+                  if set().union(*(_slice_columns(t) for t in g)) <= dims]
+        width = 3 if full else 2
+        combos = [list(c) for n in range(width + 1) for c in combinations(slices, n)]
+        if not full:
+            combos = combos[: 1 + len(slices) + 12]
+        required = list(a["filters"])
+        for grain in grains:
+            for combo in combos:
+                cases.append((a, _conformance_query(a, grain, required + combo), False))
+        # Required filters in other spellings: conform only if canonicalization
+        # makes them the declared conjunct; executed either way when they do.
+        for r in required:
+            col, _, rest = r.partition(" ")
+            if rest.startswith("= "):
+                flipped = f"{rest[2:]} = {col}"
+                cases.append((a, _conformance_query(a, [], [flipped] + [x for x in required if x != r]), False))
+        # The required filter moved INTO the measure (FILTER / CASE) computes the
+        # same numbers: it may be unverifiable, never a violation.
+        if a["name"] == "net_revenue":
+            for moved in ("SUM(amount) FILTER (WHERE status = 'completed') - "
+                          "SUM(refund_amount) FILTER (WHERE status = 'completed')",
+                          "SUM(CASE WHEN status = 'completed' THEN amount END) - "
+                          "SUM(CASE WHEN status = 'completed' THEN refund_amount END)"):
+                cases.append((a, _conformance_query(a, [], [], measure=moved), False))
+                cases.append((a, _conformance_query(a, ["channel"], required, measure=moved),
+                              False))
+        # Near misses: none may conform.
+        near: list[str] = []
+        for i, r in enumerate(required):
+            others = required[:i] + required[i + 1:]
+            near.append(_conformance_query(a, [], others))                                  # dropped
+            near.append(_conformance_query(a, [], [f"{r} OR channel = 'web'"] + others))   # OR-weakened
+            near.append(_conformance_query(a, ["channel"], [f"{r} OR customer_id = 11"] + others))
+            if r == "status = 'completed'":
+                near.append(_conformance_query(a, [], ["status IN ('completed', 'pending')"] + others))
+                near.append(_conformance_query(a, [], ["status = 'pending'"] + others))
+            if r == "status <> 'cancelled'":
+                near.append(_conformance_query(a, [], ["status <> 'pending'"] + others))
+        for m in (f"({a['expr']}) * 2", f"ROUND({a['expr']}, 2)", f"{a['expr']} + 1"):
+            near.append(_conformance_query(a, [], required, measure=m))
+        changed = {"net_revenue": "SUM(amount - refund_amount)", "units": "SUM(qty * 1.0)",
+                   "orders_count": "COUNT(channel)"}[a["name"]]
+        near.append(_conformance_query(a, [], required, measure=changed))
+        for undeclared in ("amount > 0", "refund_amount = 0", "status <> 'refunded'"):
+            if _slice_columns(undeclared) <= dims:
+                continue
+            q = _conformance_query(a, [], required + [undeclared])
+            if undeclared == "status <> 'refunded'" and "status = 'completed'" in required:
+                # IMPLIED by the required filter, and the optimizer proves it
+                # away: the core equals the definition's, so this one may
+                # conform (exactly) — and is then executed like any other.
+                cases.append((a, q, False))
+            else:
+                near.append(q)
+        near.append(_conformance_query(a, ["channel"], required,
+                                       tail=f" HAVING {a['expr']} > 0"))
+        near.append(_conformance_query(a, [], required, tail=" LIMIT 1"))
+        near.append(f"SELECT {_qualified(a['expr'], 'o')} AS m "
+                    f"FROM {_O} o JOIN {_C} c ON o.customer_id = c.customer_id "
+                    f"WHERE " + " AND ".join(f"({_qualified(x, 'o')})" for x in required))
+        cases += [(a, q, True) for q in near]
+    return cases
+
+
+def _expected_sql(auth, outcome) -> str:
+    where = list(auth.core.filters) + list(outcome.variation["slices"])
+    grain = list(outcome.variation["grain"])
+    sql = f"SELECT {''.join(f'{g}, ' for g in grain)}{auth.core.measure_expr} AS m FROM {_O}"
+    if where:
+        sql += " WHERE " + " AND ".join(f"({w})" for w in where)
+    if grain:
+        sql += " GROUP BY " + ", ".join(grain)
+    return sql
+
+
+def _same_rows(r1, r2) -> bool:
+    """Exact agreement up to column ORDER within a row: the expected query
+    projects grouping terms in canonical order, the observed one in its own."""
+    if r1[0] == "error" or r2[0] == "error":
+        return r1[0] == r2[0]
+    def rows(r):
+        return sorted((tuple(sorted(row, key=lambda v: _key((v,)))) for row in r[1]), key=_key)
+    return rows(r1) == rows(r2)
+
+
+def run_conformance_oracle(full: bool = False) -> ConformanceReport:
+    import sqlglot
+
+    from semantix.services.conformance import check_raw, raw_shape_problem
+
+    registry, authorities = _conformance_authorities()
+    by_name = {a["name"]: auth for a, auth in authorities}
+    schema = registry.sqlglot_schema(DIALECT)
+    report = ConformanceReport()
+    to_execute: list[tuple[str, str, str]] = []   # (observed, expected, authority)
+    for a, sql, must_not in generate_conformance_cases(full):
+        report.queries += 1
+        auth = by_name[a["name"]]
+        canon = canonicalize_sql(sql, schema, DIALECT)
+        fps = extract_fingerprints(canon, "oracle.q", Provenance("oracle", "c"),
+                                   DIALECT, registry)
+        if len(fps) != 1 or fps[0].canon_level not in PROOF_LEVELS or fps[0].gaps:
+            continue
+        stmt = sqlglot.parse_one(sql, read=DIALECT)
+        outcome = check_raw(fps[0].core, auth, DIALECT, raw_shape_problem(stmt))
+        if must_not:
+            report.near_misses += 1
+            if outcome.status == "conforming":
+                report.near_miss_conformed.append({"authority": a["name"], "sql": sql,
+                                                   "outcome": outcome.as_dict()})
+            continue
+        if outcome.status == "violation":
+            report.false_accusations.append({"authority": a["name"], "sql": sql,
+                                             "outcome": outcome.as_dict()})
+        if outcome.status == "conforming":
+            report.conforming += 1
+            to_execute.append((sql, _expected_sql(auth, outcome), a["name"]))
+    # Poisoned self-test: a dropped required filter, planted as conforming
+    # with no variation, must be caught by execution.
+    poison_obs = f"SELECT {CONFORMANCE_AUTHORITIES[0]['expr']} AS m FROM {_O}"
+    poison_exp = _conformance_query(CONFORMANCE_AUTHORITIES[0], [],
+                                    CONFORMANCE_AUTHORITIES[0]["filters"])
+    poison_caught = False
+    for dataset in DATASETS:
+        con = _connect("main", dataset)
+        try:
+            for observed, expected, name in to_execute:
+                report.executions += 1
+                r_obs, r_exp = _run(con, observed), _run(con, expected)
+                if not _same_rows(r_obs, r_exp):
+                    report.mismatches.append({"authority": name, "dataset": dataset,
+                                              "observed": observed, "expected": expected,
+                                              "result_observed": r_obs,
+                                              "result_expected": r_exp})
+            if not _same_rows(_run(con, poison_obs), _run(con, poison_exp)):
+                poison_caught = True
+        finally:
+            con.close()
+    if not poison_caught:
+        report.self_test_failures.append({"sql": poison_obs,
+                                          "why": "a dropped required filter executed "
+                                                 "identically on every dataset"})
+    return report

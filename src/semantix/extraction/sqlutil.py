@@ -108,3 +108,21 @@ def flatten_conjuncts(node: exp.Expression | None) -> list[exp.Expression]:
     if isinstance(node, exp.And):
         return list(node.flatten())
     return [node]
+
+
+_TRUNCATIONS = (exp.DateTrunc, exp.TimestampTrunc, exp.DatetimeTrunc)
+
+
+def truncation_of(node: exp.Expression) -> tuple[str, exp.Column] | None:
+    """(UNIT, column) when `node` is DATE_TRUNC('<unit>', <bare column>) in
+    any spelling sqlglot normalizes it to; None for anything else. A
+    truncation of an expression, or with a non-literal unit, is not one."""
+    if not isinstance(node, _TRUNCATIONS):
+        return None
+    unit = node.args.get("unit")
+    target = node.this
+    if not isinstance(target, exp.Column):
+        return None
+    if isinstance(unit, (exp.Var, exp.Literal)) and unit.name:
+        return unit.name.upper(), target
+    return None

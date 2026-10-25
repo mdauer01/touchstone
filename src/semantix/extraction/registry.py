@@ -11,6 +11,8 @@ Serves two jobs:
 
 from __future__ import annotations
 
+import copy
+
 from sqlglot import exp
 from sqlglot.schema import MappingSchema
 
@@ -202,6 +204,18 @@ class SchemaRegistry:
     @property
     def execution_context(self) -> dict[str, str | None]:
         return {"default_database": self._context[0], "default_schema": self._context[1]}
+
+    def without_context(self) -> "SchemaRegistry":
+        """The same catalog and models with NO session defaults. A query-history
+        export mixes sessions: the context the operator supplied for the
+        estate's models says nothing about which table a dashboard's short
+        name read, so history statements resolve through this view and get
+        context only from their own row (or an explicit assertion)."""
+        clone = copy.copy(self)
+        clone._context = (None, None)
+        clone._schema_cache = {}
+        clone._known_prefixes = {k: set(v) for k, v in self._known_prefixes.items()}
+        return clone
 
     def expand(self, relation: str) -> str:
         """Fill omitted LEADING qualifiers from the supplied execution context

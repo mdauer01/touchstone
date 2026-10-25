@@ -75,7 +75,7 @@ warehouse, and definitions the scan did not read.
 | --- | --- |
 | `pytest` | The suite, including one regression file per external review round |
 | `semantix bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal |
-| `semantix oracle` | Executes every pair the engine would certify equal against adversarial DuckDB data, compared exactly |
+| `semantix oracle` | Executes every pair the engine would certify equal against adversarial DuckDB data, compared exactly; then executes every query the monitor's rules call conforming against its definition plus the identified variation |
 
 ## What is implemented
 
@@ -217,30 +217,63 @@ seam, and unsupported schemes say so instead of silently degrading.
 introduced* verdicts (plus what the change resolved) — per spec §6, the bot is never
 the messenger for pre-existing debt. `scan --fail-on` remains the absolute gate.
 
-### Monitor: alt definitions in the query stream
+### Monitor: governed use vs. changed definitions in the query stream
 
-The scan verifies the governed estate. `monitor` reads the other one — the
-query stream, where BI tools and analysts compute metrics registered nowhere:
+The scan verifies the governed estate. `monitor` reads what the warehouse actually
+executed — dashboards, notebooks, Genie, agents — and judges it against definitions an
+operator declared **authoritative**:
 
 ```bash
-.venv/bin/semantix monitor --db out/semantix.db \
-  --history-file history.sql \      # or --warehouse url --history-query "SELECT statement_text FROM system.query.history ..."
-  --dbt my_project --catalog catalog.yml [--min-runs 2] [--fail-on-alt]
+# A pilot package: approved metric views + their snapshots and definition windows,
+# a history export, and any session context you can vouch for (docs/pilot.md)
+.venv/bin/semantix monitor --db out/semantix.db --pilot pilot/ --dbt my_project
+
+# Or against the scan's declared definitions, from a history file or the warehouse
+.venv/bin/semantix monitor --db out/semantix.db --history-file history.jsonl \
+  --dbt my_project --catalog catalog.yml [--authority uc_metrics,dbt_metrics] \
+  [--min-runs 2] [--fail-on-alt]
 ```
 
-Every executed statement is canonicalized through the same registry the scan
-used and fingerprinted; recurring cores (`--min-runs` gates exploration from
-definition) are matched against the latest scan's certified reference set.
-Exact core equality → CONSISTENT USE. Same name, different math → NAMED ALT
-with the component diff ("missing filter `status = 'completed'`"). Same
-measure over the same columns under a different name → CANDIDATE ALT, ranked
-lower because it is a hypothesis — similarity nominates, only equality
-decides, and monitoring accuses a named person's dashboard. Recurring
-measures absent from the estate → UNREGISTERED. Queries below proof grade
-are counted and described, never compared — a blind spot must not anchor an
-accusation. Client-side math (spreadsheet pivots, non-pushdown calculated
-fields) never reaches the warehouse and is explicitly out of scope. v1 is
-read-only: findings are reported, not recorded.
+Most of what it sees is a governed metric used correctly: net revenue filtered to the US,
+grouped by channel. Some of it is a definition quietly changed. It tells them apart with
+**bounded rules** (`monitor-conformance/1`, [conformance.py](src/semantix/services/conformance.py)):
+
+| Finding | Meaning |
+| --- | --- |
+| CONFORMING | Exact canonical equality with an authoritative definition, **or** one of the listed shapes: the definition's own measure over its base table, every required filter kept as a top-level AND condition, extra conditions only on *supported declared dimensions*, grouping only by them — or a bare `MEASURE(m)` over an approved metric view, filtered and grouped by its dimensions |
+| VIOLATION | A true statement about the SQL as written: the measure changed or transformed, a required filter absent / weakened through OR / broadened / replaced, a slice on a column the model does not declare as a dimension, a different source, or a governed measure presented under another metric's name |
+| CANDIDATE | The same measure over the same columns, unnamed, that would be a violation — a hypothesis, ranked lower |
+| UNVERIFIABLE | Everything outside the rules, with the reason: joins, CTEs or joins around a governed calculation, HAVING/LIMIT/DISTINCT, unsupported dimension expressions, a short table name with no evidenced session context, no definition evidenced for the execution time, or a query below proof grade |
+| UNREGISTERED | A recurring measure no authoritative definition covers |
+
+Referencing an approved metric is tracked **separately** from preserving it:
+`MEASURE(net_revenue) * 2 AS net_revenue` is a governed reference *and* a violation. A
+filter on `amount` is permitted only when the governed model declares `amount` a
+dimension. A short table name resolves only from its own history row's catalog/schema, or
+from a context asserted to cover every execution (`--assert-context-for-all-executions`,
+or `execution_context.asserted_for_all_executions` in the pilot); otherwise it is
+unverifiable. Executions are counted once per statement id, and each finding carries who
+ran it and from which dashboard or Genie space.
+
+Every measure use lands in exactly one bucket, reported against an explicit denominator:
+
+```
+measure uses: 12 — every use counted once below; governed references counted alongside
+  governed references (MEASURE over approved view)        4/12 (33%)
+  conforming                                              4/12 (33%)  exact 0 · raw-table slice 2 · metric view 2
+  definition violations                                   4/12 (33%)
+  candidates (unnamed near misses)                        2/12 (17%)
+  unregistered                                            0/12 (0%)
+  unverifiable                                            2/12 (17%)  execution context 2
+  below recurrence threshold (≥2 runs; not judged)        0/12 (0%)
+  checked = conforming + violations                       8/12 (67%)
+```
+
+A conforming verdict asserts nothing beyond its rule set, which states what it does not
+cover; execution testing challenges the rules (see the execution oracle below) but does
+not establish them. Client-side math (spreadsheet pivots, non-pushdown calculated
+fields) never reaches the warehouse and is out of scope. v1 is read-only: findings are
+reported, not recorded.
 
 ### Agents Schema: claims in, receipts out
 
@@ -428,6 +461,21 @@ it reports none: 0 disagreements across 897 executed pairs by default and 91,769
 the full sweep, under exact comparison. Its scope is DuckDB execution of DuckDB-dialect SQL; the other
 dialects in the matrix are canonicalized by `bench`, not executed.
 
+The same command then challenges the monitor's conformance rules. It generates
+authority × slice × grouping variants plus near misses (required filters dropped,
+weakened through OR, broadened or replaced; transformed and changed measures; slices on
+undeclared columns; HAVING, LIMIT, joins). Every query the rules call conforming is
+executed against the expected query — the authority's measure under its required filters
+AND the variation the rules identified — on every dataset, exactly; no near miss may
+conform, and no legitimate variant may be called a violation. On its first run it found
+a real defect: contradictory slices fold a WHERE to `FALSE`, and the rules reported the
+required filter as missing — now unverifiable. Current results: 416 conforming verdicts
+over 3,328 executions by default (7,506 over 60,048 with `--full`), 0 disagreements, 0
+near misses conformed. Agreement on these datasets challenges the rules; it does not
+prove them, and whether a slice is *permitted* is policy, tested by the acceptance cases.
+`MEASURE()` cannot run in DuckDB; `tests/test_databricks_integration.py` checks it on a
+real workspace when `SEMANTIX_DATABRICKS_*` is set (opt-in, not yet run).
+
 ### What a certification guarantees, stated narrowly
 
 A `CERTIFIED` verdict means: the definitions' canonical cores are equal at proof
@@ -547,7 +595,9 @@ Snowflake connector remains) · an Agents Schema claims adapter (second-platform
 declared source: OSI + LookML) · an Apache Ossie document adapter (`scan --osi`;
 per-dialect variants as sibling claims, cross-dialect drift as contradictions).
 
-**Still open:** live Databricks connector (system.query.history and
+**Still open:** monitor persistence (first/last seen, new findings only) and a
+pre-execution `check_sql` for agents · join slices and dbt / metrics-YAML dimensions in
+the conformance rules · live Databricks connector (system.query.history and
 information_schema over a real workspace — file-based intake for both ships) ·
 Ossie export (`publish` emitting Ossie documents stamped with the
 receipt hash + `verified_as_of`) · applying the declared join graphs (Ossie

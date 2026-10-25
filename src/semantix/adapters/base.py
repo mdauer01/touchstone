@@ -19,6 +19,31 @@ class ComputedArtifact:
     depends_on: list[str] = field(default_factory=list)  # upstream relations
 
 
+@dataclass(frozen=True)
+class DimensionSpec:
+    """One declared dimension: what a governed metric may be sliced or
+    grouped by. Resolved to the base-table column it reads, because a slice
+    is judged by the column the query actually filters, not by a name.
+
+    `supported` is False for every shape the monitor's conformance rules do
+    not model (joined columns, CASE, multi-column expressions, field
+    indirection); `reason` says which. An unsupported dimension never makes
+    a slice conforming, and its presence means the dimension list is not
+    fully understood, so a filter on an undeclared column cannot be called
+    unpermitted either."""
+
+    name: str
+    expr: str | None
+    column: str | None = None       # base-table column, lowercased
+    truncation: str | None = None   # DATE_TRUNC unit (upper case), if any
+    supported: bool = False
+    reason: str | None = None
+
+    def as_list(self) -> list:
+        return [self.name, self.expr, self.column, self.truncation,
+                self.supported, self.reason]
+
+
 @dataclass
 class DeclaredSpec:
     system: str
@@ -35,6 +60,10 @@ class DeclaredSpec:
     # one of its filters is not a weaker claim, it is a DIFFERENT claim, and
     # reconciling it would certify or contradict something nobody declared.
     untranslatable: list[str] = field(default_factory=list)
+    # Declared dimensions, or None when the source system's dimensions are
+    # not read by its adapter — "none declared" and "not modelled" are
+    # different answers, and only the first may judge a slice.
+    dimensions: list[DimensionSpec] | None = None
 
 
 def spec_content_text(spec: DeclaredSpec) -> str:
@@ -43,20 +72,24 @@ def spec_content_text(spec: DeclaredSpec) -> str:
     put HAS changed. Used as record_artifact's raw_text at scan time and
     mirrored by the freshness re-check — change it only in both directions
     at once (it feeds content-addressed artifact ids)."""
-    return json.dumps(
-        {
-            "model": spec.model,
-            "expr": spec.expr,
-            "filters": list(spec.filters),
-            "group_by": list(spec.group_by),
-            # A declaration that GAINS a filter the adapter cannot render has
-            # changed — and recorded byte-identically to the one before it, so
-            # the content-addressed artifact id was unchanged, the freshness
-            # re-check saw no drift, and a prior receipt still verified.
-            "untranslatable": sorted(spec.untranslatable),
-        },
-        sort_keys=True,
-    )
+    content = {
+        "model": spec.model,
+        "expr": spec.expr,
+        "filters": list(spec.filters),
+        "group_by": list(spec.group_by),
+        # A declaration that GAINS a filter the adapter cannot render has
+        # changed — and recorded byte-identically to the one before it, so
+        # the content-addressed artifact id was unchanged, the freshness
+        # re-check saw no drift, and a prior receipt still verified.
+        "untranslatable": sorted(spec.untranslatable),
+    }
+    # What a metric may be sliced by is part of what it means to the
+    # monitor. Added only when declared, so a declaration without dimensions
+    # keeps the content identity it had before dimensions were read.
+    if spec.dimensions:
+        content["dimensions"] = sorted((d.as_list() for d in spec.dimensions),
+                                       key=json.dumps)
+    return json.dumps(content, sort_keys=True)
 
 
 def informational_skip(object_id: str, path: str, reason: str) -> dict:

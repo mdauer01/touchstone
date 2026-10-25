@@ -81,6 +81,13 @@ class DuckDBWarehouse:
     def query(self, sql: str) -> list[tuple]:
         return self._con.execute(sql).fetchall()
 
+    def query_records(self, sql: str) -> list[dict]:
+        """Rows keyed by column name — for history pulls, where WHICH column
+        holds the session context or the execution id is the point."""
+        cur = self._con.execute(sql)
+        names = [d[0] for d in cur.description or []]
+        return [dict(zip(names, row)) for row in cur.fetchall()]
+
     def close(self) -> None:
         self._con.close()
 

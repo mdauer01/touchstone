@@ -37,3 +37,43 @@ def test_the_oracle_catches_an_injected_false_certification(monkeypatch):
     monkeypatch.setattr(oracle, "_buckets", poisoned)
     report = oracle.run_oracle()
     assert any(m["hash"] == "poisoned" for m in report.mismatches)
+
+
+# ------------------------------------------------- conformance challenger
+
+def test_every_conforming_verdict_executes_as_definition_plus_variation():
+    report = oracle.run_conformance_oracle()
+    assert not report.self_test_failures, report.self_test_failures
+    assert not report.mismatches, report.mismatches[:3]
+    assert not report.near_miss_conformed, report.near_miss_conformed[:3]
+    assert not report.false_accusations, report.false_accusations[:3]
+    # Non-vacuous: the rules said "conforming" often, and near misses ran.
+    assert report.conforming >= 300 and report.near_misses >= 40
+    assert report.executions >= report.conforming * len(oracle.DATASETS)
+
+
+def test_conformance_challenger_catches_a_planted_wrong_verdict(monkeypatch):
+    """Plant a rule bug — a dropped required filter judged conforming — and
+    execution must expose it, whatever the rules currently do."""
+    from semantix.services import conformance
+
+    real = conformance.check_raw
+
+    def lenient(core, auth, dialect, shape_problem, models=frozenset()):
+        outcome = real(core, auth, dialect, shape_problem, models)
+        if outcome.reasons and outcome.reasons[0]["code"] == "required_filter_missing":
+            return conformance.Outcome("conforming", shape="A")
+        return outcome
+
+    monkeypatch.setattr(conformance, "check_raw", lenient)
+    report = oracle.run_conformance_oracle()
+    assert report.near_miss_conformed            # the policy check fires
+    # Relabel every near miss as an ordinary case: the planted "conforming"
+    # verdicts are then executed, and execution must disagree with them.
+    monkeypatch.setattr(oracle, "generate_conformance_cases",
+                        lambda full=False: [(a, q, False) for a, q, _ in _real_cases(full)])
+    report = oracle.run_conformance_oracle()
+    assert report.mismatches                     # and so does execution
+
+
+_real_cases = oracle.generate_conformance_cases

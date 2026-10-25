@@ -277,13 +277,35 @@ def main(argv: list[str] | None = None) -> int:
 
     p_mon = sub.add_parser(
         "monitor",
-        help="mine executed SQL for alternative definitions of scanned concepts")
+        help="judge executed SQL against authoritative metric definitions: "
+             "conforming uses, definition violations, and what could not be read")
+    p_mon.add_argument("--pilot", dest="pilot_dir",
+                       help="pilot package directory (pilot.yml): approved metric "
+                            "views with definition snapshots and windows, the "
+                            "history export, and any asserted session context")
     p_mon.add_argument("--history-file", dest="history_file",
-                       help="file of executed SQL (one statement per execution)")
+                       help="executed SQL: .jsonl / .csv (one execution per row, "
+                            "with statement_id, start_time, executed_by, catalog, "
+                            "schema, …) or .sql (one statement per execution)")
     p_mon.add_argument("--warehouse", dest="warehouse_url",
                        help="warehouse URL to pull history from")
     p_mon.add_argument("--history-query", dest="history_query",
-                       help="query returning one executed statement per row")
+                       help="query returning one execution per row (columns named "
+                            "as in --history-file; else the first column is the SQL)")
+    p_mon.add_argument("--authority", dest="authority",
+                       help="comma-separated systems whose definitions are "
+                            "authoritative (e.g. uc_metrics,dbt_metrics; a computed "
+                            "system such as dbt or sql only when named). Default: "
+                            "every declared system the scan read")
+    p_mon.add_argument("--asset-map", dest="asset_map",
+                       help="YAML mapping of dashboard:<id> / genie:<id> to the "
+                            "metric a single-measure query from that asset computes")
+    p_mon.add_argument("--assert-context-for-all-executions", dest="assert_context",
+                       action="store_true",
+                       help="state that --default-database/--default-schema (or "
+                            "the scan's context) was the session context of EVERY "
+                            "exported execution. Without it, a history row's short "
+                            "table names resolve only from its own catalog/schema")
     p_mon.add_argument("--dbt", help="dbt project dir — rebuilds the scan's "
                                      "registry so observed columns resolve "
                                      "to the same terminals")
@@ -293,12 +315,13 @@ def main(argv: list[str] | None = None) -> int:
     p_mon.add_argument("--catalog", help="catalog YAML (column resolution)")
     p_mon.add_argument(
         "--default-database", dest="default_database",
-        help="the session's default database: fills an omitted leading "
-             "qualifier. Without it, a reference shorter than the estate's "
-             "names is never assumed to mean any particular table")
+        help="the estate's default database (as for scan): resolves the "
+             "estate's models. Applies to history rows only with "
+             "--assert-context-for-all-executions")
     p_mon.add_argument(
         "--default-schema", dest="default_schema",
-        help="the session's default schema for one-part table names")
+        help="the estate's default schema for one-part table names (history "
+             "rows: only with --assert-context-for-all-executions)")
 
     p_mon.add_argument("--dialect", help="history dialect (default: the scan's)")
     p_mon.add_argument("--min-runs", dest="min_runs", type=int, default=2,
@@ -306,7 +329,8 @@ def main(argv: list[str] | None = None) -> int:
                             "a definition in use (default 2)")
     p_mon.add_argument("--json", dest="json_out", help="write full findings JSON here")
     p_mon.add_argument("--fail-on-alt", dest="fail_on_alt", action="store_true",
-                       help="exit 1 when a named or candidate alt definition is found")
+                       help="exit 1 when a definition violation is found (candidates "
+                            "and unverifiable uses never fail the gate)")
     p_mon.add_argument("--db", default="semantix.db")
 
     args = parser.parse_args(argv)
@@ -934,11 +958,19 @@ def _print_graph(rows: list[dict]) -> None:
 
 def _cmd_monitor(args: argparse.Namespace) -> int:
     from semantix.adapters.catalog import load_catalog
+    from semantix.services.history import from_records, read_history
     from semantix.services.monitor import build_registry, monitor_history
 
-    if not args.history_file and not (args.warehouse_url and args.history_query):
-        print("monitor needs --history-file, or --warehouse with "
-              "--history-query", file=sys.stderr)
+    sources = [bool(args.pilot_dir), bool(args.history_file),
+               bool(args.warehouse_url and args.history_query)]
+    if sum(sources) != 1:
+        print("monitor needs exactly one history source: --pilot DIR, "
+              "--history-file, or --warehouse with --history-query",
+              file=sys.stderr)
+        return 2
+    if args.pilot_dir and args.authority:
+        print("monitor: --authority does not apply with --pilot — the pilot "
+              "package names its own authority", file=sys.stderr)
         return 2
     store = _open_existing(args.db)
     scan = store.latest_scan()
@@ -949,21 +981,31 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         return 2
     dialect = args.dialect or scan.get("dialect") or "duckdb"
 
-    if args.history_file:
-        text = Path(args.history_file).read_text(encoding="utf-8-sig")
+    pilot = None
+    if args.pilot_dir:
+        from semantix.services.pilot import load_pilot
+
+        pilot = load_pilot(args.pilot_dir, dialect)
+        intake = read_history(pilot.history)
+    elif args.history_file:
+        intake = read_history(args.history_file)
     else:
         from semantix.warehouse import connect_warehouse
 
         wh = connect_warehouse(args.warehouse_url)
         try:
-            rows = wh.query(args.history_query)
+            records = wh.query_records(args.history_query)
         finally:
             wh.close()
-        text = ";\n".join(str(r[0]) for r in rows if r and r[0])
+        if records and "statement_text" not in {k.lower() for k in records[0]} \
+                and "query_text" not in {k.lower() for k in records[0]}:
+            # A bare one-column pull: the first column is the SQL.
+            records = [{"statement_text": next(iter(r.values()), None)} for r in records]
+        intake = from_records(records, source=args.warehouse_url, fmt="warehouse")
 
     # The observed side must resolve through the SAME registry shape the scan
     # used — models registered, columns resolved to raw terminals — or its
-    # cores could never equal the reference cores and every consistent use
+    # cores could never equal the reference cores and every conforming use
     # would misreport as unregistered.
     artifacts = []
     if args.dbt:
@@ -975,29 +1017,63 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     if args.views_path:
         from semantix.adapters.sql_dir import load_views_file
         artifacts += load_views_file(args.views_path, dialect)[0]
-    if not artifacts:
+    scan_read_models = any(r["kind"] == "computed"
+                           for r in store.scan_snapshot(scan["scan_id"]))
+    if not artifacts and scan_read_models:
         # Without the scan's models, observed lineage resolves to different
         # terminals than the reference cores' and byte-exact reruns of the
-        # estate's own marts were accused as NAMED ALTs. A registry the scan
-        # did not have is not a degraded mode; it is a different comparison.
+        # estate's own marts were accused. A registry the scan did not have
+        # is not a degraded mode; it is a different comparison.
         print("semantix: monitor needs the estate the scan read (--dbt, "
               "--sql-dir or --views) so observed queries resolve through the "
               "same models the reference definitions did", file=sys.stderr)
         return 2
-    catalog = load_catalog(args.catalog) if args.catalog else {}
-    registry = build_registry(catalog, artifacts, dialect,
-                              _scan_context(scan, args))
+    catalog_path = args.catalog or (pilot.catalog if pilot and pilot.catalog else None)
+    catalog = load_catalog(catalog_path) if catalog_path else {}
+    context = _scan_context(scan, args)
+    registry = build_registry(catalog, artifacts, dialect, context)
+    asset_map = {}
+    if args.asset_map:
+        from semantix.adapters.loadutil import load_yaml
 
-    result = monitor_history(store, text, registry, dialect,
-                             min_runs=args.min_runs)
+        asset_map = {str(k): str(v) for k, v in load_yaml(args.asset_map).items()}
+    authority = ({s.strip() for s in args.authority.split(",") if s.strip()}
+                 if args.authority else None)
+
+    result = monitor_history(store, intake, registry, dialect, min_runs=args.min_runs,
+                             authority_systems=authority, pilot=pilot,
+                             context=context, assert_context=args.assert_context,
+                             asset_map=asset_map)
+    _print_monitor(result)
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(result, indent=2))
+        print(f"  findings JSON: {args.json_out}")
+    # Only VIOLATIONS fail the gate: a candidate is a hypothesis by
+    # construction, and failing CI on a hypothesis is the alert-fatigue path.
+    violations = [f for f in result["findings"] if f["kind"] == "definition_violation"]
+    if args.fail_on_alt and violations:
+        print(f"\nsemantix monitor: FAILED — {len(violations)} definition "
+              f"violation(s) in use", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _print_monitor(result: dict) -> None:
     ref = result["reference"]
-    print(f"monitor · against scan {result['scan_id']} · reference "
-          f"{ref['definitions']} definition(s) across {ref['concepts']} "
-          f"concept(s)"
+    print(f"monitor · against scan {result['scan_id']} · authority "
+          f"{', '.join(ref['authority_systems']) or 'none'}: {ref['definitions']} "
+          f"definition(s) across {ref['concepts']} concept(s)"
           + (f" ({ref['excluded_below_proof']} below proof grade excluded)"
              if ref["excluded_below_proof"] else "")
           + (f" · contested: {', '.join(ref['contested_concepts'])}"
              if ref["contested_concepts"] else ""))
+    print(f"comparison: {result['comparison']}")
+    ctx = result["context"]
+    print("context: "
+          + ("per-row catalog/schema present" if ctx["per_row"] else "no per-row context")
+          + " · asserted for all executions: "
+          + (".".join(p for p in ctx["asserted"] if p) if ctx["asserted"] else "none"))
+    h = result["history"]
     parts = []
     for key, label in (("non_query_statements", "non-query"),
                        ("unreadable_statements", "unreadable"),
@@ -1006,47 +1082,70 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
                         "measure in a nested scope — not read")):
         if result[key]:
             parts.append(f"{result[key]} {label}")
-    print(f"history: {result['statements']} statement(s): "
-          f"{result['parsed_statements']} parsed"
+    print(f"history: {h['executions']} execution(s)"
+          + (f" ({h['duplicate_executions']} duplicate id(s) removed)"
+             if h["duplicate_executions"] else "")
+          + f" · {result['statements']} statement(s): {result['parsed_statements']} parsed"
           + (f" ({', '.join(parts)})" if parts else "")
           + (f", {result['skipped_statements']} unparseable"
              if result["skipped_statements"] else ""))
-    print(f"observed: {result['observed_definitions']} distinct measure "
-          f"definition(s) · {result['recurring_definitions']} recurring "
-          f"(≥{result['min_runs']} run(s)) · {result['below_min_runs']} "
-          f"below the threshold")
+    if h["ignored_columns"]:
+        print(f"  columns not read: {', '.join(h['ignored_columns'])}")
+    if h["executions_without_time"]:
+        print(f"  {h['executions_without_time']} execution(s) carry no start time — "
+              f"no definition can be evidenced for them")
+    f = result["funnel"]
+    n = f["measure_uses"]
+
+    def line(label: str, count: int, extra: str = "") -> None:
+        pct = f" ({100 * count / n:.0f}%)" if n else ""
+        print(f"  {label:<50} {count:>6}/{n}{pct}{extra}")
+
+    print(f"measure uses: {n} — every use counted once below; governed references "
+          f"counted alongside")
+    line("governed references (MEASURE over approved view)", f["governed_references"])
+    shapes = f["conforming_by_shape"]
+    line("conforming", f["conforming"],
+         f"  exact {shapes['exact']} · raw-table slice {shapes['A']} · "
+         f"metric view {shapes['B']}" if f["conforming"] else "")
+    if f["contested"]:
+        line("contested (authorities disagree)", f["contested"])
+    line("definition violations", f["violations"])
+    line("candidates (unnamed near misses)", f["candidates"])
+    line("unregistered", f["unregistered"])
+    line("unverifiable", f["unverifiable"],
+         "  " + " · ".join(f"{k} {v}" for k, v in f["unverifiable_by_reason"].items())
+         if f["unverifiable_by_reason"] else "")
+    line(f"below recurrence threshold (≥{result['min_runs']} runs; not judged)",
+         f["below_threshold"])
+    line("checked = conforming + violations", f["checked"])
+    print(f"rule set: {result['rule_set']} — not covered: "
+          f"{'; '.join(result['excluded_semantics'])}")
     print()
-    tags = {"consistent_use": "CONSISTENT", "contested_use": "CONTESTED",
-            "named_alt_definition": "NAMED ALT",
-            "candidate_alt_definition": "CANDIDATE ALT",
+    tags = {"conforming_use": "CONFORMING", "contested_use": "CONTESTED",
+            "definition_violation": "VIOLATION",
+            "candidate_alt_definition": "CANDIDATE",
             "unregistered_recurring_measure": "UNREGISTERED",
             "unverifiable": "UNVERIFIABLE"}
     for f in result["findings"]:
         sev = f" sev {f['severity']:>3}" if f["severity"] else "        "
         names = ", ".join(f["names_used"]) or "(unnamed)"
-        print(f"  [{tags[f['kind']]:<13}]{sev}  uses {f['uses']:>4}  "
-              f"{names}: {f['summary']}")
+        governed = " [governed ref]" if f.get("governed_reference") else ""
+        print(f"  [{tags[f['kind']]:<12}]{sev}  uses {f['uses']:>4}  "
+              f"{names}{governed}: {f['summary']}")
         for component, sides in (f.get("diff") or {}).items():
-            # "reference", not "certified": the reference set is every
-            # proof-grade definition the scan holds, including ones it
-            # found CONTRADICTED or merely SHADOW.
+            # "reference", not "certified": the reference is the authoritative
+            # definition named for this run, whatever the scan concluded.
             print(f"      {component}: reference {sides['reference']} · "
                   f"observed {sides['observed']}")
+        who = [x for x in (", ".join(f.get("executed_by") or []),
+                           ", ".join(f.get("assets") or [])) if x]
+        if who:
+            print(f"      run by: {' · '.join(who)}")
     if not result["findings"]:
         print("  no recurring measures met the threshold")
     print("\n  note: monitor is read-only — findings are reported, not "
           "recorded in the store")
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(result, indent=2))
-        print(f"  findings JSON: {args.json_out}")
-    # Only NAMED alts fail the gate: a candidate is a hypothesis by
-    # construction, and failing CI on a hypothesis is the alert-fatigue path.
-    alts = [f for f in result["findings"] if f["kind"] == "named_alt_definition"]
-    if args.fail_on_alt and alts:
-        print(f"\nsemantix monitor: FAILED — {len(alts)} named alternative "
-              f"definition(s) in use", file=sys.stderr)
-        return 1
-    return 0
 
 
 def _cmd_propose(args: argparse.Namespace) -> int:
@@ -1126,9 +1225,38 @@ def _cmd_oracle(args: argparse.Namespace) -> int:
               f"    -> {m['result_a']}  vs  {m['result_b']}")
     if report.ok:
         print("  no false certifications: every pair the engine equates executed identically")
+
+    from semantix.oracle import run_conformance_oracle
+
+    conf = run_conformance_oracle(full=args.full)
+    print(f"conformance challenger · {conf.queries} monitor cases · {conf.conforming} "
+          f"judged conforming, each executed against its definition + variation "
+          f"({conf.executions} executions) · {conf.near_misses} near misses")
+    for f in conf.self_test_failures:
+        print(f"  SELF-TEST FAILED ({f['why']}): {f['sql']}")
+    for m in conf.near_miss_conformed:
+        print(f"  NEAR MISS CONFORMED [{m['authority']}]: {m['sql']}")
+    for m in conf.false_accusations:
+        print(f"  FALSE ACCUSATION [{m['authority']}]: {m['sql']}")
+    shown = set()
+    for m in conf.mismatches:
+        if m["observed"] in shown:
+            continue
+        shown.add(m["observed"])
+        print(f"  CONFORMING BUT DIFFERENT [{m['authority']}/{m['dataset']}]\n"
+              f"    {m['observed']}\n    {m['expected']}\n"
+              f"    -> {m['result_observed']}  vs  {m['result_expected']}")
+    if conf.ok:
+        print("  every conforming verdict executed identically to its definition + "
+              "variation; no near miss conformed. This challenges the rules on "
+              "these datasets — it does not prove them")
+    if report.ok and conf.ok:
         return 0
     print(f"\nFAILED: {len(seen)} false certification(s), "
-          f"{len(report.self_test_failures)} self-test failure(s)", file=sys.stderr)
+          f"{len(report.self_test_failures) + len(conf.self_test_failures)} self-test "
+          f"failure(s), {len(shown)} conforming-but-different, "
+          f"{len(conf.near_miss_conformed)} near miss(es) conformed, "
+          f"{len(conf.false_accusations)} false accusation(s)", file=sys.stderr)
     return 1
 
 

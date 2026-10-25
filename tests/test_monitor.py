@@ -1,7 +1,11 @@
 """Query-stream monitoring: the doctrine under test is that similarity
 nominates and equality decides — exact core equality is the only claim of
 sameness, near misses arrive as candidates with diffs, recurrence gates
-exploration, and sub-proof-grade parses never anchor an accusation."""
+exploration, and sub-proof-grade parses never anchor an accusation.
+
+The estate here has no declarations, so the computed system is named
+authoritative explicitly (`authority_systems={"sql"}`): authority is
+declared by the operator, never inferred from whatever the scan found."""
 
 from __future__ import annotations
 
@@ -40,34 +44,34 @@ def scanned(tmp_path):
     store.close()
 
 
-def _run(store, registry, statements, min_runs=2):
+def _run(store, registry, statements, min_runs=2, authority=frozenset({"sql"})):
     return monitor_history(store, ";\n".join(statements), registry, "duckdb",
-                           min_runs=min_runs)
+                           min_runs=min_runs, authority_systems=set(authority))
 
 
 def _kinds(result):
     return [f["kind"] for f in result["findings"]]
 
 
-def test_exact_rerun_is_consistent_use(scanned):
+def test_exact_rerun_is_conforming_use(scanned):
     store, registry = scanned
     q = ("SELECT SUM(amount - refund_amount) AS net_revenue "
          "FROM db.main.orders WHERE status = 'completed'")
     result = _run(store, registry, [q] * 3)
     (f,) = result["findings"]
-    assert f["kind"] == "consistent_use"
+    assert f["kind"] == "conforming_use"
     assert f["concept"] == "net_revenue"
     assert f["uses"] == 3
     assert f["severity"] == 0
 
 
-def test_same_name_different_math_is_named_alt(scanned):
+def test_same_name_different_math_is_definition_violation(scanned):
     store, registry = scanned
     q = ("SELECT SUM(amount - refund_amount) AS net_revenue "
          "FROM db.main.orders")  # the filter quietly dropped
     result = _run(store, registry, [q] * 3)
     (f,) = result["findings"]
-    assert f["kind"] == "named_alt_definition"
+    assert f["kind"] == "definition_violation"
     assert f["concept"] == "net_revenue"
     assert "filters" in f["diff"]
     assert any("completed" in x for x in f["diff"]["filters"]["reference"])
@@ -83,7 +87,7 @@ def test_same_math_different_slice_unnamed_is_candidate(scanned):
     assert f["kind"] == "candidate_alt_definition"
     assert f["concept"] == "net_revenue"
     assert "filters" in f["diff"]
-    # A hypothesis, ranked below a named alt of equal usage.
+    # A hypothesis, ranked below a named violation of equal usage.
     assert f["severity"] < 60 + min(30, f["uses"])
 
 

@@ -150,9 +150,11 @@ def monitored(tmp_path):
     store.close()
 
 
-def _kinds(store, registry, statements, min_runs=2):
+def _kinds(store, registry, statements, min_runs=2, authority=frozenset({"sql"})):
+    # The computed estate is named authoritative explicitly: authority is the
+    # operator's declaration, never inferred.
     result = monitor_history(store, ";\n".join(statements), registry, "duckdb",
-                             min_runs=min_runs)
+                             min_runs=min_runs, authority_systems=set(authority))
     return [(f["kind"], f.get("concept")) for f in result["findings"]], result
 
 
@@ -163,13 +165,13 @@ def test_monitor_reaggregation_over_mart_is_unverifiable(monitored):
     assert kinds == [("unverifiable", None)]
 
 
-def test_monitor_other_concepts_name_on_matching_math_is_named_alt(monitored):
+def test_monitor_other_concepts_name_on_matching_math_is_a_violation(monitored):
     store, registry = monitored
     kinds, _ = _kinds(store, registry,
                       ["SELECT SUM(amount - refunds) AS gross_revenue FROM db.main.orders "
                        "WHERE status = 'completed'"] * 3)
-    assert ("named_alt_definition", "gross_revenue") in kinds
-    assert ("consistent_use", "net_revenue") in kinds
+    assert ("definition_violation", "gross_revenue") in kinds
+    assert ("conforming_use", "net_revenue") in kinds
 
 
 def test_monitor_mixed_grade_reruns_kept_apart(monitored):
@@ -178,7 +180,7 @@ def test_monitor_mixed_grade_reruns_kept_apart(monitored):
              "WHERE status = 'completed'")
     sampled = clean.replace("db.main.orders", "db.main.orders TABLESAMPLE 10 PERCENT")
     kinds, result = _kinds(store, registry, [clean] * 5 + [sampled] * 2)
-    assert ("consistent_use", "net_revenue") in kinds
+    assert ("conforming_use", "net_revenue") in kinds
     assert ("unverifiable", None) in kinds
 
 
@@ -212,9 +214,21 @@ def test_monitor_contested_definition_is_not_consistency(tmp_path):
     from semantix.adapters.sql_dir import load_sql_dir
     registry = build_registry(load_catalog(kwargs["catalog_path"]),
                               load_sql_dir(kwargs["sql_dir"], "duckdb")[0], "duckdb")
-    kinds, _ = _kinds(store, registry, ["SELECT SUM(amount) AS rev FROM db.main.orders"] * 2)
-    store.close()
+    # Both systems authoritative: their definitions disagree, so matching one
+    # of them is agreeing with one side of an open contradiction.
+    kinds, _ = _kinds(store, registry, ["SELECT SUM(amount) AS rev FROM db.main.orders"] * 2,
+                      authority={"sql", "metrics_yaml"})
     assert kinds == [("contested_use", "rev")]
+    # Default authority is the DECLARED definition: the query matches the
+    # computed mart, which contradicts it, so it is a violation of the
+    # declaration — with the mart cited as evidence, not as a verdict.
+    result = monitor_history(store, "SELECT SUM(amount) AS rev FROM db.main.orders;\n" * 2,
+                             registry, "duckdb")
+    store.close()
+    (f,) = result["findings"]
+    assert (f["kind"], f["concept"]) == ("definition_violation", "rev")
+    assert [r["code"] for r in f["reasons"]] == ["required_filter_missing"]
+    assert any("computed definition" in m for m in f["also_matches"])
 
 
 # ------------------------------------------------------------ emit / propose

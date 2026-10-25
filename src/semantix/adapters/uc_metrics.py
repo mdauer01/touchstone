@@ -39,9 +39,9 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from semantix.adapters.base import DeclaredSpec, informational_skip as _info
+from semantix.adapters.base import DeclaredSpec, DimensionSpec, informational_skip as _info
 from semantix.adapters.loadutil import load_yaml
-from semantix.extraction.sqlutil import requalify_columns
+from semantix.extraction.sqlutil import requalify_columns, truncation_of
 
 SUPPORTED_VERSIONS = ("1", "1.0", "1.1")
 
@@ -193,6 +193,8 @@ def _read_view(f: Path, view: dict, dialect: str,
     measure_names = {_strip_ident(str(m.get("name")))
                      for m in (view.get("measures") or [])
                      if isinstance(m, dict) and m.get("name") is not None}
+    dimensions = _read_dimensions(field_entries, source, tail, join_names,
+                                  risky_fields, measure_names)
 
     filter_sql = view.get("filter")
     filter_rendered: str | None = None
@@ -245,13 +247,14 @@ def _read_view(f: Path, view: dict, dialect: str,
         if m_taints:
             specs.append(DeclaredSpec(
                 system="uc_metrics", name=str(name), description=description,
-                model=source or None, untranslatable=m_taints, path=where))
+                model=source or None, untranslatable=m_taints, path=where,
+                dimensions=dimensions))
         else:
             specs.append(DeclaredSpec(
                 system="uc_metrics", name=str(name), description=description,
                 model=source, expr=rendered,
                 filters=[filter_rendered] if filter_rendered else [],
-                path=where))
+                path=where, dimensions=dimensions))
 
     notes = []
     if view.get("joins"):
@@ -268,6 +271,75 @@ def _read_view(f: Path, view: dict, dialect: str,
     if not measures:
         skipped.append(_info(view_name, str(f),
                              "metric view declares no measures (fields only)"))
+
+
+def _read_dimensions(entries: list, source: str, tail: str, join_names: set[str],
+                     risky_fields: set[str], measure_names: set[str]
+                     ) -> list[DimensionSpec]:
+    """Every declared field/dimension, resolved to the base-table column it
+    reads. Only two shapes are supported — a bare column of a fully
+    qualified source table, and DATE_TRUNC('<unit>', <bare column>) — and
+    everything else is kept, marked unsupported with the reason, because a
+    dimension the monitor cannot read still tells it the list is not fully
+    understood."""
+    fq_source = (bool(source) and len(source.split(".")) == 3
+                 and _RELATION_RE.match(source) is not None)
+    out: list[DimensionSpec] = []
+    for entry in entries:
+        entry = _yaml11_keys(entry)
+        name, expr = entry.get("name"), entry.get("expr")
+        if name is None:
+            out.append(DimensionSpec(
+                name="*", expr=str(expr) if expr is not None else None,
+                reason="wildcard field — expands columns, not modelled"))
+            continue
+        name = _strip_ident(str(name))
+        text = expr if isinstance(expr, str) else None
+
+        def unsupported(reason: str) -> DimensionSpec:
+            return DimensionSpec(name=name, expr=text, reason=reason)
+
+        if not fq_source:
+            out.append(unsupported("the view's source is not a fully qualified "
+                                   "table — dimension sources not resolved"))
+            continue
+        unknown = sorted(set(entry) - _FIELD_KEYS)
+        if unknown:
+            out.append(unsupported(f"carries unmodelled key(s) {', '.join(unknown)}"))
+            continue
+        if not text or not text.strip():
+            out.append(unsupported("declares no expression"))
+            continue
+        try:
+            node = sqlglot.parse_one(text, read="databricks")
+        except Exception as e:  # noqa: BLE001 — declared text is arbitrary
+            out.append(unsupported(f"could not parse expression: {e}"))
+            continue
+        truncated = truncation_of(node)
+        unit, column = (truncated if truncated else (None, node))
+        if not isinstance(column, exp.Column):
+            out.append(unsupported(
+                f"expression {text.strip()[:60]!r} is not a bare column or "
+                f"DATE_TRUNC of one — not modelled"))
+            continue
+        qualifier = column.table.lower() if column.table else ""
+        col = column.name.lower()
+        if qualifier in join_names:
+            out.append(unsupported(f"reads joined table {column.table} — join "
+                                   f"dimensions are not yet modelled"))
+        elif qualifier and qualifier not in ("source", tail.lower()):
+            out.append(unsupported(f"reads {column.table}.{column.name}, which is "
+                                   f"neither `source` nor the source table"))
+        elif not qualifier and col != name and col in risky_fields | measure_names:
+            # `DATE_TRUNC('MONTH', order_date)` where order_date is ANOTHER
+            # field with its own expression: field or physical column —
+            # resolution order is engine-internal, so refuse to guess.
+            out.append(unsupported(f"references declared field {column.name}, "
+                                   f"whose expression is not the identity column"))
+        else:
+            out.append(DimensionSpec(name=name, expr=text, column=col,
+                                     truncation=unit, supported=True))
+    return out
 
 
 def _strip_ident(text: str) -> str:
