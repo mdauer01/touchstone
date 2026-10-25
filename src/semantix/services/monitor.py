@@ -711,8 +711,11 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, contested, computed_by_
         if named and auth.concept not in named:
             # The math is concept A's; the query CLAIMS concept B. B's verdict
             # is the finding, and the match to A is evidence on it — never a
-            # separate conforming finding that could stand in for it.
-            evidence = {**base, "calculation_matches": auth.label}
+            # separate conforming finding that could stand in for it. The
+            # match is only evidence if A's definition applied at the time.
+            matched = auth.label if not as_of or _covered(obs, auth) else (
+                f"{auth.label} as snapshotted — not evidenced for the execution time")
+            evidence = {**base, "calculation_matches": matched}
             return [_judge_against(obs, evidence, label, by_concept[label], contested,
                                    models, dialect, as_of, identity)
                     for label in sorted(named)]
@@ -848,6 +851,19 @@ def _conforming(obs: _Observed, base: dict, auth: Authority, outcome: Outcome,
 
 
 def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[dict]:
+    """Shape B, in a fixed order — each step can only narrow what the next
+    may conclude:
+
+    1. definition evidence, for the REFERENCED metric and for any metric the
+       output name CLAIMS;
+    2. the supported-SQL boundary (the conformance rules' verdict on the
+       statement);
+    3. the claimed metric;
+    4. the primary finding, chosen by the caller from these conclusions.
+
+    A naming mismatch found before evidence or the boundary failed is kept
+    as context (`suspected`), never promoted to a violation: round ten's
+    name branch ran last and overwrote "unverifiable" unconditionally."""
     names = sorted(obs.names)
     base = _base(obs, names)
     outcome = obs.view_outcome
@@ -857,26 +873,49 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of) -> list[d
             if a.view == obs.view and a.measure == obs.measure:
                 auth = a
     concept = auth.concept if auth else None
-    if auth is not None and as_of and not _covered(obs, auth):
-        outcome = unverifiable("no_definition_evidence",
-                               f"no definition of {obs.view}/{obs.measure} is evidenced "
-                               f"for the execution time", shape="B")
-    out: list[dict] = []
-    # Presented under ANOTHER authoritative metric's name: that claim is the
-    # finding; what the reference computes is evidence on it. Only for an
-    # approved, readable measure — over an unknown view the identity of
-    # what was computed is itself unknown.
+    # Presented under ANOTHER authoritative metric's name. Only for an
+    # approved, readable measure — over an unknown view the identity of what
+    # was computed is itself unknown.
     claimed = (sorted(by_name.get(normalize_name(obs.output), set()) - {concept})
                if obs.output and concept is not None else [])
+    suspected = (f"presented as {obs.output} but computed as {obs.expression} over "
+                 f"{obs.view}") if claimed else None
+
+    # 1. Definition evidence, referenced and claimed.
+    if as_of:
+        missing = []
+        if auth is not None and not _covered(obs, auth):
+            missing.append(f"{obs.view}/{obs.measure}")
+        missing += [label for label in claimed
+                    if not any(_covered(obs, a) for a in by_concept[label])]
+        if missing:
+            outcome = unverifiable(
+                "no_definition_evidence",
+                f"no definition of {', '.join(missing)} is evidenced for the execution "
+                f"time" + (" (the executions carry no start time)"
+                           if obs.evidence and _NO_TIME in obs.evidence else ""),
+                shape="B")
+
+    # 2. The supported-SQL boundary. `derived_expression` is not a boundary:
+    # it is the projection's own formula, which step 3 judges.
+    outside = outcome.status == "unverifiable" and set(outcome.codes) - {"derived_expression"}
+
+    out: list[dict] = []
     if claimed:
-        computed = f"{obs.view}/{obs.measure} ({outcome.status})"
+        context = {**base, "suspected": suspected}
         for label in claimed:
+            if outside:
+                out.append(_finding(context, "unverifiable", 0, label, "unverifiable",
+                                    "alias",
+                                    f"named {label}, {suspected} — not judged: "
+                                    f"{_reason_text(outcome)}", outcome))
+                continue
+            # 3. The claimed metric, with what the reference computes as evidence.
             other = Outcome("violation", [{
-                "code": "presented_under_other_name",
-                "detail": f"presented as {obs.output} but computed as "
-                          f"{obs.expression} over {obs.view}"}],
+                "code": "presented_under_other_name", "detail": suspected}],
                 outcome.variation, "B")
-            out.append(_finding({**base, "calculation_matches": computed},
+            out.append(_finding({**base, "calculation_matches":
+                                 f"{obs.view}/{obs.measure} ({outcome.status})"},
                                 "definition_violation", _violation_severity(obs.uses),
                                 label, "violation", "alias",
                                 f"computed under the name {label}: "
