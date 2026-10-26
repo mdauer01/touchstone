@@ -158,7 +158,7 @@ def test_valid_edge_is_certified_with_measured_cardinality(store, registry, ware
         warehouse,
     )
     row = rows["raw.customers.customer_id = raw.orders.customer_id"]
-    assert row["status"] == "certified"
+    assert row["status"] == "checks_passed_on_observed_data"
     ev = row["check"]["evidence"]
     assert ev["cardinality"] == "1:N"
     assert ev["parent"] == "raw.customers.customer_id"
@@ -216,7 +216,7 @@ def test_valid_declared_primary_key_does_not_trip_the_check(store, registry, war
         "history.sql",
     )
     rows = verify_edges(store, warehouse, declared_pks={"raw.customers": ["customer_id"]})
-    assert rows[0]["status"] == "certified"
+    assert rows[0]["status"] == "checks_passed_on_observed_data"
     assert "pk_violations" not in rows[0]["check"]["evidence"]
 
 
@@ -242,7 +242,7 @@ def test_mining_from_a_warehouse_query_log(tmp_path, capsys):
     assert "mined 2 edge(s)" in capsys.readouterr().out
 
     assert main(["verify-relationships", "--warehouse", str(wh_path), "--db", db]) == 0
-    assert "1 certified, 1 failed" in capsys.readouterr().out
+    assert "1 checks passed on observed data, 1 failed" in capsys.readouterr().out
 
 
 def test_missing_relation_stays_unverified_not_failed(store, registry, warehouse):
@@ -389,14 +389,14 @@ def test_agent_view_separates_certified_from_hypotheses(store, registry, warehou
         warehouse,
     )
     view = relationships_for_agent(store)
-    assert [e["join"] for e in view["certified"]] == [
+    assert [e["join"] for e in view["checks_passed_on_observed_data"]] == [
         "raw.customers.customer_id = raw.orders.customer_id"
     ]
     assert view["failed"][0]["cardinality"] == "1:N"
     assert "hypothesis" in view["guidance"]
 
     scoped = relationships_for_agent(store, table="raw.payments")
-    assert not scoped["certified"] and len(scoped["failed"]) == 1
+    assert not scoped["checks_passed_on_observed_data"] and len(scoped["failed"]) == 1
 
 
 def test_catalog_reserved_sections_are_not_schemas(acme):
@@ -426,7 +426,7 @@ def test_cli_mine_verify_relationships_roundtrip(acme, tmp_path, capsys):
     assert main(["verify-relationships", "--seed", str(acme / "seed.sql"),
                  "--dbt", str(acme / "dbt_project"), "--db", db]) == 0
     out = capsys.readouterr().out
-    assert "checked 4 edge(s): 2 certified, 2 failed" in out
+    assert "checked 4 edge(s): 2 checks passed on observed data, 2 failed" in out
     assert "orphan row(s) violate referential integrity" in out
     assert "N:M" in out
 
@@ -473,7 +473,7 @@ def test_mcp_relationships_tool(acme, tmp_path):
                    "arguments": {"table": "analytics.fct_orders"}},
     })
     payload = json.loads(response["result"]["content"][0]["text"])
-    assert [e["join"] for e in payload["certified"]] == [
+    assert [e["join"] for e in payload["checks_passed_on_observed_data"]] == [
         "analytics.fct_orders.customer_id = raw.customers.customer_id"
     ]
     assert len(payload["failed"]) == 2

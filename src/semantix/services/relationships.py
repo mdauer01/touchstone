@@ -13,19 +13,28 @@ first, never what is true.
 Every edge carries TWO orthogonal axes, because conflating them is the exact
 mistake this layer exists to avoid:
 
-  status (validity — what the warehouse proved)
-    certified    checked and passed: a unique side, zero blocking orphans
+  status (validity — what the warehouse showed ON THE DATA IT CHECKED)
+    checks_passed_on_observed_data
+                 checked and passed: a unique side, zero blocking orphans —
+                 on the rows present when checked, over the stated scope
     failed       checked and failed, with measured evidence (orphans, N:M)
-    unverified   no check has run yet
+    unverified   no check has run yet, or it demonstrated nothing
+
+  Passed checks support uniqueness and zero orphans on the checked data.
+  They do not establish that the join is the right BUSINESS relationship,
+  that it preserves a metric's meaning, or that it will stay valid
+  (round seventeen renamed `certified`, which claimed all three). The check
+  SQL is built from the stated edge (`qident`), never through the SQL
+  interpretation path whose readings are suspended.
 
   usage (declaration vs. practice — what the estate does)
     declared+used  in the ERD and exercised by real queries
     shadow         exercised by real queries, declared nowhere
     orphan         declared, never seen in executed SQL
 
-A certified shadow edge is a documentation gap; a failed heavily-used edge is
-an active bug; a certified orphan means the ERD is right and unused. One
-number can't say that, so we don't try.
+A passed shadow edge is a documentation gap; a failed heavily-used edge is
+an active bug; a passed orphan means the ERD's keys held and nobody joins
+it. One number can't say that, so we don't try.
 """
 
 from __future__ import annotations
@@ -42,6 +51,12 @@ from semantix.extraction.registry import SchemaRegistry
 from semantix.extraction.sqlutil import flatten_conjuncts, table_map
 from semantix.store import Store, utcnow
 from semantix.warehouse import qident
+
+CHECKS_PASSED = "checks_passed_on_observed_data"
+LIMITATION = ("checks passed on the observed data: they support key uniqueness and zero "
+              "orphans on the rows checked; they do not establish that the join is the right "
+              "business relationship, that it preserves a metric's meaning, or that it will "
+              "remain valid")
 
 
 @dataclass(frozen=True)
@@ -298,7 +313,7 @@ def edge_status(edge_row: dict) -> str:
     evidence = check.get("evidence") or {}
     if evidence.get("unrunnable") or evidence.get("inconclusive"):
         return "unverified"
-    return "certified" if check["passed"] else "failed"
+    return CHECKS_PASSED if check["passed"] else "failed"
 
 
 def edge_usage(edge_row: dict) -> str:
@@ -423,10 +438,11 @@ def verify_edges(
 
 
 def relationships_for_agent(store: Store, table: str | None = None) -> dict[str, Any]:
-    """Agent-facing view: certified join paths first, everything else labeled
-    honestly. An agent must never receive a mined-but-unverified edge that
-    looks like a fact — that would be the popularity-ranked context layer we
-    exist to audit."""
+    """Agent-facing view: edges whose checks passed on observed data first,
+    each with what was checked, over what scope and when; everything else
+    labeled honestly. An agent must never receive a mined-but-unverified edge
+    that looks like a fact — that would be the popularity-ranked context
+    layer we exist to audit — nor a passed check that reads as a guarantee."""
     rows = graph_with_status(store, table=table)
 
     def summarize(r: dict) -> dict:
@@ -437,6 +453,7 @@ def relationships_for_agent(store: Store, table: str | None = None) -> dict[str,
         # own docstring says must never look like a fact. The unrunnable path
         # already returns None for both; inconclusive must match it.
         measured = r["status"] != "unverified"
+        passed = r["status"] == CHECKS_PASSED
         return {
             "join": r["label"],
             "left": f"{r['left_relation']}.{r['left_column']}",
@@ -448,25 +465,63 @@ def relationships_for_agent(store: Store, table: str | None = None) -> dict[str,
             "parent_key": ev.get("parent") if measured else None,
             "reason": ev.get("reason") or ev.get("error"),
             "competing_keys": r["competing_keys"],
+            # What a measured status rests on: as of when, over what scope,
+            # which checks with which counts — and what it does not show.
+            "as_of": (r.get("check") or {}).get("checked_at") if measured else None,
+            "scope": ev.get("scope", _LEGACY_SCOPE) if measured else None,
+            "checks": ev.get("checks") or _legacy_checks(ev) if measured else None,
+            "snapshot": ev.get("snapshot") if measured else None,
+            "limitation": LIMITATION if passed else None,
         }
 
-    grouped: dict[str, list[dict]] = {"certified": [], "failed": [], "unverified": []}
+    grouped: dict[str, list[dict]] = {CHECKS_PASSED: [], "failed": [], "unverified": []}
     for r in rows:
         grouped[r["status"]].append(summarize(r))
     return {
         "table": table,
-        "certified": grouped["certified"],
+        CHECKS_PASSED: grouped[CHECKS_PASSED],
         "failed": grouped["failed"],
         "unverified": grouped["unverified"],
         "guidance": (
-            "Join only through `certified` edges. `failed` edges are known "
-            "broken — joining through them multiplies or drops rows. "
-            "`unverified` edges were never checked, or were checked over data "
-            "that demonstrated nothing (an empty table, an all-NULL column); "
-            "either way treat them as a hypothesis, not a fact. Each carries "
-            "its own `reason`."
+            f"Prefer edges under `{CHECKS_PASSED}`: their key uniqueness and zero "
+            "orphans held on the data checked, as of `as_of`, over `scope`. That is "
+            "evidence about those rows, not a statement that the join is the right "
+            "business relationship, preserves a metric's meaning, or still holds — "
+            "re-check before relying on an old result. `failed` edges are known broken "
+            "on the checked data: joining through them multiplied or dropped rows. "
+            "`unverified` edges were never checked, or were checked over data that "
+            "demonstrated nothing (an empty table, an all-NULL column); treat them as a "
+            "hypothesis. Each carries its own `reason`."
         ),
     }
+
+
+# Checks recorded before round seventeen carry no scope block; what they did
+# is known from the method, and they are presented as the historical record
+# they are (with their own `as_of`).
+_LEGACY_SCOPE = {"method": "full table scan", "sampled": False, "filters": [],
+                 "null_handling": "NULL keys excluded from distinct and orphan counts",
+                 "recorded": "before scopes were recorded"}
+
+
+def _legacy_checks(ev: dict) -> list[dict] | None:
+    left, right = ev.get("left"), ev.get("right")
+    if not (isinstance(left, dict) and isinstance(right, dict)):
+        return None
+    return _check_list(left, right, ev.get("matched_rows"))
+
+
+def _check_list(left: dict, right: dict, matched) -> list[dict]:
+    return [
+        {"check": f"{side['relation']}.{side['column']} is unique",
+         "measured": {"non_null": side.get("non_null"), "distinct": side.get("distinct"),
+                      "rows": side.get("rows")}, "held": side.get("unique")}
+        for side in (left, right)
+    ] + [
+        {"check": f"rows of {a['relation']} with no match in {b['relation']}",
+         "measured": {"orphans": a.get("orphans")}}
+        for a, b in ((left, right), (right, left))
+    ] + [{"check": "rows that join across the edge", "measured": {"matched": matched}}]
 
 
 def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
@@ -569,6 +624,12 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
         if (unique_l or unique_r) else None
 
     out.update(
+        # Scope of what was observed, recorded with every check.
+        scope={"method": "full table scan", "sampled": False, "filters": [],
+               "null_handling": "NULL keys excluded from distinct and orphan counts; "
+                                "each side's NULL fraction is reported"},
+        executed_at=utcnow(),
+        snapshot=getattr(warehouse, "snapshot", None),
         passed=passed,
         cardinality=cardinality,
         parent=parent,  # verified direction: the unique side
@@ -594,6 +655,7 @@ def _check_edge(warehouse, rel_l: str, col_l: str, rel_r: str, col_r: str,
 
     if no_evidence:
         out["no_evidence"] = no_evidence
+    out["checks"] = _check_list(out["left"], out["right"], matched)
 
     # Not-certified splits in two, and collapsing them was a false accusation.
     # A DEMONSTRATED violation stands on evidence the floor cannot take away:

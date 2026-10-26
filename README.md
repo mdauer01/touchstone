@@ -178,7 +178,7 @@ With estate sources configured (optional, same source flags as `attest`), every
 attest re-checks freshness against the live estate — agents get told when the
 verdicts have drifted out from under them.
 
-### Relationships: mined from practice, certified by the warehouse
+### Relationships: mined from practice, checked against observed data
 
 Joins are the ontology one level down, and almost nobody declares them — FKs
 go undeclared or unenforced, so the only honest record of how tables connect is the
@@ -196,36 +196,56 @@ SQL the BI tool actually ran. semantix mines that history, then refuses to trust
 ```
 
 ```
-[CERTIFIED ] declared+used  analytics.fct_orders.customer_id = raw.customers.customer_id · 3 queries
+  [CHECKS PASSED] declared+used  analytics.fct_orders.customer_id = raw.customers.customer_id  · 3 queries
       N:1, parent key raw.customers.customer_id
-[FAILED    ] shadow         analytics.fct_orders.order_id = raw.payments.order_id · 2 queries
+      as of 2026-10-26T06:31:58.593Z · full table scan
+  [FAILED       ] shadow         analytics.fct_orders.order_id = raw.payments.order_id  · 2 queries  · competing keys
       1:N, parent key analytics.fct_orders.order_id — 2 orphan row(s) violate referential integrity
-[FAILED    ] shadow         analytics.fct_orders.channel = raw.payments.method · 1 query
-      N:M — no unique side (N:M) — join semantics undefined
-[CERTIFIED ] orphan         raw.channels.channel_code = raw.orders.channel · never used
+      as of 2026-10-26T06:31:58.595Z · full table scan
+  [FAILED       ] shadow         analytics.fct_orders.channel = raw.payments.method  · 1 query  · competing keys
+      N:M — no unique side (N:M) — join semantics undefined; note: no rows join across this edge
+      as of 2026-10-26T06:31:58.596Z · full table scan
+  [CHECKS PASSED] orphan         raw.channels.channel_code = raw.orders.channel  · never used
       1:N, parent key raw.channels.channel_code
+      as of 2026-10-26T06:31:58.597Z · full table scan
+
+  checked 4 edge(s): 2 checks passed on observed data, 2 failed, 0 unverified
 ```
 
 **Used is not valid.** Query history is the richest source of join knowledge in the
 estate and also a faithful record of every *popular wrong join* — frequency-weighting
 it would rebuild the popularity-ranked context layer this product exists to audit. So
 mining produces candidates, declarations produce claims, and only warehouse checks
-(key uniqueness, orphan counts, cardinality class) certify. Usage decides what gets
+(key uniqueness, orphan counts, cardinality class) move an edge off `unverified`. Usage decides what gets
 verified **first**, never what is true — `--top N` spends the check budget where the
 dashboards are.
 
-Every edge therefore carries two orthogonal axes: **status** (`certified` / `failed` /
-`unverified` — what the warehouse proved) and **usage** (`declared+used` / `shadow` /
-`orphan` — declaration vs. practice). A certified shadow edge is a documentation gap; a
-failed heavily-used edge is an active bug; a certified orphan means the ERD is right and
-nobody joins it. In the demo above, the payments↔orders join *the shipped query history uses* is
+Every edge therefore carries two orthogonal axes. **Status** says what the warehouse
+showed on the data it checked: `checks_passed_on_observed_data`, `failed` or
+`unverified`. **Usage** compares declaration with practice: `declared+used`, `shadow` or
+`orphan`. A passed shadow edge is a documentation gap; a failed heavily-used edge is an
+active bug; a passed orphan means the ERD's keys held and nobody joins it.
+
+**What a passed check shows.** Each check records:
+- the tables, keys and join direction;
+- every check performed, with its measured counts;
+- its scope: full scan or sample, filters, NULL handling;
+- when it ran, and the data snapshot or version when the warehouse reports one.
+
+Zero orphans and a unique parent key support those properties **on the checked rows**.
+They do not establish that the join is the right business relationship, that it preserves
+a metric's meaning, or that it will remain valid. The check SQL is built from the stated
+edge with quoted identifiers, never through the SQL-interpretation path whose readings
+are suspended. Checks recorded before scopes were stored are shown as the historical
+record they are. In the demo above, the payments↔orders join *the shipped query history uses* is
 broken: a payment for a cancelled order and one for a deleted order both survive into
 `fct_orders` joins. Mining is alias- and direction-free — flipped operands and implicit
 `FROM a, b WHERE a.x = b.y` joins collapse into one edge — and unparseable history lines
 are skipped, not fatal.
 
 Agents get the graph through the same MCP server (`relationships(table)`), which hands
-back certified paths first and labels everything else as hypothesis rather than fact.
+back edges whose checks passed first, each with its scope, checks, as-of time and that
+limitation, and labels everything else as hypothesis rather than fact.
 
 **Warehouses are parameterized.** `--warehouse` accepts a URL; v0 ships the DuckDB
 driver (zero-infra, fully tested, `--seed` builds an ephemeral one from a seed script

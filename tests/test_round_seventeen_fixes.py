@@ -368,3 +368,92 @@ def test_a_statement_the_generator_rewrites_is_unreadable_to_the_monitor(tmp_pat
            f"refund_amount, status FROM {O}) SELECT * FROM t) d")
     result = _monitor(tmp_path, sql)
     assert result["unreadable_statements"] == 1 and result["findings"] == []
+
+
+# ---------------------------- relationships: checks passed on observed data
+
+def _passed_edge(tmp_path, monkeypatch=None):
+    from semantix.services.relationships import mine_sql_text, record_mined, verify_edges
+    from semantix.store import Store
+    from semantix.warehouse import DuckDBWarehouse
+
+    from .test_relationships import CATALOG, SEED
+
+    store = Store(tmp_path / "rel.db")
+    edges = mine_sql_text("SELECT 1 FROM raw.orders o JOIN raw.customers c "
+                          "ON o.customer_id = c.customer_id", SchemaRegistry(CATALOG),
+                          "duckdb")[0]
+    record_mined(store, edges, "history.sql")
+    wh = DuckDBWarehouse.ephemeral(SEED, label="test")
+    issued: list[str] = []
+    real = wh.query
+
+    def spy(sql):
+        issued.append(sql)
+        return real(sql)
+    wh.query = spy
+    if monkeypatch is not None:
+        # The check must not touch the SQL interpretation path whose readings
+        # are suspended: no canonicalize, no optimizer, no proof grammar.
+        import semantix.extraction.canonicalize as C
+        import semantix.extraction.proof as P
+
+        def refuse(*a, **k):
+            raise AssertionError("the relationship check used the interpretation path")
+        for mod, name in ((C, "canonicalize"), (C, "canonicalize_sql"), (P, "certify")):
+            monkeypatch.setattr(mod, name, refuse)
+    try:
+        rows = verify_edges(store, wh)
+    finally:
+        wh.close()
+    return store, rows, issued
+
+
+def test_a_passed_check_is_named_for_what_it_shows_with_its_scope(tmp_path):
+    from semantix.services.relationships import (CHECKS_PASSED, LIMITATION,
+                                                 relationships_for_agent)
+
+    store, rows, _ = _passed_edge(tmp_path)
+    try:
+        assert [r["status"] for r in rows] == [CHECKS_PASSED]
+        view = relationships_for_agent(store)
+    finally:
+        store.close()
+    assert "certified" not in view and "certified" not in view["guidance"].lower()
+    (edge,) = view[CHECKS_PASSED]
+    assert edge["as_of"] and edge["limitation"] == LIMITATION
+    assert edge["scope"]["method"] == "full table scan" and edge["scope"]["sampled"] is False
+    assert "NULL" in edge["scope"]["null_handling"]
+    checks = {c["check"]: c["measured"] for c in edge["checks"]}
+    assert checks["raw.customers.customer_id is unique"]["distinct"] == 2
+    assert any("no match" in c for c in checks)
+    assert "business relationship" in LIMITATION and "remain valid" in LIMITATION
+
+
+def test_the_check_sql_is_built_from_the_stated_edge_only(tmp_path, monkeypatch):
+    _, rows, issued = _passed_edge(tmp_path, monkeypatch)
+    assert rows and issued
+    for sql in issued:
+        assert '"raw"."orders"' in sql or '"raw"."customers"' in sql, sql
+        assert '"customer_id"' in sql, sql
+
+
+def test_a_check_recorded_before_scopes_is_presented_as_the_record_it_is(tmp_path):
+    """Historical rows keep what they stored; the read model names their
+    as-of time and the scope the method implies, never a current guarantee."""
+    from semantix.services.relationships import CHECKS_PASSED, relationships_for_agent
+
+    store, rows, _ = _passed_edge(tmp_path)
+    try:
+        con = store._conn
+        (raw,) = con.execute("SELECT evidence_json FROM relationship_checks").fetchone()
+        ev = json.loads(raw)
+        for key in ("scope", "checks", "executed_at", "snapshot"):
+            ev.pop(key, None)
+        con.execute("UPDATE relationship_checks SET evidence_json = ?", (json.dumps(ev),))
+        con.commit()
+        (edge,) = relationships_for_agent(store)[CHECKS_PASSED]
+    finally:
+        store.close()
+    assert edge["scope"]["recorded"] == "before scopes were recorded"
+    assert edge["as_of"] and edge["checks"] and edge["limitation"]

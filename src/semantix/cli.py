@@ -239,8 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     p_verify_rel.add_argument("--db", default="semantix.db")
 
     p_rel = sub.add_parser("relationships",
-                           help="the relationship graph: certified / failed / "
-                                "candidate / shadow / orphan edges")
+                           help="the relationship graph: checks passed on observed "
+                                "data / failed / unverified, by usage (declared+used / "
+                                "shadow / orphan)")
     p_rel.add_argument("--table", help="only edges touching this relation")
     p_rel.add_argument("--json", dest="json_out", help="write full graph JSON here")
     p_rel.add_argument("--db", default="semantix.db")
@@ -986,13 +987,17 @@ def _cmd_verify_relationships(args: argparse.Namespace) -> int:
         print("no edges recorded — run mine-relationships first", file=sys.stderr)
         return 2
     _print_graph(results)
-    # Count by actual status. Deriving "certified" as everything-not-failed
+    # Count by actual status. Deriving "passed" as everything-not-failed
     # counted every edge the warehouse could not answer for as a success.
-    certified = [r for r in results if r["status"] == "certified"]
+    from semantix.services.relationships import CHECKS_PASSED, LIMITATION
+
+    passed = [r for r in results if r["status"] == CHECKS_PASSED]
     failed = [r for r in results if r["status"] == "failed"]
-    unverified = [r for r in results if r["status"] not in ("certified", "failed")]
-    print(f"\n  checked {len(results)} edge(s): {len(certified)} certified, "
-          f"{len(failed)} failed, {len(unverified)} unverified")
+    unverified = [r for r in results if r["status"] not in (CHECKS_PASSED, "failed")]
+    print(f"\n  checked {len(results)} edge(s): {len(passed)} checks passed on observed "
+          f"data, {len(failed)} failed, {len(unverified)} unverified")
+    if passed:
+        print(f"  ({LIMITATION})")
     return 0
 
 
@@ -1038,9 +1043,15 @@ def _print_graph(rows: list[dict]) -> None:
                     detail += f", parent key {ev['parent']}"
                 if ev.get("reason"):
                     detail += f" — {ev['reason']}"
+                scope = ev.get("scope") or {}
+                detail += (f"\n      as of {check.get('checked_at', '?')} · "
+                           f"{scope.get('method', 'full table scan')}"
+                           + (" (sampled)" if scope.get("sampled") else ""))
         queries = r["mined_queries"]
         used = f"{queries} quer{'y' if queries == 1 else 'ies'}" if queries else "never used"
-        print(f"  [{r['status'].upper():<10}] {r['usage']:<14} {r['label']}  · {used}"
+        tag = {"checks_passed_on_observed_data": "CHECKS PASSED"}.get(
+            r["status"], r["status"].upper())
+        print(f"  [{tag:<13}] {r['usage']:<14} {r['label']}  · {used}"
               + ("  · competing keys" if r.get("competing_keys") else "")
               + detail)
 

@@ -84,13 +84,15 @@ TOOLS = [
     ),
     _tool(
         "relationships",
-        "Certified join paths between tables. Call this BEFORE writing any SQL "
-        "that joins tables: `certified` edges were checked against the "
-        "warehouse (unique key, zero orphans) and are safe to join through; "
-        "`failed` edges are known broken — joining through them silently "
-        "multiplies or drops rows; `unverified` edges were seen in real "
-        "queries but never checked, so treat them as a hypothesis, not a "
-        "fact. Frequency of use is NOT evidence of correctness.",
+        "Join paths between tables and what the warehouse showed about them. "
+        "Call this BEFORE writing SQL that joins tables. "
+        "`checks_passed_on_observed_data` edges had a unique key and zero orphans "
+        "on the data checked, as of `as_of`, over `scope` — evidence about those "
+        "rows, not proof that the join is the right business relationship, "
+        "preserves a metric's meaning, or still holds. `failed` edges multiplied "
+        "or dropped rows on the checked data; `unverified` edges were never "
+        "checked (a hypothesis, not a fact). Frequency of use is NOT evidence "
+        "of correctness.",
         {"table": {"type": "string",
                    "description": "optional: only edges touching this relation, "
                                   "e.g. analytics.fct_orders"}},
@@ -205,7 +207,9 @@ class McpServer:
         from semantix.services.relationships import relationships_for_agent
 
         result = relationships_for_agent(self.store, args.get("table"))
-        if not (result["certified"] or result["failed"] or result["unverified"]):
+        from semantix.services.relationships import CHECKS_PASSED
+
+        if not (result[CHECKS_PASSED] or result["failed"] or result["unverified"]):
             return {"error": "no relationships recorded — run "
                              "`semantix mine-relationships` against query history"}
         return result

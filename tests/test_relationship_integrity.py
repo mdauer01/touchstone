@@ -92,7 +92,7 @@ def test_a_genuinely_sound_key_still_certifies(store, registry):
     try:
         record_declared(store, [("raw.orders.customer_id", "raw.customers.customer_id")], "c.yml")
         row = verify_edges(store, warehouse)[0]
-        assert row["status"] == "certified"
+        assert row["status"] == "checks_passed_on_observed_data"
         assert row["check"]["evidence"]["cardinality"] == "1:N"
     finally:
         warehouse.close()
@@ -104,7 +104,7 @@ def test_an_unrunnable_recheck_does_not_leave_a_stale_certification(store, regis
     good = wh(GOOD, "good")
     try:
         record_declared(store, [("raw.orders.customer_id", "raw.customers.customer_id")], "c.yml")
-        assert verify_edges(store, good)[0]["status"] == "certified"
+        assert verify_edges(store, good)[0]["status"] == "checks_passed_on_observed_data"
     finally:
         good.close()
 
@@ -115,9 +115,9 @@ def test_an_unrunnable_recheck_does_not_leave_a_stale_certification(store, regis
         gone.close()
 
     row = graph_with_status(store)[0]
-    assert row["status"] != "certified", "a failed re-check left the old verdict standing"
+    assert row["status"] != "checks_passed_on_observed_data", "a failed re-check left the old verdict standing"
     view = relationships_for_agent(store)
-    assert not view["certified"], "agent still told to join through an unverified edge"
+    assert not view["checks_passed_on_observed_data"], "agent still told to join through an unverified edge"
 
 
 def test_cli_never_counts_unverified_edges_as_certified(store, tmp_path, capsys, acme):
@@ -131,7 +131,7 @@ def test_cli_never_counts_unverified_edges_as_certified(store, tmp_path, capsys,
 
     assert main(["verify-relationships", "--seed", str(seed), "--db", db]) == 0
     out = capsys.readouterr().out
-    assert "0 certified" in out
+    assert "0 checks passed on observed data" in out
     assert "unverified" in out.lower()
 
 
