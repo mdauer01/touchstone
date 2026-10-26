@@ -54,6 +54,7 @@ definition.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import sqlglot
@@ -98,6 +99,8 @@ CATEGORY = {
     "derived_expression": "unsupported shape",
     "unapproved_view": "unsupported shape",
     "toolchain_unqualified": "unqualified parser",
+    "transformation_undecided": "implication not decided",
+    "unrecognized_function": "unrecognized function",
 }
 
 _MARKERS = ("HAVING ", "QUALIFY ", "SELECT DISTINCT", "BOUND ")
@@ -150,6 +153,12 @@ class Authority:
         return ((self.applies_from is None or self.applies_from <= ts)
                 and (self.applies_to is None or ts < self.applies_to))
 
+    def current_at(self, now: str) -> bool:
+        """Still applicable at `now`: no recorded end, or an end still ahead.
+        A definition whose window closes next month was reported as one that
+        "has ended" (sweep 2, #45)."""
+        return self.applies_to is None or self.applies_to > now
+
 
 @dataclass
 class Outcome:
@@ -191,7 +200,7 @@ def raw_shape_problem(stmt: exp.Expression) -> str | None:
     if not isinstance(stmt, exp.Select):
         return "not a single SELECT (set operation or other query form)"
     checks = (
-        (stmt.args.get("with") is not None, "uses a CTE"),
+        (_with(stmt) is not None, "uses a CTE"),
         (stmt.find(exp.Subquery) is not None
          or any(n is not stmt for n in stmt.find_all(exp.Select)),
          "uses a subquery or derived table"),
@@ -381,13 +390,28 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
             or tuple(core.source_columns) != tuple(auth.core.source_columns):
         transformed = (auth.core.measure_expr in core.measure_expr
                        and core.measure_expr != auth.core.measure_expr)
-        violations.append(_reason(
-            "transformed_governed_measure" if transformed else "measure_changed",
-            (f"applies a transformation to the governed expression: "
-             f"{core.measure_expr} (definition: {auth.core.measure_expr})")
-            if transformed else
-            f"measure is {core.measure_expr}; the definition is "
-            f"{auth.core.measure_expr}"))
+        observed_node = _parse(core.measure_expr, dialect)
+        governed_node = _parse(auth.core.measure_expr, dialect)
+        def governed(n):
+            return n == governed_node
+        wrapper = (transformed and observed_node is not None and governed_node is not None
+                   and wrapper_only(observed_node, governed))
+        if wrapper and not definite_change(observed_node, governed):
+            # CAST(… AS DOUBLE), ROUND, × 1: may preserve the value. Refused
+            # honestly; the transformation is context (sweep 2, #41 #57).
+            undecided.append(_reason(
+                "transformation_undecided",
+                f"applies {core.measure_expr} to the governed expression "
+                f"{auth.core.measure_expr} — whether it preserves the value is "
+                f"not decided"))
+        else:
+            violations.append(_reason(
+                "transformed_governed_measure" if wrapper else "measure_changed",
+                (f"applies a transformation to the governed expression: "
+                 f"{core.measure_expr} (definition: {auth.core.measure_expr})")
+                if wrapper else
+                f"measure is {core.measure_expr}; the definition is "
+                f"{auth.core.measure_expr}"))
     for r in missing:
         if not related[r]:
             violations.append(_reason("required_filter_missing",
@@ -471,7 +495,11 @@ def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list
                                and not any(d.find(exp.Null) for d in others))
                 constrained = any(_columns(parsed[y]) & other_cols
                                   for y in extras if y != x)
-                if independent and not constrained:
+                # Another top-level condition on the required column itself
+                # (`… AND status BETWEEN 'completed' AND 'completed'`) may
+                # restore exactly what the OR weakened.
+                restored = any(_columns(parsed[y]) & rcols for y in extras if y != x)
+                if independent and not constrained and not restored:
                     return _reason("required_filter_not_preserved",
                                    f"required condition {r} is weakened through OR: {x}")
     eq = _column_equals_literal(rnode)
@@ -485,46 +513,118 @@ def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list
             values = [_literal_value(e) for e in node.expressions
                       if not isinstance(_unparen(e), exp.Null)]
             if values and all(v is not None and v[0] == want[0] for v in values) \
-                    and want in values and any(v != want for v in values):
+                    and want in values and any(v != want and _distinct_everywhere(v, want)
+                                               for v in values):
                 return _reason("required_filter_not_preserved",
                                f"required condition {r} is broadened: {related[0]} "
                                f"admits values the definition excludes")
         other = _column_equals_literal(node)
         if want is not None and other is not None and _same_column(other[0], col):
             got = _literal_value(other[1])
-            if got is not None and got[0] == want[0] and got != want:
+            if got is not None and got[0] == want[0] and got != want \
+                    and _distinct_everywhere(got, want):
                 return _reason("required_filter_not_preserved",
                                f"required condition {r} is replaced: {related[0]} selects "
                                f"rows the definition excludes")
     return None
 
 
+# A string the column's type could coerce: a number, a date or time, a
+# boolean. '2026-1-1' and '2026-01-01' are one DATE; as text they differ.
+_COERCIBLE = re.compile(r"[\s\d.:+\-/TZeE]*|(?i:true|false|yes|no|on|off|t|f|y|n)")
+
+
 def _literal_value(node: exp.Expression) -> tuple[str, object] | None:
-    """("num", Decimal) or ("str", text) for a literal (through casts that do
-    not change its kind), else None — never decided from SQL text."""
+    """("num", Decimal) or ("str", text) for a literal whose value does not
+    depend on the column's type, else None (not decided).
+
+    Round fifteen decided by value through casts and typed literals, and sweep
+    2 showed the coercion still decides: DATE'2026-1-1' is DATE'2026-01-01',
+    TIMESTAMP'2026-01-01 00:00:00' equals that DATE, 0.10000000000000001 is
+    0.1 as a DOUBLE, CAST(-0.4 AS INT) is 0 — each was called a replaced
+    required filter. Now only uncast integers (below 2^53, exact in every
+    numeric type), decimals that stay distinct as DOUBLE too, and plain
+    strings nothing could coerce are compared."""
     import decimal
 
     node = _unparen(node)
     negate = False
-    while isinstance(node, (exp.Neg, exp.Cast, exp.TryCast, exp.Paren)):
+    while isinstance(node, (exp.Neg, exp.Paren)):
         if isinstance(node, exp.Neg):
             negate = not negate
-        elif isinstance(node, (exp.Cast, exp.TryCast)):
-            inner = _unparen(node.this)
-            to = node.args.get("to")
-            numeric_target = to is not None and to.is_type(*exp.DataType.NUMERIC_TYPES)
-            if isinstance(inner, exp.Literal) and inner.is_string == numeric_target:
-                return None   # the cast converts between kinds: coercion-dependent
         node = node.this
     if not isinstance(node, exp.Literal):
-        return None
+        return None   # casts, typed literals (DATE '…'), anything computed
     if node.is_string:
-        return None if negate else ("str", node.name)
+        if negate or _COERCIBLE.fullmatch(node.name):
+            return None
+        return ("str", node.name)
     try:
         value = decimal.Decimal(node.name)
     except decimal.InvalidOperation:
         return None
-    return ("num", -value if negate else value)
+    if not value.is_finite():
+        return None
+    value = -value if negate else value
+    if value == value.to_integral_value():
+        return ("num", value) if abs(value) < 2 ** 53 else None
+    return ("dec", value)
+
+
+def _distinct_everywhere(a: tuple[str, object], b: tuple[str, object]) -> bool:
+    """Two literal values no numeric column type makes equal: decimals that
+    are also different DOUBLEs (0.1 and 0.10000000000000001 are not)."""
+    if a[0] == "dec" or b[0] == "dec":
+        return float(a[1]) != float(b[1]) and a[1] != b[1]
+    return a != b
+
+
+# A wrapper around the governed measure is a definite change only when it
+# changes every nonzero value: ± c (c ≠ 0), × or ÷ c (c ≠ 1), negation. A cast,
+# a rounding, × 1 or -(-x) may preserve the value — not decided.
+def wrapper_only(expr: exp.Expression, governed) -> bool:
+    """Whether `expr` is the governed expression under constants, casts and
+    functions alone — nothing else it reads. `SUM(amount) - SUM(refund)`
+    over a governed `SUM(amount)` reads another column: a changed measure,
+    not a wrapper."""
+    target = next((n for n in expr.walk() if governed(n)), None)
+    if target is None:
+        return False
+    rest = [n for n in expr.walk() if not _within(n, target)]
+    return not any(isinstance(n, (exp.Column, exp.AggFunc, exp.Anonymous)) for n in rest)
+
+
+def _within(node: exp.Expression, target: exp.Expression) -> bool:
+    while node is not None:
+        if node is target:
+            return True
+        node = node.parent
+    return False
+
+
+def definite_change(expr: exp.Expression, governed) -> bool:
+    import decimal
+
+    node = _unparen(expr)
+    if isinstance(node, exp.Neg):
+        return governed(_unparen(node.this))
+    if not isinstance(node, (exp.Add, exp.Sub, exp.Mul, exp.Div)):
+        return False
+    left, right = _unparen(node.this), _unparen(node.expression)
+    sides = [(left, right)] if isinstance(node, (exp.Sub, exp.Div)) else \
+        [(left, right), (right, left)]
+    for measure, lit in sides:
+        if not governed(measure):
+            continue
+        if not (isinstance(lit, exp.Literal) and not lit.is_string):
+            continue
+        try:
+            c = decimal.Decimal(lit.name)
+        except decimal.InvalidOperation:
+            continue
+        neutral = 0 if isinstance(node, (exp.Add, exp.Sub)) else 1
+        return c.is_finite() and c != neutral
+    return False
 
 
 # ----------------------------------------------------------------- shape B
@@ -583,12 +683,16 @@ _VIEW_ARGS = {
     exp.Select: frozenset({"expressions", "from", "from_", "where", "group", "order"}),
     exp.Table: frozenset({"this", "db", "catalog", "alias"}),
     exp.Group: frozenset({"expressions", "all"}),
+    # `AS v(country, …, net_revenue)` renames the view's columns positionally
+    # — it can swap two measures' names. Only the bare alias is allowed.
+    exp.TableAlias: frozenset({"this"}),
 }
 _ARG_NAMES = {"sample": "TABLESAMPLE", "version": "time travel (VERSION/TIMESTAMP AS OF)",
               "joins": "a join", "laterals": "LATERAL", "pivots": "PIVOT",
               "limit": "LIMIT", "offset": "OFFSET", "distinct": "DISTINCT",
-              "having": "HAVING", "qualify": "QUALIFY", "with": "a CTE",
-              "rollup": "ROLLUP", "cube": "CUBE", "grouping_sets": "GROUPING SETS"}
+              "having": "HAVING", "qualify": "QUALIFY", "with": "a CTE", "with_": "a CTE",
+              "rollup": "ROLLUP", "cube": "CUBE", "grouping_sets": "GROUPING SETS",
+              "columns": "a column alias list on the metric view"}
 _NODE_NAMES = {"TableSample": "TABLESAMPLE", "Version": "time travel", "Agg": "AGG()",
                "Window": "a window function", "Subquery": "a subquery",
                "Placeholder": "a bind parameter", "Parameter": "a bind parameter"}
@@ -640,6 +744,12 @@ def metric_view_relation(stmt: exp.Expression) -> str | None:
     return table_fqname(table).replace("`", "").lower()
 
 
+def _with(select: exp.Expression):
+    """The WITH clause, under either argument name sqlglot has used. Reading
+    only `with` saw no CTE at all on 30.x, which stores it as `with_`."""
+    return select.args.get("with_") or select.args.get("with")
+
+
 def check_metric_view(stmt: exp.Expression,
                       approved: dict[str, dict[str, Authority | None]],
                       dialect: str) -> list[ViewProjection]:
@@ -651,24 +761,38 @@ def check_metric_view(stmt: exp.Expression,
     top = stmt if isinstance(stmt, exp.Select) else None
     view_relation = metric_view_relation(stmt)
     view = approved.get(view_relation or "")
-    # Each call with the name its projection presents it under, so every
-    # early return still carries the claimed identity.
-    refs: dict[tuple, str | None] = {}
+    # One entry per PROJECTION, with the name it presents its value under, so
+    # every early return still carries the claimed identity — and a
+    # projection combining two measures stays one use (sweep 2, #46).
+    refs: dict[int, tuple[str, str | None, str]] = {}
     for call in calls:
         _, arg = measure_ref(call)
         m = arg.name.lower() if isinstance(arg, exp.Column) else "?"
         alias = call.find_ancestor(exp.Alias)
         output = alias.alias.lower() if alias is not None and alias.alias else None
-        refs.setdefault((m, output), (alias.this if alias is not None else call).sql(dialect))
+        node = call
+        while node.parent is not None and not isinstance(node.parent, exp.Select):
+            node = node.parent
+        refs.setdefault(id(node), (m, output,
+                                   (alias.this if alias is not None else call).sql(dialect)))
 
     def every(outcome_fn, governed: bool | None = None) -> list[ViewProjection]:
         return [ViewProjection(m, output, outcome_fn(m),
                                view is not None if governed is None else governed,
                                expression=written)
-                for (m, output), written in refs.items()]
+                for m, output, written in refs.values()]
 
+    ctes = {c.alias_or_name.lower() for c in top.find_all(exp.CTE)} if top is not None else set()
+    if view_relation and view_relation in ctes:
+        # MEASURE() over a CTE: which view, and through what, is not this
+        # rule set's to read — and no session context would change that.
+        return every(lambda m: unverifiable(
+            "shape_unsupported",
+            f"a measure reference over {view_relation}, a CTE — Shape B judges "
+            f"MEASURE() only where it reads an approved metric view directly",
+            shape="B"), governed=False)
     if top is None or any(c.find_ancestor(exp.Select) is not top for c in calls) \
-            or top.args.get("with") is not None or top.args.get("joins"):
+            or _with(top) is not None or top.args.get("joins"):
         return every(lambda m: unverifiable(
             "consumed_downstream",
             "the governed calculation is consumed by an outer query, CTE or "
@@ -810,7 +934,15 @@ def check_metric_view(stmt: exp.Expression,
                 emit(m, Outcome("unverifiable", list(shared), variation, "B",
                                 suspected=[transformation] if transformation else []))
                 continue
-            if transformation and presented_as_governed:
+            if transformation and presented_as_governed \
+                    and wrapper_only(inner, lambda n: n is call) \
+                    and not definite_change(inner, lambda n: n is call):
+                emit(m, Outcome("unverifiable", [_reason(
+                    "transformation_undecided",
+                    f"presented as {m} but computed as {written} — whether the "
+                    f"transformation preserves the value is not decided")],
+                    variation, "B", suspected=[transformation]))
+            elif transformation and presented_as_governed:
                 emit(m, Outcome("violation", [_reason(
                     "transformed_governed_measure", transformation)], variation, "B"))
             elif transformation:

@@ -117,8 +117,10 @@ def test_violation_outside_the_boundary_is_unverifiable(tmp_path, violation, bou
     # decidable: an unsupported condition on the required filter's own column
     # may BE that filter, and one on `channel` constrains the other branch of
     # the OR that weakened it. Then there is nothing to suspect.
+    # A condition on the required column itself may also restore what an OR
+    # weakened (sweep 2, #39).
     undecidable = ((boundary == "upper_required_col"
-                    and violation in ("missing", "broadened", "replaced"))
+                    and violation in ("missing", "broadened", "replaced", "or_weakened"))
                    or (violation == "or_weakened"
                        and boundary in ("upper_dimension", "dimension_eq_dim")))
     if not undecidable:

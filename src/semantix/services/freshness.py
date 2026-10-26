@@ -25,10 +25,12 @@ tamper-evident.
 from __future__ import annotations
 
 import hashlib
+import json
 
 from semantix.adapters.agents_schema import load_agents_schema
 from semantix.adapters.base import spec_content_text
-from semantix.adapters.dbt import load_dbt
+from semantix.adapters.catalog import catalog_sha
+from semantix.adapters.dbt import load_dbt_detailed
 from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.extraction.proof import POLICY_ID
@@ -56,7 +58,14 @@ SOURCE_SYSTEMS: dict[str, frozenset[str]] = {
     "agents_schema_path": frozenset({"agents_osi", "agents_lookml"}),
     "osi_path": frozenset({"ossie"}),
     "uc_metrics_path": frozenset({"uc_metrics"}),
+    "catalog_path": frozenset({"catalog"}),
 }
+
+# A source file the loaders enumerated but could not read. Freshness re-hashes
+# with the scan's own loaders, so a file that turns unreadable after the scan
+# (non-UTF-8, a malformed directive) is drift — it was silently ignored, and a
+# receipt stayed "fresh" while a rescan refused to certify.
+UNREADABLE = "<unreadable>"
 
 
 def current_estate_shas(
@@ -79,12 +88,19 @@ def current_estate_shas(
     shas: dict[tuple[str, str], set[str]] = {}
 
     computed = []
+    unreadable: list[tuple[str, dict]] = []
     if dbt_path:
-        computed += load_dbt(dbt_path)
+        arts, skipped = load_dbt_detailed(dbt_path)
+        computed += arts
+        unreadable += [("dbt", s) for s in skipped]
     if sql_dir:
-        computed += load_sql_dir(sql_dir, dialect)[0]
+        arts, skipped = load_sql_dir(sql_dir, dialect)
+        computed += arts
+        unreadable += [("sql", s) for s in skipped]
     if views_path:
-        computed += load_views_file(views_path, dialect)[0]
+        arts, skipped = load_views_file(views_path, dialect)
+        computed += arts
+        unreadable += [("views", s) for s in skipped]
     for artifact in computed:
         shas.setdefault((artifact.system, artifact.object_id), set()).add(_sha(artifact.sql))
 
@@ -98,12 +114,19 @@ def current_estate_shas(
         specs += load_agents_schema(agents_schema_path)
     if osi_path:
         from semantix.adapters.ossie import load_ossie
-        specs += load_ossie(osi_path, dialect)[0]
+        loaded, skipped = load_ossie(osi_path, dialect)
+        specs += loaded
+        unreadable += [("ossie", s) for s in skipped]
     if uc_metrics_path:
         from semantix.adapters.uc_metrics import load_uc_metrics
-        specs += load_uc_metrics(uc_metrics_path, dialect)[0]
+        loaded, skipped = load_uc_metrics(uc_metrics_path, dialect)
+        specs += loaded
+        unreadable += [("uc_metrics", s) for s in skipped]
     for spec in specs:
         shas.setdefault((spec.system, spec.name), set()).add(_sha(spec_content_text(spec)))
+    for system, s in unreadable:
+        if not s.get("informational"):
+            shas.setdefault((system, s["object_id"]), set()).add(UNREADABLE)
 
     return shas
 
@@ -117,6 +140,7 @@ def check_freshness(
     agents_schema_path: str | None = None,
     osi_path: str | None = None,
     uc_metrics_path: str | None = None,
+    catalog_path: str | None = None,
     dialect: str | None = None,
     scan_id: str | None = None,
 ) -> dict:
@@ -178,6 +202,7 @@ def check_freshness(
         "agents_schema_path": agents_schema_path,
         "osi_path": osi_path,
         "uc_metrics_path": uc_metrics_path,
+        "catalog_path": catalog_path,
     }
     checked_systems: set[str] = set()
     for source, value in sources.items():
@@ -188,7 +213,10 @@ def check_freshness(
                 "note": "no estate sources passed — freshness not re-checked"}
 
     try:
-        current = current_estate_shas(dialect=dialect, **sources)
+        current = current_estate_shas(dialect=dialect, **{
+            k: v for k, v in sources.items() if k != "catalog_path"})
+        if catalog_path:
+            current[("catalog", "catalog")] = {catalog_sha(catalog_path)}
     except Exception as e:  # noqa: BLE001 — degrade, never crash an attest
         return {**base, "status": "unknown",
                 "note": f"estate re-check failed ({type(e).__name__}: {e}) — "
@@ -197,6 +225,13 @@ def check_freshness(
     snapshot_shas: dict[tuple[str, str], set[str]] = {}
     for r in snapshot:
         snapshot_shas.setdefault((r["system"], r["object_id"]), set()).add(r["raw_sha"])
+    # What the scan enumerated but could not read, as the loaders report it.
+    for system, object_id in store.unreadable_artifacts(scan["scan_id"]):
+        if (system, object_id) not in snapshot_shas:
+            snapshot_shas[(system, object_id)] = {UNREADABLE}
+    recorded_catalog = (json.loads(scan.get("stats_json") or "{}") or {}).get("catalog_sha")
+    if recorded_catalog:
+        snapshot_shas[("catalog", "catalog")] = {recorded_catalog}
 
     changed: list[str] = []
     removed: list[str] = []
@@ -212,7 +247,7 @@ def check_freshness(
         for (system, object_id) in sorted(current)
         if (system, object_id) not in snapshot_shas
     ]
-    unchecked = sorted({r["system"] for r in snapshot} - checked_systems)
+    unchecked = sorted({system for system, _ in snapshot_shas} - checked_systems)
 
     drift = {"changed": changed, "added": added, "removed": removed}
     if changed or added or removed:

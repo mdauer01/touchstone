@@ -21,7 +21,7 @@ from semantix.extraction.sqlutil import (
     table_map,
     unwrap_select,
 )
-from semantix.models import CanonLevel, Fingerprint, PROOF_LEVELS, Provenance, SemanticCore
+from semantix.models import PROOF_LEVELS, CanonLevel, Fingerprint, Provenance, SemanticCore
 
 
 def extract_fingerprints(
@@ -671,3 +671,44 @@ def _synthesize_name(agg: exp.AggFunc) -> str:
     col = agg.find(exp.Column)
     base = type(agg).__name__.lower()
     return f"{base}_{col.name}" if col is not None else base
+
+
+# Aggregates the parser does not model as aggregates (it reads them as
+# opaque calls). Named so a row-level query calling one is still recognized
+# as computing a measure; any unknown call in an aggregating query is too.
+_AGGREGATE_LIKE = frozenset({
+    "product", "fsum", "sumkahan", "kahan_sum", "kahansum", "favg", "geomean",
+    "geometric_mean", "entropy", "mad", "histogram", "arbitrary", "json_group_array",
+    "json_group_object", "list", "array_agg_distinct", "bit_and", "bit_or", "bit_xor",
+    "bool_and", "bool_or", "approx_top_k", "approx_percentile", "percentile_approx",
+    "percentile", "percentile_cont", "percentile_disc", "kurtosis", "skewness",
+    "regr_slope", "regr_intercept", "corr", "covar_pop", "covar_samp", "mode",
+    "string_agg_distinct", "hll_sketch_agg", "every", "count_if", "max_by", "min_by",
+    "try_sum", "try_avg", "collect_list", "collect_set",
+})
+
+
+def unrecognized_measures(stmt: exp.Expression) -> list[tuple[str | None, str, list[str]]]:
+    """(output name, projection SQL, unknown functions) for each projection of
+    the outermost SELECT that may compute a measure through a function the
+    parser does not recognize: `product(amount)`, `fsum(x)`. Without this they
+    yielded no fingerprint and vanished — from coverage, and from the
+    monitor's denominator, which flattered both."""
+    select = stmt if isinstance(stmt, exp.Select) else None
+    if select is None:
+        return []
+    aggregating = (select.args.get("group") is not None
+                   or any(p.find(exp.AggFunc) is not None for p in select.expressions))
+    out = []
+    for proj in select.expressions:
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if inner.find(exp.AggFunc) is not None:
+            continue
+        unknown = sorted({a.name.lower() for a in inner.find_all(exp.Anonymous)
+                          if a.find_ancestor(exp.Window) is None})
+        if not unknown:
+            continue
+        if aggregating or any(u in _AGGREGATE_LIKE for u in unknown):
+            name = proj.alias if isinstance(proj, exp.Alias) and proj.alias else None
+            out.append((name, inner.sql(), unknown))
+    return out

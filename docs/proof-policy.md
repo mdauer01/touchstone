@@ -135,6 +135,16 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
   - Includes CTE and derived-table inlining variants, with traps: swapped and
     renamed columns, precedence, NOT over a substituted comparison, filters on
     both sides, chains.
+  - Generates combinations *inside* the grammar systematically
+    (`oracle.generate_grammar_combinations`): 8 source wrappers × 16 measures ×
+    10 filters × 7 groupings, 8,960 queries under `--full`.
+    - Wrappers: direct, CTE `*`, renamed, swapped, computed, filtered, derived,
+      chain.
+    - Filters: with `BETWEEN`, `NOT`, OR and redundant parentheses.
+    - Groupings: with ordinal, output alias, `ALL` and `HAVING`.
+
+    Every one reaches proof grade. Each is executed against its proof form, and
+    every pair the engine equates, across wrappers too, against each other.
   - Agreement challenges the rules; it does not prove them.
 - **`tests/test_sweep_two_counterexamples.py`.**
   - Replays 271 recorded pairs from the second sweep's findings 1–35 (excluding
@@ -153,8 +163,8 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
 | bench equivalence detection | 40/40 | 40/40 |
 | bench near-misses distinguished | 80/80 | 44/80 distinguished, 36 refused by name, 0 unproven |
 | acme demo proof-grade coverage | 100 % | 80 % (`ops_refund_rate` joins) |
-| oracle (default) proof-grade queries | — | 274 / 372 |
-| oracle (full) proof-grade queries | — | 8,598 / 15,655 |
+| oracle (default) proof-grade queries | — | 636 / 736 |
+| oracle (full) proof-grade queries | — | 17,421 / 24,478 (all 8,960 in-grammar combinations included) |
 | false certifications (bench, oracle, sweep replay) | sweep 2 found 35 classes | 0 |
 
 The bench lists every refused pair with its reason (`semantix bench`). These

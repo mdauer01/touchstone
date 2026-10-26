@@ -193,11 +193,22 @@ def test_transformed_governed_measure_never_conforms(tmp_path):
 
 
 def test_raw_table_transformation_is_named_as_such(tmp_path):
-    q = (f"SELECT ROUND({GOVERNED}, 2) AS net_revenue FROM main.finance.orders "
+    q = (f"SELECT ({GOVERNED}) * 2 AS net_revenue FROM main.finance.orders "
          f"WHERE status = 'completed'")
     f = only(run(tmp_path, _rows(q)))
     assert f["kind"] == "definition_violation"
     assert codes(f) == ["transformed_governed_measure"]
+
+
+@pytest.mark.parametrize("wrapper", ["ROUND({}, 2)", "CAST({} AS DOUBLE)", "({}) * 1",
+                                     "-(-({}))"])
+def test_a_wrapper_that_may_preserve_the_value_is_not_an_accusation(tmp_path, wrapper):
+    """Sweep 2, #41/#57: a cast, a rounding, × 1 or a double negation may
+    leave the value unchanged — refused honestly, never a violation."""
+    q = (f"SELECT {wrapper.format(GOVERNED)} AS net_revenue FROM main.finance.orders "
+         f"WHERE status = 'completed'")
+    f = only(run(tmp_path, _rows(q)))
+    assert f["kind"] == "unverifiable" and codes(f) == ["transformation_undecided"]
 
 
 @pytest.mark.parametrize("where, code", [

@@ -94,8 +94,8 @@ def test_inside_the_boundary_the_violation_still_stands(tmp_path, projection, ki
     # dropped required filter + unsupported condition (it could stand in for it)
     (f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders "
      f"WHERE channel = country", "predicate_unsupported"),
-    # transformation + LIMIT
-    (f"SELECT ROUND({GOVERNED}, 2) AS net_revenue FROM main.finance.orders "
+    # transformation + LIMIT (× 2 is a definite change; ROUND is not decided)
+    (f"SELECT ({GOVERNED}) * 2 AS net_revenue FROM main.finance.orders "
      f"WHERE status = 'completed' LIMIT 5", "shape_unsupported"),
     # changed measure + HAVING
     ("SELECT channel, SUM(amount) AS net_revenue FROM main.finance.orders "

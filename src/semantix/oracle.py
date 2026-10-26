@@ -326,6 +326,93 @@ SELF_TEST_PAIRS = [
 ]
 
 
+# ------------------------------------------- combinations inside the grammar
+#
+# semantix-proof/2's rules compose: a renamed CTE column under BETWEEN under
+# an output-alias GROUP BY. Each wrapper reads the same orders table through
+# a different source chain; each placeholder is a base column, spelled as the
+# wrapper exposes it. Every combination is executed against its own proof
+# form, and every pair the engine equates against each other — including
+# across wrappers, so `SUM(amt) … FROM s` (renamed) must bucket with, and
+# execute as, `SUM(amount) … FROM orders`.
+
+_BASE_COLS = ("order_id", "customer_id", "amount", "refund_amount", "a", "b", "c",
+              "qty", "price", "status", "channel", "order_date")
+_RENAMED = {c: f"r_{c}" for c in _BASE_COLS}
+_SWAPPED = {**{c: c for c in _BASE_COLS}, "amount": "refund_amount",
+            "refund_amount": "amount", "a": "b", "b": "a"}
+
+
+def _project(names: dict[str, str]) -> str:
+    return ", ".join(f"{c} AS {names[c]}" for c in _BASE_COLS)
+
+
+GRAMMAR_WRAPPERS: dict[str, tuple[str, str, dict[str, str]]] = {
+    # name: (WITH prefix, FROM relation, base column -> visible name)
+    "direct": ("", _O, {c: c for c in _BASE_COLS}),
+    "cte_star": (f"WITH s AS (SELECT * FROM {_O}) ", "s", {c: c for c in _BASE_COLS}),
+    "cte_rename": (f"WITH s AS (SELECT {_project(_RENAMED)} FROM {_O}) ", "s", _RENAMED),
+    # the trap: visible `amount` IS refund_amount
+    "cte_swap": (f"WITH s AS (SELECT {_project(_SWAPPED)} FROM {_O}) ", "s",
+                 {v: k for k, v in _SWAPPED.items()}),
+    "cte_filter": (f"WITH s AS (SELECT * FROM {_O} WHERE order_id > 1) ", "s",
+                   {c: c for c in _BASE_COLS}),
+    "derived": ("", f"(SELECT * FROM {_O}) AS t", {c: c for c in _BASE_COLS}),
+    "chain": (f"WITH s AS (SELECT * FROM {_O}), u AS (SELECT {_project(_RENAMED)} FROM s) ",
+              "u", _RENAMED),
+    "cte_computed": (f"WITH s AS (SELECT *, amount - refund_amount AS net FROM {_O}) ", "s",
+                     {**{c: c for c in _BASE_COLS}, "net": "net"}),
+}
+GRAMMAR_MEASURES = [
+    "SUM({amount})", "SUM({amount} - {refund_amount})", "SUM({a} + {b} * {c})",
+    "SUM(({a} + {b}) * {c})", "SUM({a} - ({b} - {c}))", "COUNT(*)", "COUNT({customer_id})",
+    "COUNT(DISTINCT {customer_id})", "AVG({amount})", "MIN({amount})", "MAX({amount})",
+    "SUM(CASE WHEN {status} = 'completed' THEN {amount} END)",
+    "SUM({amount}) FILTER (WHERE {channel} = 'web')", "SUM({qty} * {price})",
+    "SUM({amount}) / NULLIF(COUNT(*), 0)", "-SUM({amount})",
+]
+GRAMMAR_FILTERS = [
+    "", "{status} = 'completed'", "NOT {status} = 'completed'", "(({status} = 'completed'))",
+    "{amount} BETWEEN 1 AND 100", "NOT {amount} BETWEEN 1 AND 100",
+    "({status} = 'completed' OR {channel} = 'web')", "{status} IN ('completed', 'pending')",
+    "{amount} IS NOT NULL AND {channel} <> 'app'", "NOT ({amount} > 10 AND {channel} = 'web')",
+]
+GRAMMAR_GRAINS = [
+    ("", ""), ("{status}, ", "GROUP BY {status}"), ("{status} AS k, ", "GROUP BY 1"),
+    ("{status} AS k, ", "GROUP BY k"), ("{status}, {channel}, ", "GROUP BY ALL"),
+    ("DATE_TRUNC('month', {order_date}) AS mo, ", "GROUP BY mo"),
+    ("{status}, ", "GROUP BY {status} HAVING COUNT(*) > 1"),
+]
+
+
+def generate_grammar_combinations(full: bool = False) -> list[str]:
+    def q(wrapper, measure, flt, grain):
+        prefix, rel, names = GRAMMAR_WRAPPERS[wrapper]
+        fmt = {c: names.get(c, c) for c in _BASE_COLS}
+        if wrapper == "cte_computed":
+            measure = measure.replace("{amount} - {refund_amount}", "net")
+        sel, group = grain
+        where = f" WHERE {flt.format(**fmt)}" if flt else ""
+        return (f"{prefix}SELECT {sel.format(**fmt)}{measure.format(**fmt)} AS m "
+                f"FROM {rel}{where}{(' ' + group.format(**fmt)) if group else ''}")
+
+    out: list[str] = []
+    wrappers = list(GRAMMAR_WRAPPERS)
+    if full:
+        for w, m, f, g in product(wrappers, GRAMMAR_MEASURES, GRAMMAR_FILTERS, GRAMMAR_GRAINS):
+            out.append(q(w, m, f, g))
+    else:
+        # Every wrapper × measure, with filters and groupings rotated so each
+        # appears with every wrapper; plus every filter and grain over two
+        # anchors.
+        for i, (w, m) in enumerate(product(wrappers, GRAMMAR_MEASURES)):
+            out.append(q(w, m, GRAMMAR_FILTERS[i % len(GRAMMAR_FILTERS)],
+                         GRAMMAR_GRAINS[i % len(GRAMMAR_GRAINS)]))
+        for w, f, g in product(wrappers, GRAMMAR_FILTERS, GRAMMAR_GRAINS[:3]):
+            out.append(q(w, "SUM({amount} - {refund_amount})", f, g))
+    return list(dict.fromkeys(out))
+
+
 def generate_queries(full: bool = False) -> list[str]:
     """Single-measure DuckDB queries over the main estate. The default set
     varies one dimension at a time from a few anchors; `full` takes the
@@ -346,7 +433,7 @@ def generate_queries(full: bool = False) -> list[str]:
         for (gs, gc), m, f in product(GRAINS, ["SUM(amount)", "COUNT(DISTINCT customer_id)", "AVG(amount)"],
                                       ["", "status = 'completed'"]):
             out.append(q(gs, m, f, gc))
-    out += SPECIALS + INLINE_VARIANTS
+    out += SPECIALS + INLINE_VARIANTS + generate_grammar_combinations(full)
     return list(dict.fromkeys(out))
 
 

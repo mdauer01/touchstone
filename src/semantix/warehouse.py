@@ -48,7 +48,6 @@ class DuckDBWarehouse:
         models materialized as views (same pattern as the execution slice) —
         the zero-infra demo/CI path."""
         import duckdb
-
         import sqlglot
 
         con = duckdb.connect()
@@ -84,9 +83,17 @@ class DuckDBWarehouse:
     def query_records(self, sql: str) -> list[dict]:
         """Rows keyed by column name — for history pulls, where WHICH column
         holds the session context or the execution id is the point."""
-        cur = self._con.execute(sql)
-        names = [d[0] for d in cur.description or []]
-        return [dict(zip(names, row)) for row in cur.fetchall()]
+        rel = self._con.sql(sql)
+        if rel is None:
+            return []
+        names = list(rel.columns)
+        # TIMESTAMPTZ values arrive as text with their offset: converting them
+        # to Python needs pytz, which is not a dependency, and the history
+        # layer reads instants as text anyway (sweep 2, #63).
+        exprs = [f"CAST({qident(n)} AS VARCHAR) AS {qident(n)}"
+                 if str(t).upper().startswith("TIMESTAMP WITH TIME ZONE") else qident(n)
+                 for n, t in zip(names, rel.types)]
+        return [dict(zip(names, row)) for row in rel.project(", ".join(exprs)).fetchall()]
 
     def close(self) -> None:
         self._con.close()

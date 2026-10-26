@@ -97,13 +97,40 @@ Assert a context only when it holds for the whole export, for example when every
 dashboard in the window runs against one catalog and schema. The report states whether
 a context was asserted.
 
-A statement that follows a session-changing one in the same execution (`USE`, `SET`,
-`CREATE [TEMP] VIEW`, any other non-query statement) has no established relation
-identity and is unverifiable; the report counts them
-(`statements_after_session_change`).
+**Session state is reconstructed only from evidence.** What a short name reads can be
+changed by statements the session ran earlier ([session.py](../src/semantix/services/session.py)).
+The rules:
+
+- **What each statement can change.**
+  - `USE`, `SET`, and an unparseable or unrecognized statement can change every
+    *short* name.
+  - `CREATE`, `DROP`, `ALTER` and `CACHE` can change the names they touch: a temp view
+    `orders` shadows the short reference `orders`.
+  - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SHOW`, `DESCRIBE`, `EXPLAIN` and `COMMENT`
+    change nothing a name resolves to.
+  - Fully qualified names do not depend on `USE` or `SET`.
+- **When context is reconstructed.** Only for a `USE` earlier in the *same execution*,
+  where the order is certain: `USE SCHEMA staging; SELECT … FROM orders` reads
+  `<catalog>.staging.orders`.
+- **When identity is uncertain.** Any other event that may precede a statement makes
+  its relation identity depend on the session, and the statement is unverifiable. That
+  covers an event in another execution of the same session (`session_id`), and one in
+  an execution whose session the export does not record and that is not provably later
+  by `start_time`. The same applies to a bare `.sql` log, where order is known but
+  sessions are not.
+- **Counts.** The report shows `session_events`, `statements_after_session_change` and
+  `statements_with_reconstructed_context`.
+
+Export every statement type with `session_id`, as
+[export_databricks_history.sql](../scripts/export_databricks_history.sql) does. A
+SELECT-only export hides exactly the statements that change a session. An asserted
+`execution_context` is your statement that nothing outside the export changed these
+names either.
 
 **Identity.** A query is judged as the metric it claims. A `-- semantix: metric=<name>`
-comment names only the statement it is written on. A query tag or an `asset_map` entry
+comment names only the statement it is written on; a tag on the same line after a
+statement's semicolon belongs to that statement. Query tags may be `metric=<name>`,
+`metric: <name>` or JSON (`{"metric": "<name>"}`). A query tag or an `asset_map` entry
 belongs to the execution and names a metric only when the execution holds one query.
 Otherwise the projection's own alias is the claim, including aliases that look
 generated (`sum_revenue`) when the analyst wrote them.

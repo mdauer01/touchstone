@@ -19,8 +19,14 @@ import sqlglot
 from semantix.engine import run_scan
 from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.proof import (ASSUMPTIONS, POLICY_ID, RULES, parenthesize,
-                                       round_trips, strip_parens)
+from semantix.extraction.proof import (
+    ASSUMPTIONS,
+    POLICY_ID,
+    RULES,
+    parenthesize,
+    round_trips,
+    strip_parens,
+)
 from semantix.extraction.registry import SchemaRegistry
 from semantix.mcp import McpServer
 from semantix.models import PROOF_LEVELS, CanonLevel, Provenance, VerdictType
@@ -174,7 +180,8 @@ def legacy(tmp_path):
     con.execute("UPDATE scans SET stats_json = ?", (json.dumps(stats),))
     con.commit()
     con.close()
-    estate = {"sql_dir": str(tmp_path / "models"), "metrics_path": str(tmp_path / "metrics.yml")}
+    estate = {"sql_dir": str(tmp_path / "models"), "metrics_path": str(tmp_path / "metrics.yml"),
+              "catalog_path": str(tmp_path / "catalog.yml")}
     return {"tmp": tmp_path, "db": str(db), "estate": estate}
 
 

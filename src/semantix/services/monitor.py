@@ -43,6 +43,7 @@ Doctrine, applied to monitoring:
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -52,7 +53,7 @@ from sqlglot import exp
 
 from semantix.adapters.base import topo_sort
 from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
-from semantix.extraction.fingerprint import extract_fingerprints
+from semantix.extraction.fingerprint import extract_fingerprints, unrecognized_measures
 from semantix.extraction.proof import is_grammar_gap
 from semantix.extraction.registry import SchemaRegistry
 from semantix.extraction.sqlutil import table_fqname
@@ -85,10 +86,11 @@ from semantix.services.history import (
     qualify_tables,
 )
 from semantix.services.relationships import parse_statement_list  # same package: one
+from semantix.services.resolution import normalize_name
+
 # statement-splitting behavior for every history consumer, not two drifting ones.
 from semantix.services.session import classify, resolve, written_relations
-from semantix.services.resolution import normalize_name
-from semantix.store import Store
+from semantix.store import Store, utcnow
 from semantix.toolchain import toolchain_status
 
 # Aliases the analyst did not write: sqlglot's positional names and the
@@ -110,6 +112,10 @@ SEV_CANDIDATE_BASE = 40      # unnamed near miss: a hypothesis
 SEV_CONTESTED = 55           # exact match to one side of an authority dispute
 SEV_UNREGISTERED = 25
 _SAMPLE = 10                 # attribution lists are capped in the output
+# The run's reference instant for `compare_against: current` — one value per
+# monitor run, set by monitor_history.
+_NOW: contextvars.ContextVar[str] = contextvars.ContextVar("semantix_monitor_now",
+                                                           default="")
 _NO_TIME = "<no start time>"
 _BAD_TIME = "<unreadable start time>"
 
@@ -231,6 +237,9 @@ def monitor_history(
     windows, and any asserted context; without one, `context` applies to
     history rows only when `assert_context` says it covers every execution.
     """
+    from semantix.services.pilot import precise_ts
+
+    _NOW.set(precise_ts(utcnow()))
     scan = store.latest_scan()
     if scan is None:
         raise ValueError("no scans recorded — monitor needs a scan's "
@@ -467,6 +476,29 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
     relation = reads[0] if reads else "(ad-hoc)"
     provenance = Provenance(system="query_history", object_id=f"stmt_{stmt_id}")
     fps = extract_fingerprints(canon, relation, provenance, dialect, registry)
+    # Projections computed by functions the parser does not recognize are
+    # measure uses it cannot read: counted, unverifiable, never dropped.
+    for name, proj_sql, unknown in unrecognized_measures(stmt):
+        gap = (f"computed by a function semantix does not recognize "
+               f"({', '.join(f'{u}()' for u in unknown)}) — not read")
+        base_key = "|".join(["U", proj_sql, _evidence_key(evidence)])
+        identity = _identity(name, None, written)
+        key = f"{base_key}|{identity}"
+        obs = observed.setdefault(key, _Observed(
+            key=key, shape="A", base_key=base_key, identity=identity,
+            semantic_hash=hashlib.sha256(proj_sql.encode()).hexdigest(),
+            proof_grade=False, evidence=evidence))
+        obs.uses += 1
+        if name:
+            obs.names.add(name)
+        obs.relations.update(reads)
+        obs.statements.add(stmt_id)
+        obs.gaps.add(gap)
+        obs.attribute(ex)
+        obs.sample_sql = obs.sample_sql or sql_text
+        recurrence[base_key] = recurrence.get(base_key, 0) + 1
+    if not fps and unrecognized_measures(stmt):
+        return None
     if not fps:
         # A measure computed in a CTE or derived table the outer scope
         # merely projects is a measure the extractor does not READ — a
@@ -637,6 +669,7 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
     # with their windows: an unreadable definition can still be the one that
     # applies, and saying "no definition is evidenced" then is false.
     unreadable: dict[str, list[dict]] = {}
+    now = _NOW.get()
     if pilot is not None:
         from semantix.engine import build_claim
 
@@ -649,7 +682,8 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
                            f"({claim.error or claim.canon_level})")
                     excluded.setdefault(f"pilot:{view.name}/{spec.name}", why)
                     unreadable.setdefault(normalize_name(spec.name), []).append(
-                        {"why": why, "view": view.name, "current": view.applies_to is None})
+                        {"why": why, "view": view.name,
+                         "current": view.applies_to is None or view.applies_to > now})
                     continue
                 # Case variants (`Net_Revenue`, `net_revenue`) are one metric,
                 # as the scan already treats them: one concept key.
@@ -679,7 +713,7 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
     # Comparing against CURRENT definitions, only those still applicable can
     # disagree with each other.
     current_mode = pilot is not None and pilot.compare_against == "current"
-    pool = [a for a in authorities if a.applies_to is None] if current_mode else authorities
+    pool = [a for a in authorities if a.current_at(now)] if current_mode else authorities
     meta = {"concepts": len(concepts), "definitions": len(authorities),
             "authority_systems": chosen,
             "non_authoritative_definitions": len(computed),
@@ -813,9 +847,10 @@ def _eligible(obs: _Observed, defs: list[Authority], as_of: bool) -> list[Author
     for an October 2 execution)."""
     if as_of:
         return [a for a in defs if _covered(obs, a)]
-    # Against CURRENT definitions: those with no recorded end (all of them,
+    # Against CURRENT definitions: those not ended by now (all of them,
     # outside a pilot or when no windows are given).
-    return [a for a in defs if a.applies_to is None]
+    now = _NOW.get()
+    return [a for a in defs if a.current_at(now)]
 
 
 def _applicable_unreadable(obs: _Observed, claim: str, unreadable: dict,
@@ -865,7 +900,9 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
         # confirmation. Counted, described, left alone.
         reason = "; ".join(sorted(obs.gaps)) or "canonicalization below proof grade"
         code = ("context_unresolved" if "relation identity depends on the session" in reason
-                else "through_model" if "through-model" in reason else "below_proof_grade")
+                else "through_model" if "through-model" in reason
+                else "unrecognized_function" if "does not recognize" in reason
+                else "below_proof_grade")
         out = unverifiable(code, reason)
         return [_finding(base, "unverifiable", 0, None, "unverifiable", "none",
                          f"recurring measure could not be read at proof grade "
@@ -901,15 +938,27 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
         base = {**base, "calculation_matches": "; ".join(sorted(
             f"{a.label} as snapshotted — not evidenced for the execution time"
             for a in exact_all))}
-    if dark:
+    # Named after an approved metric whose definitions could not be read and
+    # none of which applies here: still NAMED. Falling through to "unnamed"
+    # let it conform to whatever else its calculation matched (sweep 2, #40).
+    unread_named = sorted(c for c in claims if c in unreadable and c not in by_name
+                          and c not in dark)
+    if dark or unread_named:
         evidence = base
         if exact:
             evidence = {**base, "calculation_matches": sorted(
                 exact, key=lambda a: (a.concept, a.label))[0].label}
-        return [_finding(evidence, "unverifiable", 0, c, "unverifiable", identity,
-                         f"named {c}, whose applicable definition could not be read: "
-                         f"{why}", unverifiable("below_proof_grade", why))
-                for c, why in sorted(dark.items())]
+        out = [_finding(evidence, "unverifiable", 0, c, "unverifiable", identity,
+                        f"named {c}, whose applicable definition could not be read: "
+                        f"{why}", unverifiable("below_proof_grade", why))
+               for c, why in sorted(dark.items())]
+        for c in unread_named:
+            why = (f"the approved definitions of {c} could not be read, and none is "
+                   f"evidenced for the execution time")
+            out.append(_finding(evidence, "unverifiable", 0, c, "unverifiable", identity,
+                                f"named {c}: {why}",
+                                unverifiable("no_definition_evidence", why)))
+        return out
     out: list[dict] = []
     if exact:
         # Several authoritative metrics can share one definition; the one the
@@ -1010,7 +1059,8 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
         outcome = unverifiable(
             "no_definition_evidence",
             _no_evidence_detail(obs, concept) if as_of else
-            f"no current definition of {concept} (every recorded one has ended)")
+            f"no current definition of {concept} (every recorded one ended before "
+            f"{_NOW.get()})")
         return _finding(base, "unverifiable", 0, concept, "unverifiable", identity,
                         f"{concept}: {_reason_text(outcome)}", outcome)
     defs = applicable
@@ -1096,7 +1146,9 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of,
                if claim and concept is not None else [])
     dark_claim = (_applicable_unreadable(obs, claim, unreadable, as_of)
                   if claim and concept is not None and claim != concept else None)
-    if dark_claim and not claimed:
+    unread_claim = (claim is not None and concept is not None and claim != concept
+                    and claim in unreadable and claim not in by_name and not dark_claim)
+    if (dark_claim or unread_claim) and not claimed:
         claimed = [claim]
     suspected = (f"presented as {claim_name} but computed as {obs.expression} over "
                  f"{obs.view}") if claimed else None
@@ -1117,6 +1169,10 @@ def _judge_view(obs: _Observed, by_name, by_concept, contested, as_of,
         outcome = unverifiable("below_proof_grade",
                                f"the applicable definition of {claim} could not be read: "
                                f"{dark_claim}", shape="B")
+    elif unread_claim:
+        outcome = unverifiable("no_definition_evidence",
+                               f"the approved definitions of {claim} could not be read, "
+                               f"and none is evidenced for the execution time", shape="B")
 
     # 2. The supported-SQL boundary. `derived_expression` is not a boundary:
     # it is the projection's own formula, which step 3 judges.

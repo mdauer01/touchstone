@@ -37,10 +37,23 @@ def read_text(path: str | Path) -> str:
         raise ValueError(f"{p}: could not be read ({e.strerror})") from e
 
 
-def load_yaml(path: str | Path, expect: type = dict) -> Any:
+class _TextTimestampLoader(yaml.SafeLoader):
+    """SafeLoader that leaves ISO instants as the text written: YAML's own
+    timestamp type truncates to microseconds and drops comma fractions."""
+
+
+_TextTimestampLoader.yaml_implicit_resolvers = {
+    key: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:timestamp"]
+    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
+def load_yaml(path: str | Path, expect: type = dict, *,
+              timestamps_as_text: bool = False) -> Any:
     p = Path(path)
     try:
-        data = yaml.safe_load(read_text(p))
+        data = (yaml.load(read_text(p), Loader=_TextTimestampLoader)  # noqa: S506 — SafeLoader
+                if timestamps_as_text else yaml.safe_load(read_text(p)))
     except yaml.YAMLError as e:
         raise ValueError(f"{p}: is not valid YAML — {e}") from e
     if data is None:

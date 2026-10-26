@@ -17,10 +17,10 @@ meaning, history, and receipt verification. Wire it up with:
 from __future__ import annotations
 
 import json
+import pathlib
 import sys
 from dataclasses import asdict
-import pathlib
-from typing import Any, Callable, IO
+from typing import IO, Any, Callable
 
 from semantix import __version__
 from semantix.signing import assess_receipt, verify_receipt_dict
@@ -211,6 +211,10 @@ class McpServer:
         scan_id = receipt.get("scan_id") if isinstance(receipt, dict) else None
         if not self.estate or not isinstance(scan_id, str):
             return None
+        if not self.store.issued(receipt):
+            return {"status": "unknown", "scan_id": scan_id,
+                    "note": "this store did not issue this receipt — its estate "
+                            "says nothing about it"}
         from semantix.services.freshness import check_freshness
 
         try:

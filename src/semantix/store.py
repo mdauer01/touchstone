@@ -29,21 +29,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from semantix.models import (
-    Claim,
-    Concept,
-    Fingerprint,
-    Receipt,
-    Verdict,
-    VerdictType,
-    VERDICT_PRECEDENCE,
-)
 # One normalization function for the whole system. The store used to carry a
 # private copy that disagreed with the resolver's on names containing digits
 # or punctuation, so a concept the resolver had clustered could not be found
 # again at attest time — yielding a SIGNED receipt with an empty
 # definition_version and empty lineage.
 from semantix.extraction.proof import POLICY_ID
+from semantix.models import (
+    VERDICT_PRECEDENCE,
+    Claim,
+    Concept,
+    Fingerprint,
+    Receipt,
+    Verdict,
+    VerdictType,
+)
 from semantix.services.resolution import normalize_name
 
 SCHEMA = """
@@ -631,6 +631,30 @@ class Store:
             "INSERT OR REPLACE INTO scan_artifact_state VALUES (?, ?, ?)",
             (scan_id, f"{system}:{object_id}", 1 if readable else 0),
         )
+
+    def issued(self, receipt: dict) -> bool:
+        """Whether THIS store issued exactly this receipt. A signature only
+        shows some key signed it: a receipt re-signed with another key, or
+        rewritten and re-signed, verifies — and was accepted for current use
+        against this store's estate."""
+        rid = receipt.get("receipt_id") if isinstance(receipt, dict) else None
+        if not isinstance(rid, str):
+            return False
+        row = self._conn.execute(
+            "SELECT payload_json FROM receipts WHERE receipt_id = ?", (rid,)).fetchone()
+        if row is None:
+            return False
+        try:
+            return json.loads(row["payload_json"]) == receipt
+        except ValueError:
+            return False
+
+    def unreadable_artifacts(self, scan_id: str) -> list[tuple[str, str]]:
+        """(system, object_id) of every artifact the scan enumerated but
+        could not read."""
+        return sorted(tuple(key.split(":", 1))  # type: ignore[misc]
+                      for key, readable in self.artifact_states().get(scan_id, {}).items()
+                      if not readable)
 
     def artifact_states(self) -> dict[str, dict[str, bool]]:
         """scan_id -> {artifact_key: readable}.

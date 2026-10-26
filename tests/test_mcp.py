@@ -58,7 +58,8 @@ def test_attest_returns_signed_receipt_and_flags_contradiction(acme, tmp_path):
     # configured with every scanned source, the same check passes.
     configured = McpServer(server.store.path,
                            estate={"dbt_path": str(acme / "dbt_project"),
-                                   "metrics_path": str(acme / "metrics.yml")})
+                                   "metrics_path": str(acme / "metrics.yml"),
+                                   "catalog_path": str(acme / "catalog.yml")})
     fresh_receipt = _payload(_call(configured, "attest", {"concept": "gmv"}))
     assert fresh_receipt["freshness"]["status"] == "fresh"
     checked = _payload(_call(configured, "verify_receipt", {"receipt": fresh_receipt}))

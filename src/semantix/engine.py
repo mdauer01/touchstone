@@ -7,6 +7,8 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
+import sqlglot
+
 from semantix.adapters.agents_schema import load_agents_schema
 from semantix.adapters.base import (
     ComputedArtifact,
@@ -15,14 +17,15 @@ from semantix.adapters.base import (
     spec_content_text,
     topo_sort,
 )
-from semantix.adapters.catalog import load_catalog
+from semantix.adapters.catalog import catalog_sha, load_catalog
 from semantix.adapters.dbt import load_dbt_detailed, load_dbt_metrics
 from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.ossie import load_ossie
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.adapters.uc_metrics import load_uc_metrics
 from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
+from semantix.extraction.fingerprint import extract_fingerprints, unrecognized_measures
+from semantix.extraction.proof import POLICY_ID
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import (
     PROOF_LEVELS,
@@ -38,7 +41,6 @@ from semantix.services.reconcile import reconcile
 from semantix.services.relationships import same_relation as same_rel
 from semantix.services.resolution import resolve_concepts
 from semantix.store import Store
-from semantix.extraction.proof import POLICY_ID
 from semantix.toolchain import QUALIFIED_SQLGLOT, toolchain_status
 
 
@@ -66,21 +68,30 @@ class ScanResult:
     # which reads as "this model defines no metric" and actively misled them
     # about which models the engine could not read at all.
     unparseable: list[str] = field(default_factory=list)
+    # Projections computed by functions the parser does not recognize
+    # (`product(amount)`): measures it cannot read. Each counts as one
+    # unverifiable measure, so it cannot improve coverage by vanishing.
+    unrecognized: list[str] = field(default_factory=list)
     # Session defaults the operator supplied for omitted qualifiers; recorded
     # so monitor/propose rebuild the SAME identity space the scan used.
     execution_context: dict = field(default_factory=dict)
     # Parser version the equalities were computed under (toolchain.py).
     toolchain: dict = field(default_factory=dict)
+    # Content hash of the catalog the scan resolved columns and types from:
+    # verdicts depend on it (a DOUBLE vs DECIMAL column changes results), so
+    # freshness re-checks it like any other source.
+    catalog_sha: str | None = None
 
     @property
     def parse_coverage(self) -> float:
-        """% of computed artifacts that parsed and QUALIFIED (optimized or
-        qualified). A statement about reading the SQL — not about whether any
-        measure in it can be verified."""
+        """% of computed artifacts that parsed and QUALIFIED (supported,
+        optimized or qualified). A statement about reading the SQL — not about
+        whether any measure in it can be verified."""
         total = sum(self.canon_levels.values())
         if not total:
             return 0.0
-        good = self.canon_levels.get("optimized", 0) + self.canon_levels.get("qualified", 0)
+        good = sum(self.canon_levels.get(level.value, 0) for level in
+                   (CanonLevel.SUPPORTED, CanonLevel.OPTIMIZED, CanonLevel.QUALIFIED))
         return 100.0 * good / total
 
     @property
@@ -96,7 +107,7 @@ class ScanResult:
         we could not read counts as at least one unverifiable measure:
         counting only the fingerprints we managed to extract let an estate
         with an unparseable model still report 100%."""
-        total = len(self.fingerprints) + self.unread_artifacts
+        total = len(self.fingerprints) + self.unread_artifacts + len(self.unrecognized)
         good = sum(1 for fp in self.fingerprints if fp.canon_level in PROOF_LEVELS)
         return good, total
 
@@ -125,8 +136,10 @@ class ScanResult:
             # The policy the verdicts were computed under: receipts and
             # freshness refuse to carry a positive verdict across a change.
             "proof_policy": POLICY_ID,
+            "catalog_sha": self.catalog_sha,
             "skipped": len(self.skipped),
             "unmeasured": len(self.unmeasured),
+            "unrecognized_measures": len(self.unrecognized),
             "duplicate_relations": len(self.duplicate_relations),
         }
 
@@ -206,6 +219,7 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
     fingerprints: list[Fingerprint] = []
     unmeasured: list[str] = []
     unparseable: list[str] = []
+    unrecognized: list[str] = []
     canon_levels: Counter = Counter()
 
     # Content per duplicated relation, so the ambiguity qualifier can tell a
@@ -248,6 +262,14 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
         if canon.level == CanonLevel.FAILED:
             unparseable.append(f"{artifact.system}:{artifact.object_id}")
         found = extract_fingerprints(canon, artifact.relation, provenance, dialect, registry)
+        try:
+            written = sqlglot.parse_one(artifact.sql, read=dialect)
+        except Exception:  # noqa: BLE001 — unreadable SQL is counted elsewhere
+            written = None
+        for name, proj_sql, unknown in (unrecognized_measures(written)
+                                        if written is not None else []):
+            unrecognized.append(f"{artifact.system}:{artifact.object_id} "
+                                f"{name or proj_sql} ({', '.join(unknown)})")
         if dupe_pending is not None:
             if found:
                 content_key = "|".join(sorted(fp.core.hash() for fp in found))
@@ -374,8 +396,10 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
         unmeasured=unmeasured,
         duplicate_relations=dupes,
         unparseable=unparseable,
+        unrecognized=unrecognized,
         execution_context=registry.execution_context,
         toolchain=toolchain,
+        catalog_sha=catalog_sha(catalog_path) if catalog_path else None,
     )
     store.finish_scan(scan_id, result.stats())
     return result, store
@@ -636,7 +660,7 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
                 )
                 return claim
 
-    sql = _synthesize_claim_sql(spec)
+    sql = _synthesize_claim_sql(spec, dialect)
     canon = canonicalize(sql, registry, dialect)
     claim.canon_level = canon.level.value
     if not canon.usable or canon.level == CanonLevel.PARSED:
@@ -693,11 +717,16 @@ def _is_aggregate_expr(expr: str) -> bool:
     return node.find(_exp.AggFunc) is not None
 
 
-def _synthesize_claim_sql(spec: DeclaredSpec) -> str:
+def _synthesize_claim_sql(spec: DeclaredSpec, dialect: str | None = None) -> str:
     parts = []
     for gb in spec.group_by:
         parts.append(gb)
-    parts.append(f"{spec.expr} AS {spec.name}")
+    # Quoted in the dialect: metric-view measures carry display names
+    # (`Net Revenue`), which unquoted made every declaration unreadable.
+    from sqlglot import exp as _exp
+
+    alias = _exp.to_identifier(spec.name, quoted=True).sql(dialect=dialect)
+    parts.append(f"{spec.expr} AS {alias}")
     sql = f"SELECT {', '.join(parts)} FROM {spec.model}"
     if spec.filters:
         sql += " WHERE " + " AND ".join(f"({f})" for f in spec.filters)

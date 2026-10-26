@@ -396,7 +396,12 @@ def _add_estate_args(parser: argparse.ArgumentParser) -> None:
                              "or dbt's target/osi_document.json)")
     parser.add_argument("--uc-metrics", dest="uc_metrics_path",
                         help="Unity Catalog metric view YAML (file or directory)")
-    parser.add_argument("--dialect", default="duckdb")
+    parser.add_argument("--catalog", dest="catalog_path",
+                        help="the catalog YAML the scan used — verdicts depend on its "
+                             "columns and types, so current reliance re-checks it")
+    # None: re-hash with the scan's own recorded dialect. A default of duckdb
+    # re-read a Databricks estate's backticks as drift.
+    parser.add_argument("--dialect", default=None)
 
 
 def _estate_kwargs(args: argparse.Namespace) -> dict | None:
@@ -409,10 +414,12 @@ def _estate_kwargs(args: argparse.Namespace) -> dict | None:
         "agents_schema_path": args.agents_schema_path,
         "osi_path": args.osi_path,
         "uc_metrics_path": args.uc_metrics_path,
+        "catalog_path": getattr(args, "catalog_path", None),
     }
     if not any(estate.values()):
         return None
-    estate["dialect"] = args.dialect
+    if args.dialect:
+        estate["dialect"] = args.dialect
     return estate
 
 
@@ -456,6 +463,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"  ! {len(result.unparseable)} artifact(s) COULD NOT BE PARSED: "
               f"{', '.join(result.unparseable[:5])}"
               + (" …" if len(result.unparseable) > 5 else ""))
+    if result.unrecognized:
+        print(f"  ! {len(result.unrecognized)} measure(s) computed by functions semantix "
+              f"does not recognize — counted as unverifiable: "
+              f"{', '.join(result.unrecognized[:5])}"
+              + (" …" if len(result.unrecognized) > 5 else ""))
     if result.unmeasured:
         print(f"  ! {len(result.unmeasured)} artifact(s) yielded no measure: "
               f"{', '.join(result.unmeasured[:5])}"
@@ -724,7 +736,12 @@ def _cmd_verify_receipt(args: argparse.Namespace) -> int:
 
         store = _open_existing(args.db)
         estate.pop("dialect", None)   # the receipt's scan records its own
-        live = check_freshness(store, scan_id=receipt["scan_id"], **estate)
+        if store.issued(receipt):
+            live = check_freshness(store, scan_id=receipt["scan_id"], **estate)
+        else:
+            live = {"status": "unknown", "scan_id": receipt["scan_id"],
+                    "note": "this store did not issue this receipt — its estate "
+                            "says nothing about it"}
         store.close()
         print(f"  live re-check against scan {receipt['scan_id']}: {live.get('status')}"
               + (f" — {live['note']}" if live.get("note") else ""))
@@ -849,7 +866,10 @@ def _cmd_mine_relationships(args: argparse.Namespace) -> int:
     from semantix.adapters.catalog import load_catalog, load_declared_relationships
     from semantix.extraction.registry import SchemaRegistry
     from semantix.services.relationships import (
-        graph_with_status, mine_sql_text, record_declared, record_mined,
+        graph_with_status,
+        mine_sql_text,
+        record_declared,
+        record_mined,
     )
 
     if not args.history_file and not (args.warehouse_url and args.history_query):
@@ -1073,7 +1093,9 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
                              asset_map=asset_map)
     _print_monitor(result)
     if args.json_out:
-        Path(args.json_out).write_text(json.dumps(result, indent=2))
+        out = Path(args.json_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(result, indent=2))
         print(f"  findings JSON: {args.json_out}")
     # Only VIOLATIONS fail the gate: a candidate is a hypothesis by
     # construction, and failing CI on a hypothesis is the alert-fatigue path.
@@ -1126,6 +1148,18 @@ def _print_monitor(result: dict) -> None:
     if h["executions_without_time"]:
         print(f"  {h['executions_without_time']} execution(s) carry no start time — "
               f"no definition can be evidenced for them")
+    if h.get("executions_with_unreadable_time"):
+        print(f"  {h['executions_with_unreadable_time']} execution(s) carry an unreadable "
+              f"start time — no definition can be evidenced for them")
+    if h.get("executions_outside_window"):
+        print(f"  {h['executions_outside_window']} execution(s) fall outside the pilot "
+              f"window — not judged")
+    if h.get("session_events"):
+        print(f"  session: {h['session_events']} statement(s) that can change name "
+              f"resolution (USE/SET/CREATE …) · {h['statements_after_session_change']} "
+              f"statement(s) whose relation identity therefore depends on the session · "
+              f"{h['statements_with_reconstructed_context']} resolved from an earlier USE "
+              f"in the same execution")
     f = result["funnel"]
     n = f["measure_uses"]
 

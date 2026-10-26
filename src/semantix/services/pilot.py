@@ -114,7 +114,8 @@ def load_pilot(directory: str | Path, dialect: str) -> Pilot:
     if not manifest.is_file():
         raise ValueError(f"{root}: no pilot.yml — a pilot package is a directory "
                          f"with a pilot.yml manifest (see docs/pilot.md)")
-    data = load_yaml(manifest)
+    # Instants stay text: nanosecond boundaries, as written (sweep 2, #47).
+    data = load_yaml(manifest, timestamps_as_text=True)
     _refuse_unknown(data, _TOP_KEYS, "pilot.yml")
 
     history = _required_path(root, data.get("history"), "history")
@@ -281,7 +282,8 @@ def _ts(value: object, what: str) -> str | None:
         raise ValueError(f"{what}: {e}") from None
 
 
-_FRACTION = re.compile(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?(.*)$")
+# ISO 8601 allows a comma as the decimal sign.
+_FRACTION = re.compile(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)(?:[.,](\d+))?(.*)$")
 
 
 def precise_ts(text: str) -> str:
@@ -291,14 +293,19 @@ def precise_ts(text: str) -> str:
     start against that version. Raises on unreadable input."""
     raw = text.strip()
     m = _FRACTION.match(raw)
-    if m is None:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        fraction = ""
-    else:
-        base, fraction, rest = m.group(1), m.group(2) or "", m.group(3) or ""
-        if len(fraction) > 9:
-            raise ValueError(f"unreadable instant {text!r}: more than nanosecond precision")
-        parsed = datetime.fromisoformat((base.replace(" ", "T") + rest).replace("Z", "+00:00"))
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc)
+    try:
+        if m is None:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            fraction = ""
+        else:
+            base, fraction, rest = m.group(1), m.group(2) or "", m.group(3) or ""
+            if len(fraction) > 9:
+                raise ValueError(f"unreadable instant {text!r}: more than nanosecond precision")
+            parsed = datetime.fromisoformat((base.replace(" ", "T") + rest).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+    except OverflowError:
+        # An instant at the edge of the calendar shifted out of range by its
+        # offset: unreadable, not a crash (sweep 2, #61).
+        raise ValueError(f"unreadable instant {text!r}: out of range") from None
     return parsed.strftime("%Y-%m-%dT%H:%M:%S") + "." + fraction.ljust(9, "0") + "Z"

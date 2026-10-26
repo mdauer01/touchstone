@@ -168,7 +168,8 @@ def certified(tmp_path):
     run_scan(sql_dir=str(models), catalog_path=str(tmp_path / "catalog.yml"),
              metrics_path=str(tmp_path / "metrics.yml"),
              db_path=str(tmp_path / "s.db"))[1].close()
-    estate = {"sql_dir": str(models), "metrics_path": str(tmp_path / "metrics.yml")}
+    estate = {"sql_dir": str(models), "metrics_path": str(tmp_path / "metrics.yml"),
+              "catalog_path": str(tmp_path / "catalog.yml")}
     return {"tmp": tmp_path, "db": str(tmp_path / "s.db"), "model": model, "estate": estate}
 
 
@@ -202,7 +203,8 @@ def test_fresh_receipt_is_not_current_after_the_estate_changes_cli(certified, ca
     path = certified["tmp"] / "r.json"
     path.write_text(json.dumps(_call(server, "attest", {"concept": "m"})))
     live = ["--db", certified["db"], "--sql-dir", certified["estate"]["sql_dir"],
-            "--metrics", certified["estate"]["metrics_path"]]
+            "--metrics", certified["estate"]["metrics_path"],
+            "--catalog", certified["estate"]["catalog_path"]]
     assert main(["verify-receipt", str(path), "--require-current", *live]) == 0
     assert main(["verify-receipt", str(path), "--require-current"]) == 1   # offline
     _edit(certified)

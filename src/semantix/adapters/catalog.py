@@ -18,6 +18,14 @@ from semantix.adapters.loadutil import load_yaml
 RESERVED_SECTIONS = {"primary_keys", "relationships"}
 
 
+def catalog_sha(path: str | Path) -> str:
+    """Content identity of a catalog file, as scans record it and freshness
+    re-checks it."""
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def load_catalog(path: str | Path) -> dict[str, dict[str, str]]:
     """Two passes, because the shape alone is ambiguous.
 

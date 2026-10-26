@@ -462,8 +462,8 @@ canonicalizer's own output tests the same imagination that wrote the canonicaliz
 ### The execution oracle
 
 ```bash
-.venv/bin/semantix oracle            # ~380 queries, ~780 pairs + ~2,200 proof-form executions, ~3s
-.venv/bin/semantix oracle --full     # ~15,650 queries, ~51,000 pairs + ~69,000 proof-form executions
+.venv/bin/semantix oracle            # ~740 queries, ~2,500 pairs + ~5,100 proof-form executions, ~8s
+.venv/bin/semantix oracle --full     # ~24,500 queries, ~111,500 pairs + ~139,000 proof-form executions
 ```
 
 The oracle does not ask the canonicalizer whether it is right. It generates queries
@@ -493,8 +493,8 @@ exact even beyond the 28 significant digits a default decimal context keeps:
 
 | Run | Pair executions | Proof-form executions | Disagreements |
 | --- | --- | --- | --- |
-| Default | ~780 | ~2,200 | 0 |
-| `--full` | ~51,000 | ~69,000 | 0 |
+| Default | ~2,500 | ~5,100 | 0 |
+| `--full` | ~111,500 | ~139,000 | 0 |
 
 Its scope is DuckDB execution of DuckDB-dialect SQL. The other dialects in the matrix
 are canonicalized by `bench`, not executed.
@@ -548,6 +548,17 @@ was true then, not now: offline verification establishes signature integrity and
 historical validity only. `verify-receipt --require-current --db … <estate sources>`
 and the MCP tool on a server configured with the estate perform the live check; an
 `--as-of` receipt is never valid for current use.
+
+What the live check requires:
+
+- **Every source the scan read is re-checked**, including the `--catalog`. Verdicts
+  depend on the catalog's columns and types, so an unchecked catalog leaves freshness
+  `partial`.
+- **Files the scan's loaders could not read count too.** A file that becomes unreadable
+  is drift.
+- **The receipt was issued by the store doing the checking.** A receipt re-signed under
+  another key, however valid its signature, is never current there.
+- **The estate is re-hashed in the scan's own dialect** unless `--dialect` is given.
 
 ### The completeness gate
 

@@ -28,7 +28,8 @@ def scan(estate, db_path, **kw):
 
 def estate_kwargs(estate):
     return {"dbt_path": str(estate / "dbt_project"),
-            "metrics_path": str(estate / "metrics.yml")}
+            "metrics_path": str(estate / "metrics.yml"),
+            "catalog_path": str(estate / "catalog.yml")}
 
 
 def test_fresh_when_estate_unchanged(acme, tmp_path):
@@ -81,7 +82,8 @@ def test_partial_when_a_scanned_system_is_not_rechecked(acme, tmp_path):
 
     fr = check_freshness(store, dbt_path=str(estate / "dbt_project"))
     assert fr["status"] == "partial"
-    assert fr["unchecked_systems"] == ["metrics_yaml"]
+    # The catalog is a source too: the verdicts depend on its columns and types.
+    assert fr["unchecked_systems"] == ["catalog", "metrics_yaml"]
     # crucially: unchecked claims are NOT counted as removed
     assert fr["estate_drift"]["removed"] == []
 
@@ -195,6 +197,7 @@ def test_cli_attest_with_estate_sources(acme, tmp_path, capsys):
         "attest", "net_revenue", "--db", str(db),
         "--dbt", str(estate / "dbt_project"),
         "--metrics", str(estate / "metrics.yml"),
+        "--catalog", str(estate / "catalog.yml"),
     ]) == 0
     captured = capsys.readouterr()
     receipt = json.loads(captured.out)  # stdout stays pure JSON
@@ -208,6 +211,7 @@ def test_cli_attest_with_estate_sources(acme, tmp_path, capsys):
         "attest", "net_revenue", "--db", str(db),
         "--dbt", str(estate / "dbt_project"),
         "--metrics", str(estate / "metrics.yml"),
+        "--catalog", str(estate / "catalog.yml"),
     ]) == 0
     captured = capsys.readouterr()
     receipt = json.loads(captured.out)

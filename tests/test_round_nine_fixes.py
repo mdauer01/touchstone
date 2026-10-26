@@ -73,7 +73,8 @@ def test_mcp_fresh_current_receipt_is_current_use(acme, tmp_path):
     run_scan(dbt_path=str(acme / "dbt_project"), metrics_path=str(acme / "metrics.yml"),
              catalog_path=str(acme / "catalog.yml"), db_path=str(db))
     server = McpServer(str(db), estate={"dbt_path": str(acme / "dbt_project"),
-                                        "metrics_path": str(acme / "metrics.yml")})
+                                        "metrics_path": str(acme / "metrics.yml"),
+                                        "catalog_path": str(acme / "catalog.yml")})
     receipt = _call(server, "attest", {"concept": "gmv"})
     verdict = _call(server, "verify_receipt", {"receipt": receipt})
     assert verdict["current_use"] is True and verdict["valid"] is True
