@@ -62,7 +62,7 @@ from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints, unrecognized_measures
 from semantix.extraction.proof import is_grammar_gap
 from semantix.extraction.registry import SchemaRegistry
-from semantix.extraction.sqlutil import table_fqname
+from semantix.extraction.sqlutil import faithful_render, table_fqname
 from semantix.models import (
     PROOF_LEVELS,
     CanonLevel,
@@ -178,6 +178,9 @@ class _Observed:
     measure: str | None = None
     output: str | None = None
     view_outcome: Outcome | None = None
+    # Columns whose declared type makes literal comparison engine-specific
+    # (a collation, fixed-length CHAR): no replaced/broadened decision on them.
+    literal_undecided: frozenset = frozenset()
     expression: str | None = None   # the metric-view projection as written
     governed_reference: bool = False
     uses: int = 0
@@ -465,6 +468,21 @@ def monitor_history(
 
 # ------------------------------------------------------------ observation
 
+_ENGINE_SPECIFIC_TEXT = re.compile(r"\bCOLLATE\b|^\s*(N?CHAR|BPCHAR|CHARACTER)\b(?!\s+VARYING)",
+                                   re.IGNORECASE)
+
+
+def _literal_undecided(registry: SchemaRegistry, reads: list[str]) -> frozenset:
+    """Columns of the relations read whose declared type makes `col = 'x'`
+    engine-specific: a collation (UTF8_LCASE matches 'Completed') or
+    fixed-length CHAR (blank-padded comparison). Round 17 found literals on
+    such columns called replaced or broadened required filters."""
+    return frozenset(c.lower() for r in reads
+                     for c, t in registry.column_types(r).items()
+                     if _ENGINE_SPECIFIC_TEXT.search(t))
+
+
+
 def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
                   dialect: str, evidence, explicit, observed: dict,
                   recurrence: dict, session_gap: str | None = None) -> str | None:
@@ -473,7 +491,14 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
     written = _written_aliases(stmt)
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
-    canon = canonicalize(sql_text, registry, dialect)
+    # The tree carries the execution's context (short names qualified in
+    # place), so it is judged as RENDERED — but only when the rendering is
+    # faithful: the Spark generator hoists a derived table's WITH to the top,
+    # changing what its names read (round 17). Unfaithful = unreadable.
+    source = faithful_render(stmt, dialect)
+    if source is None:
+        return "unreadable"
+    canon = canonicalize(source, registry, dialect)
     if canon.level == CanonLevel.FAILED or canon.ast is None:
         return "unreadable"
     # Inside the proof grammar, CTEs and derived tables were inlined by stated
@@ -554,7 +579,8 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
             key=key, shape="A", base_key=base_key, identity=identity,
             semantic_hash=core_hash, proof_grade=proof, hypothesis=hypothesis,
             core=fp.core, components=core_components(fp.core),
-            shape_problem=shape_problem, evidence=evidence, explicit=explicit))
+            shape_problem=shape_problem, evidence=evidence, explicit=explicit,
+            literal_undecided=_literal_undecided(registry, reads)))
         obs.uses += 1
         obs.names.update(f.concept_candidate for f in group)
         obs.explicit_aliases |= {f.concept_candidate.lower() for f in group} & written
@@ -1022,7 +1048,7 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
             for a in stale_near))}
     if near:
         judged = [(auth, check_raw(obs.core, auth, dialect, obs.shape_problem, models,
-                                   obs.hypothesis))
+                                   obs.hypothesis, obs.literal_undecided))
                   for auth in near]
         conforming = [(a, o) for a, o in judged if o.status == "conforming"]
         if conforming:
@@ -1086,7 +1112,7 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
                         f"{concept}: {_reason_text(outcome)}", outcome)
     defs = applicable
     judged = [(a, check_raw(obs.core, a, dialect, obs.shape_problem, models,
-                            obs.hypothesis))
+                            obs.hypothesis, obs.literal_undecided))
               for a in defs]
     conforming = [(a, o) for a, o in judged if o.status == "conforming"]
     if conforming:

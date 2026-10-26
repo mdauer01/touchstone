@@ -30,6 +30,14 @@ Grammar (policy semantix-proof/2):
 * aggregates SUM, COUNT (incl. COUNT(*) and DISTINCT), AVG, MIN, MAX, with
   an optional FILTER (WHERE …), and GROUP BY / HAVING over the above;
 * every column resolves to a known column of the source.
+
+Round seventeen found the PARSE itself disagreeing with the engines (`%` at
+the precedence of `+`; IS / IS DISTINCT FROM / NOT bound across an
+unparenthesized comparison), so constructs whose reading the parser and the
+engines are known to disagree on are refused, by token where the tree cannot
+tell them apart (an unquoted DATE_TRUNC unit, function-form LIKE). The
+grammar is frozen (tests/test_grammar_frozen.py): no construct joins it
+without a policy-id bump and the re-enable criteria in docs/proof-policy.md.
 """
 
 from __future__ import annotations
@@ -56,8 +64,10 @@ RULES = {
               "replace the consumer's references and its WHERE is conjoined",
     "star": "SELECT * is expanded from the source's known columns",
     "unused_cte": "a CTE that nothing reads is removed",
-    "order": "ORDER BY without LIMIT/OFFSET is removed, unless it holds the only aggregate "
-             "(which would make the query an aggregate one)",
+    "order": "the final query's ORDER BY without LIMIT/OFFSET is removed, unless it holds "
+             "the only aggregate (which would make the query an aggregate one); an "
+             "inlined body's ORDER BY is refused, since the order rows are summed in "
+             "changes floating-point SUM and AVG",
     "group_ordinal": "a GROUP BY ordinal is replaced by the projection it names",
     "output_alias": "a GROUP BY or HAVING name that is a projection alias and NOT a "
                     "source column is replaced by that projection",
@@ -76,8 +86,8 @@ ASSUMPTIONS = (
     "column types are those the catalog or registered model declares",
     "expressions evaluate without raising errors, so the order in which AND/OR "
     "operands are evaluated does not change a result",
-    "ORDER BY without a bound changes no value: the grammar has no order-sensitive "
-    "function",
+    "the final query's ORDER BY without a bound changes no value: it orders the "
+    "result after every aggregate is computed",
     "relation identity is the name the SQL wrote, completed only by the "
     "operator-supplied execution context",
     "identifier case folding follows the dialect",
@@ -111,7 +121,7 @@ _SCALAR_FUNCTIONS = (
 )
 _EXPRESSIONS = (
     exp.Column, exp.Identifier, exp.Literal, exp.Null, exp.Boolean, exp.Star,
-    exp.Neg, exp.Paren, exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod, exp.IntDiv,
+    exp.Neg, exp.Paren, exp.Add, exp.Sub, exp.Mul, exp.Div, exp.IntDiv,
     exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.NullSafeEQ, exp.NullSafeNEQ,
     exp.And, exp.Or, exp.Not, exp.In, exp.Between, exp.Is, exp.Like, exp.ILike,
     exp.DataType, exp.DataTypeParam, exp.Var, exp.Interval, exp.Alias, exp.Tuple,
@@ -144,14 +154,17 @@ _NODE_NAMES = {"Rollup": "ROLLUP", "Cube": "CUBE", "GroupingSets": "GROUPING SET
                "Pivot": "PIVOT", "Placeholder": "a bind parameter",
                "Parameter": "a bind parameter", "TableSample": "TABLESAMPLE",
                "Qualify": "QUALIFY", "Limit": "LIMIT", "Offset": "OFFSET",
-               "Exists": "EXISTS", "Array": "ARRAY"}
+               "Exists": "EXISTS", "Array": "ARRAY",
+               # sqlglot parses `%` at the precedence of `+`; DuckDB and Spark
+               # bind it like `*` — `qty + 1 % 3` is read differently.
+               "Mod": "% (the parser and the engines disagree on its precedence)"}
 
 # Binding strength, for parenthesizing a substituted expression.
 _PRECEDENCE = [
     (exp.Or,), (exp.And,), (exp.Not,),
     (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.NullSafeEQ, exp.NullSafeNEQ,
      exp.In, exp.Between, exp.Is, exp.Like, exp.ILike),
-    (exp.Add, exp.Sub), (exp.Mul, exp.Div, exp.Mod, exp.IntDiv), (exp.Neg,),
+    (exp.Add, exp.Sub), (exp.Mul, exp.Div, exp.IntDiv), (exp.Neg,),
 ]
 
 
@@ -195,6 +208,7 @@ def certify(sql: str, registry, dialect: str) -> ProofResult:
     except Exception as e:  # noqa: BLE001 — arbitrary input
         return ProofResult(None, (), f"could not parse: {e}")
     try:
+        _check_tokens(sql, dialect)
         if not isinstance(parsed, exp.Select):
             raise Refusal("not a single SELECT (set operation or other statement)")
         normalized = normalize_identifiers(parsed.copy(), dialect=dialect)
@@ -243,8 +257,140 @@ def _check_grammar(node: exp.Expression) -> None:
             raise Refusal("uses LIMIT/OFFSET")
     if isinstance(node, exp.Distinct) and not isinstance(node.parent, _AGGREGATES):
         raise Refusal("uses DISTINCT")
+    if isinstance(node, exp.Star) and any(v not in (None, [], False)
+                                          for v in node.args.values()):
+        raise Refusal("uses * with a modifier (EXCLUDE/EXCEPT/REPLACE/RENAME/ILIKE)")
+    if isinstance(node, exp.With) and not isinstance(node.parent, exp.Select) \
+            or isinstance(node, exp.With) and node.parent.parent is not None:
+        # A derived table's or CTE's own WITH scopes its names; resolving
+        # them against the outer WITH read the wrong body (round 17).
+        raise Refusal("uses a WITH that is not the statement's own")
+    if isinstance(node, exp.Table) and any("." in part.name for part in node.parts):
+        # `"raw.orders"` is ONE identifier (a table named raw.orders in the
+        # current schema) and DuckDB reads `'raw.orders'` as a file; both parse
+        # to the same tree, and neither is raw.orders.
+        raise Refusal(f"table name {node.sql()} is a single identifier containing a dot "
+                      f"(or a string); which relation it names is not established",
+                      "identity")
+    if isinstance(node, exp.DataType) and node.this in _FLOAT_TYPES and node.expressions:
+        raise Refusal("uses a parameterized floating-point type (FLOAT(p)); its "
+                      "rendering is not faithful across dialects")
+    if isinstance(node, _CHAINED) or isinstance(node, exp.Not):
+        _check_chain(node)
+    if isinstance(node, exp.Between):
+        _check_between(node)
     for child in node.iter_expressions():
         _check_grammar(child)
+
+
+# Comparison-tier operators: the parser and the engines bind CHAINS of these
+# differently when nothing parenthesizes them — sqlglot reads
+# `tier = 1 IS NOT FALSE` as `tier = (1 IS NOT FALSE)`, DuckDB and Spark as
+# `(tier = 1) IS NOT FALSE`, and `NOT a IN (…) IN (…)` likewise.
+_CHAINED = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.NullSafeEQ,
+            exp.NullSafeNEQ, exp.In, exp.Between, exp.Is, exp.Like, exp.ILike)
+_FLOAT_TYPES = frozenset({exp.DataType.Type.FLOAT, exp.DataType.Type.DOUBLE})
+
+
+def _check_chain(node: exp.Expression) -> None:
+    for key in ("this", "expression", "low", "high"):
+        child = node.args.get(key)
+        if isinstance(child, (*_CHAINED, exp.Not)) and not isinstance(node, exp.Not):
+            raise Refusal("chains comparison / IS / IN / BETWEEN / LIKE operators without "
+                          "parentheses — the parser and the engines bind such chains "
+                          "differently")
+        if isinstance(node, exp.Not) and key == "this" and isinstance(child, _CHAINED) \
+                and any(isinstance(child.args.get(k), (*_CHAINED, exp.Not))
+                        for k in ("this", "expression", "low", "high")):
+            raise Refusal("NOT over a chain of comparison operators without parentheses — "
+                          "the parser and the engines bind it differently")
+
+
+def _literal_kind(node: exp.Expression) -> str:
+    if isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal) \
+            and not node.this.is_string:
+        return "number"
+    if isinstance(node, exp.Literal):
+        return "string" if node.is_string else "number"
+    return "other"
+
+
+def _check_between(node: exp.Between) -> None:
+    """Rule `between` expands to two pairwise comparisons; DuckDB binds
+    BETWEEN with ONE common type for all three operands, so bounds of
+    different kinds are cast differently (`qty BETWEEN 2.5 AND '2.5'`)."""
+    if _literal_kind(node.args["low"]) != _literal_kind(node.args["high"]):
+        raise Refusal("BETWEEN bounds of different kinds (a string beside a number or an "
+                      "expression) are typed differently by the engines than by the "
+                      "expansion")
+
+
+# Functions whose unit the parser reads as a KEYWORD when written unquoted,
+# where the engines bind a column of that name — `DATE_TRUNC(month, d)` and
+# `DATE_TRUNC('month', d)` give the same tree.
+_UNIT_FUNCTIONS = frozenset({"DATE_TRUNC", "DATETRUNC", "TIMESTAMP_TRUNC", "DATETIME_TRUNC",
+                             "TIME_TRUNC", "TRUNC", "DATE_PART", "DATEPART"})
+_UNIT_WORDS = frozenset({
+    "MILLENNIUM", "CENTURY", "DECADE", "YEAR", "YEARS", "YYYY", "YY", "ISOYEAR",
+    "QUARTER", "QUARTERS", "QTR", "MONTH", "MONTHS", "MON", "MM", "WEEK", "WEEKS",
+    "ISOWEEK", "WEEKDAY", "DOW", "DAYOFWEEK", "DOY", "DAYOFYEAR", "DAY", "DAYS", "DD",
+    "HOUR", "HOURS", "HH", "MINUTE", "MINUTES", "MI", "SECOND", "SECONDS", "SS",
+    "MILLISECOND", "MILLISECONDS", "MS", "MICROSECOND", "MICROSECONDS", "US", "EPOCH"})
+_LIKE_WORDS = frozenset({"LIKE", "ILIKE", "RLIKE", "GLOB", "REGEXP"})
+
+
+def _check_tokens(sql: str, dialect: str) -> None:
+    """Refusals the parse tree cannot express, read from the original TOKENS."""
+    from sqlglot.tokens import TokenType
+
+    try:
+        tokens = sqlglot.tokenize(sql, read=dialect)
+    except Exception:  # noqa: BLE001 — the parser already accepted it
+        raise Refusal("the statement's tokens could not be read") from None
+    operand_end = {TokenType.VAR, TokenType.IDENTIFIER, TokenType.STRING, TokenType.NUMBER,
+                   TokenType.R_PAREN, TokenType.NULL, TokenType.TRUE, TokenType.FALSE,
+                   TokenType.STAR}
+    for i, tok in enumerate(tokens[:-1]):
+        if tokens[i + 1].token_type != TokenType.L_PAREN:
+            continue
+        word = tok.text.upper()
+        if word in _LIKE_WORDS:
+            j = i - 1
+            if j >= 0 and tokens[j].token_type == TokenType.NOT:
+                j -= 1
+            if j < 0 or tokens[j].token_type not in operand_end:
+                # The parser swaps the arguments of like(a, b).
+                raise Refusal(f"uses function-form {word}(); its argument order is read "
+                              f"differently by the parser and the engines")
+        if word in _UNIT_FUNCTIONS and dialect != "bigquery":
+            for arg in _call_arguments(tokens, i + 1):
+                if len(arg) == 1 and arg[0].token_type == TokenType.VAR \
+                        and arg[0].text.upper() in _UNIT_WORDS:
+                    raise Refusal(f"{word}() names its unit unquoted ({arg[0].text}); the "
+                                  f"engines read a column of that name, the parser a "
+                                  f"keyword")
+
+
+def _call_arguments(tokens, open_index: int) -> list[list]:
+    """The top-level argument token lists of the call opening at `open_index`."""
+    from sqlglot.tokens import TokenType
+
+    args: list[list] = [[]]
+    depth = 0
+    for tok in tokens[open_index:]:
+        if tok.token_type in (TokenType.L_PAREN, TokenType.L_BRACKET):
+            depth += 1
+            if depth == 1:
+                continue
+        elif tok.token_type in (TokenType.R_PAREN, TokenType.R_BRACKET):
+            depth -= 1
+            if depth == 0:
+                break
+        elif tok.token_type == TokenType.COMMA and depth == 1:
+            args.append([])
+            continue
+        args[-1].append(tok)
+    return [a for a in args if a]
 
 
 def _has_aggregate(node: exp.Expression) -> bool:
@@ -283,6 +429,7 @@ class _Builder:
 
     def build(self, select: exp.Select) -> exp.Select:
         ctes = self._ctes(select)
+        self.all_ctes = set(ctes)
         source = self._source(select, ctes, depth=0)
         used = set()
         self._mark_used(select, ctes, used)
@@ -293,10 +440,13 @@ class _Builder:
     # ---- sources
 
     def _ctes(self, select: exp.Select) -> dict[str, exp.Select]:
+        """CTE bodies by name, in definition order. Names are compared EXACTLY
+        as the dialect normalized them (normalize_identifiers): `.lower()`
+        matched a quoted "orders" to an unquoted ORDERS on Snowflake."""
         out: dict[str, exp.Select] = {}
         with_ = select.args.get("with") or select.args.get("with_")
         for cte in (with_.expressions if with_ is not None else []):
-            name = cte.alias_or_name.lower()
+            name = cte.alias_or_name
             if name in out:
                 raise Refusal(f"CTE {name} is defined twice")
             if not isinstance(cte.this, exp.Select):
@@ -310,9 +460,9 @@ class _Builder:
         from_ = select.args.get("from") or select.args.get("from_")
         src = from_.this if from_ is not None else None
         if isinstance(src, exp.Table) and not src.args.get("db") \
-                and src.name.lower() in ctes and src.name.lower() not in used:
-            used.add(src.name.lower())
-            self._mark_used(ctes[src.name.lower()], ctes, used)
+                and src.name in ctes and src.name not in used:
+            used.add(src.name)
+            self._mark_used(ctes[src.name], ctes, used)
         elif isinstance(src, exp.Subquery) and isinstance(src.this, exp.Select):
             self._mark_used(src.this, ctes, used)
 
@@ -323,11 +473,21 @@ class _Builder:
         if from_ is None:
             raise Refusal("no FROM source")
         src = from_.this
-        if isinstance(src, exp.Table) and not src.args.get("db") and src.name.lower() in ctes:
-            body = ctes[src.name.lower()]
+        if isinstance(src, exp.Table) and not src.args.get("db") and src.name in ctes:
+            # Only CTEs defined EARLIER are visible inside a CTE body; a later
+            # (or its own) name there is a TABLE to the engines (round 17).
+            visible = {}
+            for name, body in ctes.items():
+                if name == src.name:
+                    break
+                visible[name] = body
             self.rules.append("inline")
-            inner = self._inline_body(body, ctes, depth)
+            inner = self._inline_body(ctes[src.name], visible, depth)
             return self._aliased(inner, src.alias_or_name)
+        if isinstance(src, exp.Table) and not src.args.get("db") \
+                and src.name in getattr(self, "all_ctes", ()):
+            raise Refusal(f"{src.name} is read before its CTE is defined — the engines "
+                          f"read a table of that name", "identity")
         if isinstance(src, exp.Subquery):
             if not isinstance(src.this, exp.Select):
                 raise Refusal("derived table is not a single SELECT")
@@ -340,6 +500,7 @@ class _Builder:
 
     def _aliased(self, source: _Source, alias: str) -> _Source:
         source.alias = alias.lower() if alias else None  # type: ignore[attr-defined]
+        source.qualifiers = {alias.lower()} if alias else set()  # type: ignore[attr-defined]
         return source
 
     def _base(self, table: exp.Table) -> _Source:
@@ -380,7 +541,9 @@ class _Builder:
                                for k, v in lowered.items()},
                       order=list(lowered), predicates=[])
         src.alias = (table.alias_or_name or table.name).lower()  # type: ignore[attr-defined]
-        src.names = {table.name.lower(), name.lower(), relation.lower()}  # type: ignore[attr-defined]
+        written = ".".join(p.name for p in table.parts).lower()
+        src.qualifiers = ({table.alias.lower()} if table.alias  # type: ignore[attr-defined]
+                          else {table.name.lower(), written})
         return src
 
     def _inline_body(self, body: exp.Select, ctes: dict, depth: int) -> _Source:
@@ -415,14 +578,16 @@ class _Builder:
             columns[name] = self._resolve(target.copy(), inner)
             order.append(name)
         if body.args.get("order") is not None:
-            self.rules.append("order")
+            # The order rows arrive in is the order a float SUM / AVG adds
+            # them: removing it changed results (round 17).
+            raise Refusal("an inlined CTE/derived table has ORDER BY")
         where = body.args.get("where")
         preds = list(inner.predicates)
         preds += [self._resolve(c.copy(), inner) for c in
                   flatten_conjuncts(where.this if where is not None else None)]
         out = _Source(table=inner.table, relation=inner.relation, columns=columns,
                       order=order, predicates=preds)
-        out.names = set()  # type: ignore[attr-defined]
+        out.qualifiers = set()  # type: ignore[attr-defined]
         return out
 
     # ---- name resolution
@@ -451,8 +616,10 @@ class _Builder:
                              (col.args.get("catalog"), col.args.get("db"), col.args.get("table"))
                              if p is not None)
         if qualifier:
-            known = {getattr(source, "alias", None), *getattr(source, "names", set())}
-            if qualifier not in known and qualifier.split(".")[-1] not in known:
+            # Exactly the name the source is visible under: its alias when it
+            # has one, else the table name or the full name as written — never
+            # a suffix of it, nor a name the alias hides (round 17).
+            if qualifier not in getattr(source, "qualifiers", set()):
                 raise Refusal(f"column {col.sql(self.dialect)} names an unknown source")
         if name in source.columns:
             if outputs and name in outputs and not qualifier \
@@ -472,9 +639,16 @@ class _Builder:
     def _final(self, select: exp.Select, source: _Source) -> exp.Select:
         projections: list[exp.Expression] = []
         outputs: dict[str, exp.Expression] = {}
+        aggregating = (select.args.get("group") is not None
+                       or select.args.get("having") is not None
+                       or any(_has_aggregate(p) for p in select.expressions))
         for i, proj in enumerate(select.expressions):
             if isinstance(proj, exp.Star) or (isinstance(proj, exp.Column)
                                               and isinstance(proj.this, exp.Star)):
+                if aggregating:
+                    # GROUP BY ALL and ordinals count the star's columns; the
+                    # expansion here did not (round 17: the GROUP BY vanished).
+                    raise Refusal("SELECT * in an aggregating query")
                 self.rules.append("star")
                 for name in source.order:
                     projections.append(exp.alias_(source.columns[name].copy(), name,
@@ -529,18 +703,31 @@ class _Builder:
         keys = []
         projections = list(outputs.values())
         for item in group.expressions:
+            if isinstance(item, (exp.Paren, exp.Tuple)):
+                # `GROUP BY (1)` is a constant to DuckDB, not an ordinal, and
+                # `(1, 2)` a tuple — the parse kept neither distinction once
+                # the parentheses were re-derived.
+                raise Refusal("GROUP BY a parenthesized item or tuple")
             if isinstance(item, exp.Literal) and item.is_int:
                 idx = int(item.name) - 1
                 if not 0 <= idx < len(projections):
                     raise Refusal(f"GROUP BY {item.name} is not a projection ordinal")
                 if _has_aggregate(projections[idx]):
                     raise Refusal("GROUP BY ordinal names an aggregate")
+                if _is_constant(projections[idx]):
+                    raise Refusal("GROUP BY ordinal names a constant")
                 self.rules.append("group_ordinal")
                 keys.append(projections[idx].copy())
                 continue
+            if isinstance(item, exp.Literal):
+                raise Refusal("GROUP BY a constant")
             resolved = self._resolve(item.copy(), source, outputs)
             if _has_aggregate(resolved):
                 raise Refusal("GROUP BY names an aggregate")
+            if _is_constant(resolved):
+                # A name that resolves to a literal renders as `GROUP BY 1`,
+                # which reads back as an ORDINAL (round 17).
+                raise Refusal("GROUP BY a name that is a constant")
             keys.append(resolved)
         return keys
 

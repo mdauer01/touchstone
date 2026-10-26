@@ -126,3 +126,18 @@ def truncation_of(node: exp.Expression) -> tuple[str, exp.Column] | None:
     if isinstance(unit, (exp.Var, exp.Literal)) and unit.name:
         return unit.name.upper(), target
     return None
+
+
+def faithful_render(node: exp.Expression, dialect: str) -> str | None:
+    """`node` rendered in `dialect`, or None when the rendering does not parse
+    back to the same tree. The Spark/Databricks generator HOISTS a derived
+    table's own WITH to the top of the statement, which changes what its names
+    resolve to; round seventeen found the monitor and the view-dump intake
+    judging that rewritten text instead of what ran."""
+    import sqlglot
+
+    text = node.sql(dialect=dialect)
+    try:
+        return text if sqlglot.parse_one(text, read=dialect) == node else None
+    except Exception:  # noqa: BLE001 — a rendering that does not parse is not faithful
+        return None

@@ -86,9 +86,20 @@ def classify(stmt: exp.Expression | None, row: int, index: int, session: str | N
             target = target.this
         if isinstance(target, exp.Table) and target.name:
             names = {table_fqname(target).lower()}
-            for rename in stmt.find_all(exp.RenameTable) if hasattr(exp, "RenameTable") else ():
-                if isinstance(rename.this, exp.Table):
-                    names.add(table_fqname(rename.this).lower())
+            # The NEW name a rename makes readable is touched too. sqlglot
+            # 30.x parses it as exp.AlterRename (older releases RenameTable);
+            # looking only for RenameTable made this dead code (round 17).
+            renames = tuple(getattr(exp, n) for n in ("AlterRename", "RenameTable")
+                            if hasattr(exp, n))
+            for rename in stmt.find_all(*renames) if renames else ():
+                new_name = rename.this
+                if isinstance(new_name, exp.Table) and new_name.name:
+                    names.add(table_fqname(new_name).lower())
+                    if not new_name.args.get("db"):
+                        # An unqualified new name lands beside the old one.
+                        prefix = table_fqname(target).rsplit(".", 1)
+                        if len(prefix) == 2:
+                            names.add(f"{prefix[0]}.{new_name.name}".lower())
             kind = str(stmt.args.get("kind") or type(stmt).__name__).upper()
             return event(f"{type(stmt).__name__.upper()} {kind} {table_fqname(target)}",
                          frozenset(names))

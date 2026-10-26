@@ -180,7 +180,14 @@ def _single_statement(sql: str, dialect: str) -> str:
         raise ValueError(
             f"expected exactly one statement, found {len(statements)}"
         )
-    return statements[0].sql(dialect=dialect)
+    from semantix.extraction.sqlutil import faithful_render
+
+    text = faithful_render(statements[0], dialect)
+    if text is None:
+        # Executing the generator's rewrite (Spark hoists a nested WITH) would
+        # measure a different query than the definition.
+        raise ValueError(f"the statement cannot be re-rendered faithfully in {dialect}")
+    return text
 
 
 def _relations_read(sql: str, dialect: str) -> set[str] | None:

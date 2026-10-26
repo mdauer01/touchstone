@@ -210,6 +210,10 @@ class SchemaRegistry:
     def columns(self, relation: str) -> list[str]:
         return list(self._types.get(relation, {}))
 
+    def column_types(self, relation: str) -> dict[str, str]:
+        """{column: declared type text} for one relation (empty if unknown)."""
+        return {c: str(t) for c, t in (self._types.get(relation) or {}).items()}
+
     @property
     def execution_context(self) -> dict[str, str | None]:
         return {"default_database": self._context[0], "default_schema": self._context[1]}

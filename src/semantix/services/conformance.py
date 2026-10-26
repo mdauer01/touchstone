@@ -76,7 +76,8 @@ EXCLUDED = (
     "window measures",
     "LIMIT, HAVING, QUALIFY and DISTINCT",
     "TABLESAMPLE and time travel",
-    "CTEs, subqueries and derived tables around a variation",
+    "CTEs, subqueries and derived tables outside the supported grammar (select-"
+    "project-filter bodies inside it are inlined and judged)",
     "unsupported dimension expressions",
     "Databricks runtime behaviour of MEASURE() beyond its declared definition",
 )
@@ -228,7 +229,8 @@ def raw_shape_problem(stmt: exp.Expression) -> str | None:
 
 def check_raw(core: SemanticCore, auth: Authority, dialect: str,
               shape_problem: str | None, models: set[str] = frozenset(),
-              hypothesis: str | None = None) -> Outcome:
+              hypothesis: str | None = None,
+              literal_undecided: frozenset = frozenset()) -> Outcome:
     """Shape A: an observed proof-grade core against one authority.
 
     Two passes, in order, and the first never returns a violation:
@@ -253,16 +255,18 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
     result is always unverifiable, and what pass 2 finds is suspected
     context worded as the hypothesis it is."""
     if hypothesis is not None:
-        outcome = _check_raw(core, auth, dialect, shape_problem, models, hypothesis)
+        outcome = _check_raw(core, auth, dialect, shape_problem, models, hypothesis,
+                             literal_undecided)
         outcome.suspected = [f"under the optimizer's reading (a hypothesis): {s}"
                              for s in outcome.suspected]
         return outcome
-    return _check_raw(core, auth, dialect, shape_problem, models, None)
+    return _check_raw(core, auth, dialect, shape_problem, models, None, literal_undecided)
 
 
 def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
                shape_problem: str | None, models: set[str],
-               hypothesis: str | None) -> Outcome:
+               hypothesis: str | None,
+               literal_undecided: frozenset = frozenset()) -> Outcome:
     if hypothesis is None and core.hash() == auth.core.hash():
         return Outcome("conforming", shape="exact")
     base = auth.base_relation
@@ -397,7 +401,20 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
             return n == governed_node
         wrapper = (transformed and observed_node is not None and governed_node is not None
                    and wrapper_only(observed_node, governed))
-        if wrapper and not definite_change(observed_node, governed):
+        column_wrapped = (not wrapper and observed_node is not None
+                          and governed_node is not None
+                          and tuple(core.source_columns) == tuple(auth.core.source_columns)
+                          and strip_column_wrappers(observed_node) == governed_node)
+        if column_wrapped:
+            # `SUM(CAST(amount AS DOUBLE))` — often a staging CTE's no-op
+            # cast — may compute exactly the definition: not decided (round
+            # 17 found it called a changed measure).
+            undecided.append(_reason(
+                "transformation_undecided",
+                f"measure is {core.measure_expr}, the definition "
+                f"{auth.core.measure_expr} with casts or neutral arithmetic on its "
+                f"columns — whether that preserves the value is not decided"))
+        elif wrapper and not definite_change(observed_node, governed):
             # CAST(… AS DOUBLE), ROUND, × 1: may preserve the value. Refused
             # honestly; the transformation is context (sweep 2, #41 #57).
             undecided.append(_reason(
@@ -418,7 +435,8 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
             violations.append(_reason("required_filter_missing",
                                       f"required condition {r} is not applied"))
             continue
-        decided = _replacement(r, parsed[r], related[r], extras, parsed, dialect)
+        decided = _replacement(r, parsed[r], related[r], extras, parsed, dialect,
+                               literal_undecided)
         if decided is not None:
             violations.append(decided)
         else:
@@ -472,7 +490,8 @@ def _settle(boundary: list[dict], violations: list[dict], undecided: list[dict],
 
 
 def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list[str],
-                 parsed: dict[str, exp.Expression], dialect: str) -> dict | None:
+                 parsed: dict[str, exp.Expression], dialect: str,
+                 literal_undecided: frozenset = frozenset()) -> dict | None:
     """A provable change to a required condition, or None (not decided).
 
     Decided by VALUE, never by literal text: `discount = 0.0`, `0E0` and
@@ -487,6 +506,10 @@ def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list
             disjuncts = list(node.flatten())
             if r in {render(_unparen(d), dialect) for d in disjuncts}:
                 others = [d for d in disjuncts if render(_unparen(d), dialect) != r]
+                if not others:
+                    # `r OR r` admits exactly what `r` admits; it is not a
+                    # top-level `r` either, so it is not decided (round 17).
+                    continue
                 other_cols = set().union(*(_columns(d) for d in others))
                 # Weakened only if another branch can admit rows the required
                 # condition excludes: a branch on the required column itself
@@ -504,6 +527,8 @@ def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list
                     return _reason("required_filter_not_preserved",
                                    f"required condition {r} is weakened through OR: {x}")
     eq = _column_equals_literal(rnode)
+    if eq is not None and eq[0].name.lower() in literal_undecided:
+        eq = None   # a collated / CHAR column: literal equality is engine-specific
     if eq is not None and len(related) == 1:
         col, lit = eq
         want = _literal_value(lit)
@@ -557,7 +582,9 @@ def _literal_value(node: exp.Expression) -> tuple[str, object] | None:
     if not isinstance(node, exp.Literal):
         return None   # casts, typed literals (DATE '…'), anything computed
     if node.is_string:
-        if negate or _COERCIBLE.fullmatch(node.name):
+        # A backslash is an escape to Spark/Databricks ('complet\\ed' is
+        # 'completed' there) but kept by the parser: not decided (round 17).
+        if negate or _COERCIBLE.fullmatch(node.name) or "\\" in node.name:
             return None
         return ("str", node.name)
     try:
@@ -603,6 +630,54 @@ def _within(node: exp.Expression, target: exp.Expression) -> bool:
     return False
 
 
+def strip_column_wrappers(expr: exp.Expression) -> exp.Expression:
+    """`expr` with every wrapper that MAY preserve a column's value removed:
+    a cast, ROUND, `× 1`, `÷ 1`, `+ 0`, `− 0` (neutral as a DOUBLE too) and
+    double negation around a column. Equality after stripping decides
+    nothing; it only says the difference may be no difference."""
+    import decimal
+
+    def neutral(lit: exp.Expression, value: int) -> bool:
+        if not (isinstance(lit, exp.Literal) and not lit.is_string):
+            return False
+        try:
+            return float(decimal.Decimal(lit.name)) == float(value)
+        except (decimal.InvalidOperation, ValueError):
+            return False
+
+    def strip(node: exp.Expression) -> exp.Expression:
+        node = _unparen(node)
+        if isinstance(node, (exp.Cast, exp.TryCast, exp.Round)):
+            inner = strip(node.this)
+            if isinstance(inner, exp.Column):
+                return inner
+        if isinstance(node, exp.Neg) and isinstance(_unparen(node.this), exp.Neg):
+            inner = strip(_unparen(node.this).this)
+            if isinstance(inner, exp.Column):
+                return inner
+        if isinstance(node, (exp.Mul, exp.Div, exp.Add, exp.Sub)):
+            unit = 1 if isinstance(node, (exp.Mul, exp.Div)) else 0
+            left, right = strip(node.this), strip(node.expression)
+            if isinstance(left, exp.Column) and neutral(_unparen(node.expression), unit):
+                return left
+            if isinstance(node, (exp.Mul, exp.Add)) and isinstance(right, exp.Column) \
+                    and neutral(_unparen(node.this), unit):
+                return right
+        return node
+
+    def walk(node: exp.Expression) -> exp.Expression:
+        node = strip(node)
+        for key, value in list(node.args.items()):
+            if isinstance(value, exp.Expression):
+                node.set(key, walk(value))
+            elif isinstance(value, list):
+                node.set(key, [walk(v) if isinstance(v, exp.Expression) else v
+                               for v in value])
+        return node
+
+    return walk(expr.copy())
+
+
 def definite_change(expr: exp.Expression, governed) -> bool:
     import decimal
 
@@ -624,7 +699,9 @@ def definite_change(expr: exp.Expression, governed) -> bool:
         except decimal.InvalidOperation:
             continue
         neutral = 0 if isinstance(node, (exp.Add, exp.Sub)) else 1
-        return c.is_finite() and c != neutral
+        # A constant that rounds to the neutral element as a DOUBLE
+        # (`* 1.00000000000000000001`, `+ 1e-400`) changes nothing there.
+        return c.is_finite() and c != neutral and float(c) != float(neutral)
     return False
 
 

@@ -392,7 +392,26 @@ def _proof_basis(concept: Concept) -> dict:
     members = [*concept.fingerprints, *concept.claims]
     rules = sorted({r for m in members if m.canon_level in PROOF_LEVELS
                     for r in (m.rules or ())})
-    return {"policy": POLICY_ID, "rules": rules, "assumptions": list(ASSUMPTIONS)}
+    return {"policy": POLICY_ID, "rules": rules, "assumptions": list(ASSUMPTIONS),
+            "parse_agreement": _parse_agreement(m for m in members
+                                                if m.canon_level in PROOF_LEVELS)}
+
+
+def _parse_agreement(members) -> dict:
+    """The parser-disagreement detector's results for the forms a positive
+    compared: counts by status, with the engine and parser versions. It
+    detects disagreement only — for DuckDB SQL only — and qualifies nothing."""
+    checks = [c for c in (getattr(m, "parse_check", None) for m in members) if c]
+    counts: dict[str, int] = {}
+    for c in checks:
+        counts[c["status"]] = counts.get(c["status"], 0) + 1
+    first = checks[0] if checks else {}
+    return {"statuses": counts, "engine": first.get("engine"),
+            "engine_version": first.get("engine_version"),
+            "sqlglot_version": first.get("sqlglot_version"),
+            "dialects": sorted({c["dialect"] for c in checks}),
+            "note": "a detector of parser disagreement only: no disagreement found "
+                    "qualifies nothing, for DuckDB or any other engine"}
 
 
 def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:

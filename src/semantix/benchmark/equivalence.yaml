@@ -88,6 +88,10 @@ cases:
   - name: group-by-ordinal
     category: normalization
     expect: equivalent
+    # BigQuery's DATE_TRUNC takes (date, part): this SQL truncates the literal
+    # 'month' there, so it is not a BigQuery query (round 17 found it had been
+    # "proved" on that constant reading).
+    dialects: [duckdb, databricks, snowflake]
     a: |
       select date_trunc('month', order_date) as month, sum(amount) as m
       from raw.orders group by 1
@@ -144,6 +148,10 @@ cases:
   - name: grain-change
     category: near-miss
     expect: different
+    # BigQuery's DATE_TRUNC takes (date, part): this SQL truncates the literal
+    # 'month' there, so it is not a BigQuery query (round 17 found it had been
+    # "proved" on that constant reading).
+    dialects: [duckdb, databricks, snowflake]
     a: |
       select date_trunc('month', order_date) as p, sum(amount) as m
       from raw.orders group by 1

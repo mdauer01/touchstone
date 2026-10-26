@@ -55,6 +55,10 @@ A parser-disagreement detector against DuckDB is one source of evidence about Du
 only. It is not a qualification for any engine, and passing it cannot by itself
 re-enable positive verdicts.
 
+**The grammar is frozen.** `tests/test_grammar_frozen.py` pins every rule, node and
+argument of the allow-lists as an upper bound. Refusing more is always allowed; adding
+anything needs a new policy id and the criteria above.
+
 ## Why the optimizer left the certification path
 
 Up to round fifteen, proof grade meant "sqlglot's optimizer produced a
@@ -83,7 +87,7 @@ else is refused, and the refusal names the construct.
 - **One `SELECT` over exactly one source.** The source is a table, or a chain of
   select-project-filter CTEs and derived tables over one table.
 - **Expressions** may use:
-  - columns of that table, literals and arithmetic;
+  - columns of that table, literals and arithmetic (not `%`);
   - comparisons, `AND` / `OR` / `NOT`;
   - `IN` over literals, `BETWEEN`, `IS [NOT] NULL`, `LIKE`, `CASE`;
   - an allow-list of scalar functions (`proof._SCALAR_FUNCTIONS`), `CURRENT_DATE`
@@ -101,6 +105,27 @@ else is refused, and the refusal names the construct.
   - sampling, time travel, `LATERAL` / `UNNEST` / `PIVOT`, bind parameters;
   - unknown functions, and CTE or derived-table bodies that aggregate in any
     clause.
+- **Refused since round seventeen**, each reproduced by execution:
+  - `%`, which sqlglot binds like `+` and the engines like `*`;
+  - an unparenthesized chain of comparison / IS / IN / BETWEEN / LIKE operators
+    (`tier = 1 IS NOT TRUE`, `NOT a IN (…) IN (…)`), which the parser and the engines
+    bind differently;
+  - `*` with any modifier (EXCLUDE, EXCEPT, REPLACE, RENAME, ILIKE), and `SELECT *` in
+    an aggregating query;
+  - GROUP BY a parenthesized item, a tuple, a constant, or a name or ordinal that
+    resolves to one (they render as ordinals);
+  - a `DATE_TRUNC` / `TRUNC` / `DATE_PART` unit written unquoted (the engines read a
+    column of that name) and function-form `like()` (the parser swaps its arguments),
+    both found from the original tokens;
+  - ORDER BY inside an inlined body (it fixes the order a float SUM or AVG adds rows
+    in);
+  - BETWEEN whose bounds are of different kinds (`qty BETWEEN 2.5 AND '2.5'`);
+  - a WITH that is not the statement's own, and a CTE that reads a CTE defined after
+    it;
+  - a qualifier other than the exact name the source is visible under;
+  - a table name that is one identifier containing a dot, or a string;
+  - a parameterized floating-point type (`FLOAT(53)`);
+  - any statement the parser-disagreement detector finds DuckDB reading differently.
 
 ## The rules
 
@@ -113,7 +138,7 @@ A positive verdict records the rules its forms used.
 | `inline` | a select-project-filter CTE / derived table (one source; no aggregate in any clause, no window, DISTINCT, GROUP BY, HAVING, LIMIT/OFFSET, set operation or subquery) substituted into its single consumer; its WHERE is conjoined |
 | `star` | `SELECT *` expanded from the source's known columns |
 | `unused_cte` | an unread CTE removed |
-| `order` | `ORDER BY` without `LIMIT`/`OFFSET` removed, unless it holds the query's only aggregate |
+| `order` | the final query's `ORDER BY` without `LIMIT`/`OFFSET` removed, unless it holds the query's only aggregate (an inlined body's ORDER BY is refused) |
 | `group_ordinal` | a GROUP BY ordinal replaced by the projection it names |
 | `output_alias` | a GROUP BY / HAVING name that is a projection alias and **not** a source column replaced by that projection |
 | `group_all` | GROUP BY ALL replaced by the non-aggregate, non-constant projections |
@@ -140,8 +165,8 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
 - column types are those the catalog or registered model declares;
 - expressions evaluate without raising errors, so AND/OR operand order changes no
   result;
-- ORDER BY without a bound changes no value, because the grammar has no
-  order-sensitive function;
+- the final query's ORDER BY without a bound changes no value: it orders the result
+  after every aggregate is computed;
 - relation identity is the name the SQL wrote, completed only by the
   operator-supplied execution context;
 - identifier case folding follows the dialect;
@@ -176,6 +201,37 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
   - It is never conforming and never a violation. It is never "unregistered"
     either, since that would be a statement about its meaning.
 
+## The parser-disagreement detector
+
+`extraction/parse_agreement.py` asks DuckDB whether it reads a statement the way sqlglot
+does:
+
+1. It starts from the **original SQL**, before any optimization or transformation.
+2. sqlglot's parse is rendered fully parenthesized (post-order), so the rendering states
+   sqlglot's binding explicitly.
+3. DuckDB serializes the original and that rendering (`json_serialize_sql`); query
+   locations, operator-vs-call spelling (`%` / `MOD()`), constants' values and DuckDB's
+   two spellings of one negated predicate are ignored.
+4. The result is `disagrees`, `no_disagreement_found` or `not_checked`, with the dialect
+   and the DuckDB and sqlglot versions.
+
+What it is, and is not:
+
+- `not_checked` covers another dialect, DuckDB not installed, input either parser
+  rejects, and more than one statement. It is never agreement.
+- It detects disagreement for DuckDB SQL only. Agreement says nothing about name binding,
+  types, later transformations or another warehouse's semantics, and no DuckDB result
+  qualifies Databricks or Snowflake.
+- DuckDB's serialization can normalize syntax, so a disagreement it hides stays hidden. A
+  rendering that renames a function or rewrites a literal can be flagged although both
+  readings agree; it errs toward `disagrees`.
+- A statement it finds DuckDB reading differently is **refused**. Every proof-grade form
+  records its result, and experimental comparisons carry a summary
+  (`proof.parse_agreement`). Passing it re-enables nothing.
+
+It catches the confirmed `%` and IS cases, which is evidence about those cases only, not
+about general correctness.
+
 ## How it is challenged
 
 - **`semantix oracle`.**
@@ -199,6 +255,13 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
     Every one reaches proof grade. Each is executed against its proof form, and
     every pair the engine equates, across wrappers too, against each other.
   - Agreement challenges the rules; it does not prove them.
+- **The detector**, on every generated query's original text; any proof-grade query it
+  finds DuckDB reading differently fails the run. The generators also write round
+  seventeen's former blind spots (`%`, IS chains, star modifiers, nested WITH, inner
+  ORDER BY, constant GROUP BY keys, unquoted units).
+- **`tests/data/engine_counterexamples.json`** (`tests/test_round_seventeen_fixes.py`).
+  Replays round seventeen's recorded pairs and proof forms on their seeds. These are
+  engine-correctness cases, never business-drift labels.
 - **`tests/test_sweep_two_counterexamples.py`.**
   - Replays 271 recorded pairs from the second sweep's findings 1–35 (excluding
     the four over-refusals). Each pair executes differently on its seed, and none
@@ -211,14 +274,18 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
 
 ## Measured cost of the narrower scope
 
-| Measure | Before (optimizer as proof) | `semantix-proof/2` |
-|---|---|---|
-| bench equivalence detection | 40/40 | 40/40 |
-| bench near-misses distinguished | 80/80 | 44/80 distinguished, 36 refused by name, 0 unproven |
-| acme demo proof-grade coverage | 100 % | 80 % (`ops_refund_rate` joins) |
-| oracle (default) proof-grade queries | — | 636 / 736 |
-| oracle (full) proof-grade queries | — | 17,421 / 24,478 (all 8,960 in-grammar combinations included) |
-| false certifications (bench, oracle, sweep replay) | sweep 2 found 35 classes | 0 |
+| Measure | Before (optimizer as proof) | `semantix-proof/2` (round 16) | after round 17 |
+|---|---|---|---|
+| bench equivalence detection | 40/40 | 40/40 | 39/39 (two BigQuery runs scoped out: that SQL is not BigQuery) |
+| bench near-misses distinguished | 80/80 | 44/80 distinguished, 36 refused by name, 0 unproven | 43/79 distinguished, 36 refused by name, 0 unproven |
+| acme demo proof-grade coverage | 100 % | 80 % (`ops_refund_rate` joins) | 80 % |
+| oracle (default) proof-grade queries | — | 636 / 736 | 642 / 764 |
+| oracle (full) proof-grade queries | — | 17,421 / 24,478 | 17,427 / 24,506 |
+| parser disagreements found by the detector (full oracle) | — | — | 10 originals, all refused; 0 at proof grade |
+| false equalities (bench, oracle, sweep and round-17 replays) | sweep 2 found 35 classes | 0 (the round-17 reviews then found ~14 classes) | 0 |
+
+These figures challenge the rules on the generated and recorded cases. They do not
+establish soundness, and positive verdicts stay suspended.
 
 The bench lists every refused pair with its reason (`semantix bench`). These
 refusals are the coverage backlog. A construct joins the grammar only with:

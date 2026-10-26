@@ -1360,6 +1360,13 @@ def _cmd_oracle(args: argparse.Namespace) -> int:
         print(f"  PROOF FORM DIFFERS [{m['estate']}/{m['dataset']}]\n    {m['original']}\n"
               f"    {m['transformed']}\n"
               f"    -> {m['result_original']}  vs  {m['result_transformed']}")
+    checks = report.parse_checks
+    print(f"  parser-disagreement detector (DuckDB {report.queries} originals): "
+          + " · ".join(f"{k} {v}" for k, v in sorted(checks.items()))
+          + " — detects disagreement only; no disagreement found qualifies nothing")
+    for m in report.parse_disagreements:
+        print(f"  PARSER DISAGREEMENT AT PROOF GRADE [{m['estate']}]\n    {m['sql']}\n"
+              f"    {m['detail']}")
     if report.ok:
         print("  no false equalities: every pair the experimental rules equate executed identically, "
               "and every proof form executed as its original")

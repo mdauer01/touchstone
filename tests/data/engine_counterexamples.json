@@ -1,0 +1,651 @@
+{
+ "source": "engine-correctness counterexamples: each pair executed differently on its seed; each proof_form query executed differently from the proof form the engine built for it. Never used as business-drift labels.",
+ "seeds": [
+  "CREATE SCHEMA raw;\nCREATE TABLE raw.orders (amount DOUBLE, refund DOUBLE, qty INTEGER, price DECIMAL(12,2), country VARCHAR, status VARCHAR, tier INTEGER, d DATE);\nINSERT INTO raw.orders VALUES (1e+16, 0.0, 1, 10.0, 'us', 'completed', 1, '2024-01-01'), (-1e+16, 1.0, 2, 20.5, 'US', 'completed', 1, '2024-01-15'), (1.0, NULL, 3, NULL, 'de', 'pending', 2, '2024-02-01'), (NULL, 2.0, NULL, 5.25, NULL, NULL, NULL, NULL), (0.0, -1.0, 0, 0.0, 'de', 'refunded', 0, '2024-03-01'), (5.0, 5.0, 2147483647, 99.99, 'fr', 'completed', 3, '2024-03-31'), (5.0, 5.0, -2147483647, 99.99, 'fr', 'completed', 3, '2024-03-31'), (-3.5, 0.5, 7, 1.1, 'us', 'pending', 2, '2024-12-31')",
+  "CREATE SCHEMA raw;\nCREATE TABLE raw.orders (amount DOUBLE, refund DOUBLE, qty INTEGER, price DECIMAL(12,2), country VARCHAR, status VARCHAR, tier INTEGER, d DATE, ts TIMESTAMP);\nINSERT INTO raw.orders VALUES (10.0, 1.0, 3, 9.99, 'US', 'completed', 1, '2024-01-01', '2024-01-01 10:00:00'), (20.5, NULL, 4, 19.5, 'US', 'Completed', 2, '2024-01-07', '2024-01-07 23:59:59'), (NULL, 3.0, -5, 0.01, 'DE', 'refunded', 1, '2024-02-29', '2024-02-29 00:00:00'), (1e+16, 2.0, 7, 100.0, 'DE', NULL, 3, '2023-12-31', '2023-12-31 12:30:00'), (-1e+16, 0.0, 0, -5.55, NULL, 'completed', NULL, '2024-03-03', '2024-03-03 01:02:03'), (1.0, 5.0, 1, 1.25, 'FR', 'pending%', 2, NULL, NULL), (2.5, -1.0, 2, 2.5, 'fr', 'pend_ing', 2, '2024-12-30', '2024-12-30 08:00:00')",
+  "CREATE SCHEMA raw;\nCREATE TABLE raw.orders (amount DOUBLE, refund DOUBLE, qty INTEGER, price DECIMAL(12,2), country VARCHAR, status VARCHAR, tier INTEGER, d DATE, ts TIMESTAMP);\nINSERT INTO raw.orders VALUES (10.0, 1.0, 3, 9.99, 'US', 'completed', 1, '2024-01-01', '2024-01-01 10:00:00'), (20.5, NULL, 4, 19.5, 'US', 'Completed', 2, '2024-01-07', '2024-01-07 23:59:59'), (NULL, 3.0, -5, 0.01, 'DE', 'refunded', 1, '2024-02-29', '2024-02-29 00:00:00'), (1e+16, 2.0, 7, 100.0, 'DE', NULL, 3, '2023-12-31', '2023-12-31 12:30:00'), (-1e+16, 0.0, 0, -5.55, NULL, 'completed', NULL, '2024-03-03', '2024-03-03 01:02:03'), (1.0, 5.0, 1, 1.25, 'FR', 'pending%', 2, NULL, NULL), (2.5, -1.0, 2, 2.5, 'fr', 'pend_ing', 2, '2024-12-30', '2024-12-30 08:00:00');\nCREATE TABLE \"raw.orders\" AS SELECT refund AS amount, amount AS refund, qty, price, country, status, tier, d, ts FROM raw.orders",
+  "CREATE SCHEMA raw;\nCREATE TABLE raw.orders (amount DOUBLE, refund DOUBLE, qty INTEGER, price DECIMAL(12,2), country VARCHAR, status VARCHAR, tier INTEGER, d DATE, ts TIMESTAMP);\nINSERT INTO raw.orders VALUES (10.0, 1.0, 3, 9.99, 'US', 'completed', 1, '2024-01-01', '2024-01-01 10:00:00'), (20.5, NULL, 4, 19.5, 'US', 'Completed', 2, '2024-01-07', '2024-01-07 23:59:59'), (NULL, 3.0, -5, 0.01, 'DE', 'refunded', 1, '2024-02-29', '2024-02-29 00:00:00'), (1e+16, 2.0, 7, 100.0, 'DE', NULL, 3, '2023-12-31', '2023-12-31 12:30:00'), (-1e+16, 0.0, 0, -5.55, NULL, 'completed', NULL, '2024-03-03', '2024-03-03 01:02:03'), (1.0, 5.0, 1, 1.25, 'FR', 'pending%', 2, NULL, NULL), (2.5, -1.0, 2, 2.5, 'fr', 'pend_ing', 2, '2024-12-30', '2024-12-30 08:00:00');\nINSERT INTO raw.orders VALUES (3.75, 2.25, 9, 3.33, ' \u00fc\\n ', 'a\\b''c', 5, '2024-06-15', '2024-06-15 13:45:30.123456');\nINSERT INTO raw.orders VALUES (-2.5, 7.5, -7, -0.50, '\u00e9\u00e9', 'xx_yy%', -2, '2020-02-29', '2020-02-29 23:00:00')"
+ ],
+ "catalogs": [
+  {
+   "raw.orders": {
+    "amount": "DOUBLE",
+    "refund": "DOUBLE",
+    "qty": "INTEGER",
+    "price": "DECIMAL(12,2)",
+    "country": "VARCHAR",
+    "status": "VARCHAR",
+    "tier": "INTEGER",
+    "d": "DATE"
+   }
+  },
+  {
+   "raw.orders": {
+    "amount": "DOUBLE",
+    "refund": "DOUBLE",
+    "qty": "INTEGER",
+    "price": "DECIMAL(12,2)",
+    "country": "VARCHAR",
+    "status": "VARCHAR",
+    "tier": "INTEGER",
+    "d": "DATE",
+    "ts": "TIMESTAMP"
+   }
+  }
+ ],
+ "cases": [
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT 1 AS k, amount FROM raw.orders) SELECT SUM(amount) AS m FROM c GROUP BY k"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT 2 AS k, country, amount FROM raw.orders) SELECT country, SUM(amount) AS m FROM c GROUP BY k, country"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT 2 AS k, country, amount FROM raw.orders) SELECT 'x' AS a, SUM(amount) AS m FROM c GROUP BY k"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT 3 AS k, country, amount FROM raw.orders) SELECT country, SUM(amount) AS m FROM c GROUP BY k, country"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT 2 AS k, amount FROM raw.orders) SELECT SUM(amount) AS m FROM c GROUP BY k"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT SUM(amount) AS m, 1 AS k FROM raw.orders GROUP BY k"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT 5 AS k, SUM(amount) AS m FROM raw.orders GROUP BY 1"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT COUNT(*) FILTER (WHERE amount > 0 IS NOT TRUE) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT COUNT(*) AS m FROM raw.orders WHERE amount > 0 IS NOT TRUE"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT amount FROM raw.orders ORDER BY amount) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT amount FROM raw.orders ORDER BY amount DESC) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM (SELECT amount FROM raw.orders ORDER BY abs(amount)) d",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT *, COUNT(*) AS n FROM (SELECT country FROM raw.orders) d GROUP BY ALL"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT *, SUM(amount) AS m FROM (SELECT country, amount AS x, amount FROM raw.orders) d GROUP BY ALL"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT status FROM raw.orders) SELECT *, COUNT(*) AS n FROM c GROUP BY ALL"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT *, UPPER(country) AS u, COUNT(*) AS n FROM (SELECT country FROM raw.orders) d GROUP BY 1"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT *, COUNT(*) AS n FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT *, COUNT(*) AS n FROM (SELECT country FROM raw.orders) d GROUP BY ALL",
+   "b": "SELECT COUNT(*) AS n FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT COUNT(*) AS n FROM raw.orders",
+   "b": "WITH c AS (SELECT status FROM raw.orders) SELECT *, COUNT(*) AS n FROM c GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT COUNT(*) AS n FROM raw.orders",
+   "b": "SELECT *, COUNT(*) AS n FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 0,
+   "catalog": 0,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT *, SUM(amount) AS m FROM (SELECT country, amount AS x, amount FROM raw.orders) d GROUP BY ALL",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT 2 AS k, * FROM raw.orders) SELECT country, SUM(amount) AS m FROM c GROUP BY k, country"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * REPLACE (refund AS amount) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "WITH c AS (SELECT * EXCLUDE (refund) FROM raw.orders) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * REPLACE (refund AS amount) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * EXCLUDE (refund) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT COUNT(*) FILTER (WHERE amount > refund IS NULL) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT COUNT(*) FILTER (WHERE amount > refund IS NOT NULL) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT COUNT(*) FILTER (WHERE amount > refund IS TRUE) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT COUNT(*) FILTER (WHERE amount > refund IS NOT FALSE) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT COUNT(*) FILTER (WHERE tier = qty IS NULL) AS m FROM raw.orders",
+   "b": "SELECT COUNT(*) FILTER (WHERE (qty IS NULL) = tier) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT COUNT(*) FILTER (WHERE tier = qty IS DISTINCT FROM TRUE) AS m FROM raw.orders",
+   "b": "SELECT COUNT(*) FILTER (WHERE tier = (qty IS DISTINCT FROM TRUE)) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(qty + 1 % 3) AS m FROM raw.orders",
+   "b": "SELECT SUM((qty + 1) % 3) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM raw.orders WHERE qty - 1 % 2 = 0",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders WHERE (qty - 1) % 2 = 0"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT country, tier, COUNT(*) AS m FROM raw.orders GROUP BY (1, 2)",
+   "b": "SELECT status, tier, COUNT(*) AS m FROM raw.orders GROUP BY (1, 2)"
+  },
+  {
+   "kind": "pair",
+   "seed": 2,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM \"raw.orders\"",
+   "b": "SELECT SUM(amount) AS m FROM \"raw\".\"orders\""
+  },
+  {
+   "kind": "pair",
+   "seed": 2,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM \"raw.orders\"",
+   "b": "SELECT SUM(amount) AS m FROM raw.\"orders\""
+  },
+  {
+   "kind": "pair",
+   "seed": 2,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM 'raw.orders'",
+   "b": "SELECT SUM(amount) AS m FROM \"raw\".\"orders\""
+  },
+  {
+   "kind": "pair",
+   "seed": 2,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM 'raw.orders'",
+   "b": "SELECT SUM(amount) AS m FROM raw.\"orders\""
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT COUNT(*) FILTER (WHERE qty % 3 * 2 = 2) AS m FROM raw.orders",
+   "b": "SELECT COUNT(*) FILTER (WHERE qty % (3 * 2) = 2) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT country FROM raw.orders) SELECT *, COUNT(*) AS m FROM c GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * REPLACE (refund AS amount) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM raw.orders",
+   "b": "WITH c AS (SELECT * RENAME (refund AS amount, amount AS refund) FROM raw.orders) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM raw.orders",
+   "b": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * REPLACE (-amount AS amount) FROM raw.orders) SELECT SUM(amount) AS m FROM c WHERE amount > 0",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders WHERE amount > 0"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * RENAME (refund AS amount, amount AS refund) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT country FROM raw.orders) SELECT *, COUNT(*) AS m FROM c GROUP BY ALL",
+   "b": "SELECT COUNT(*) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT country, SUM(amount) AS m FROM raw.orders GROUP BY (1)",
+   "b": "SELECT tier, SUM(amount) AS m FROM raw.orders GROUP BY (1)"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT tier, country, SUM(amount) AS m FROM raw.orders GROUP BY (1), country",
+   "b": "WITH c AS (SELECT 1 AS k, * FROM raw.orders) SELECT country, SUM(amount) AS m FROM c GROUP BY k, country"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "WITH c AS (SELECT country FROM raw.orders) SELECT *, UPPER(country) AS u, COUNT(*) AS m FROM c GROUP BY 1"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT country FROM raw.orders) SELECT *, UPPER(country) AS u, COUNT(*) AS m FROM c GROUP BY 1",
+   "b": "SELECT UPPER(country) AS u, COUNT(*) AS m FROM raw.orders GROUP BY 1"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT CASE WHEN tier = 1 THEN 'year' ELSE 'day' END AS week, * FROM raw.orders) SELECT DATE_TRUNC(week, d) AS k, COUNT(*) AS m FROM c GROUP BY 1",
+   "b": "WITH c AS (SELECT 'year' AS week, * FROM raw.orders) SELECT DATE_TRUNC(week, d) AS k, COUNT(*) AS m FROM c GROUP BY 1"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT CASE WHEN tier = 1 THEN 'year' ELSE 'day' END AS week, * FROM raw.orders) SELECT DATE_TRUNC(week, d) AS k, COUNT(*) AS m FROM c GROUP BY 1",
+   "b": "SELECT DATE_TRUNC('week', d) AS k, COUNT(*) AS m FROM raw.orders GROUP BY 1"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT 'year' AS week, * FROM raw.orders) SELECT DATE_TRUNC(week, d) AS k, COUNT(*) AS m FROM c GROUP BY 1",
+   "b": "SELECT DATE_TRUNC('week', d) AS k, COUNT(*) AS m FROM raw.orders GROUP BY 1"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 3,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT SUM(CAST((CAST(amount AS FLOAT(53))) AS DOUBLE)) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 3,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT CAST((CAST(amount AS FLOAT(53))) AS VARCHAR) AS k, COUNT(*) AS m FROM raw.orders GROUP BY 1"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 3,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT SUM(CAST((CAST(amount AS FLOAT(24))) AS DOUBLE)) AS m FROM raw.orders"
+  },
+  {
+   "kind": "proof_form",
+   "seed": 3,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "sql": "SELECT CAST((CAST(amount AS FLOAT(24))) AS VARCHAR) AS k, COUNT(*) AS m FROM raw.orders GROUP BY 1"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT amount FROM raw.orders) SELECT SUM(amount) AS m FROM (WITH c AS (SELECT refund AS amount FROM raw.orders) SELECT * FROM c) t",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * FROM raw.orders ORDER BY tier DESC) SELECT SUM(amount) AS m FROM c",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT AVG(amount) AS m FROM (SELECT amount FROM raw.orders ORDER BY qty) t",
+   "b": "SELECT AVG(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * REPLACE (refund AS amount) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "WITH c AS (SELECT * FROM raw.orders ORDER BY tier DESC) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM raw.orders",
+   "b": "WITH c AS (SELECT amount FROM raw.orders) SELECT SUM(amount) AS m FROM (WITH c AS (SELECT refund AS amount FROM raw.orders) SELECT * FROM c) t"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM raw.orders",
+   "b": "WITH c AS (SELECT * FROM raw.orders ORDER BY tier DESC) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT * RENAME (refund AS amount, amount AS refund) FROM raw.orders) SELECT SUM(amount) AS m FROM c",
+   "b": "WITH c AS (SELECT * FROM raw.orders ORDER BY tier DESC) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL",
+   "b": "WITH c AS (SELECT amount FROM raw.orders) SELECT SUM(amount) AS m FROM (WITH c AS (SELECT refund AS amount FROM raw.orders) SELECT * FROM c) t"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT * EXCLUDE (amount, refund, qty, price, status, tier, d, ts), SUM(amount) AS m FROM raw.orders GROUP BY ALL",
+   "b": "WITH c AS (SELECT * FROM raw.orders ORDER BY tier DESC) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "WITH c AS (SELECT amount FROM raw.orders) SELECT SUM(amount) AS m FROM (WITH c AS (SELECT refund AS amount FROM raw.orders) SELECT * FROM c) t",
+   "b": "WITH c AS (SELECT * FROM raw.orders ORDER BY tier DESC) SELECT SUM(amount) AS m FROM c"
+  },
+  {
+   "kind": "pair",
+   "seed": 1,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT COUNT(*) FILTER (WHERE tier = 1 IS NOT TRUE) AS m FROM raw.orders",
+   "b": "SELECT COUNT(*) FILTER (WHERE tier = (1 IS NOT TRUE)) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 2,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM \"raw.orders\"",
+   "b": "SELECT SUM(amount) AS m FROM raw.orders"
+  },
+  {
+   "kind": "pair",
+   "seed": 2,
+   "catalog": 1,
+   "dialect": "duckdb",
+   "source": "round 16 reviews (allowlist / rules / monitor lenses), replayed by execution",
+   "a": "SELECT SUM(amount) AS m FROM raw.orders",
+   "b": "SELECT SUM(amount) AS m FROM 'raw.orders'"
+  }
+ ]
+}

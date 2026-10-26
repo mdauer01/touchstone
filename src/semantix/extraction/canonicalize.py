@@ -50,6 +50,9 @@ class CanonResult:
     gaps: tuple[str, ...] = ()
     # The proof policy's rules that produced this form (SUPPORTED only).
     rules: tuple[str, ...] = ()
+    # The parser-disagreement detector's result on the ORIGINAL text, for
+    # forms inside the grammar (extraction.parse_agreement.ParseCheck.as_dict).
+    parse_check: dict | None = None
 
     @property
     def usable(self) -> bool:
@@ -219,6 +222,18 @@ def canonicalize(sql: str, registry, dialect: str) -> CanonResult:
             ast, refusal = None, f"normalization failed: {e}"
         if ast is not None and not round_trips(ast, dialect):
             ast, refusal = None, "the canonical text does not parse back to the same tree"
+        check = None
+        if ast is not None:
+            # round_trips compares the parser only with itself; ask the
+            # engine too, from the original text. A disagreement refuses; no
+            # disagreement found qualifies nothing (extraction.parse_agreement).
+            from semantix.extraction.parse_agreement import DISAGREES, check_parse
+
+            parse = check_parse(sql, dialect)
+            check = parse.as_dict()
+            if parse.status == DISAGREES:
+                ast, refusal = None, (f"the parser and {parse.engine} {parse.engine_version} "
+                                      f"read this statement differently — {parse.detail}")
         if ast is not None:
             try:
                 # Type INFERENCE only (no rewrite): registered models keep their
@@ -228,7 +243,8 @@ def canonicalize(sql: str, registry, dialect: str) -> CanonResult:
                 pass
             return CanonResult(ast, CanonLevel.SUPPORTED, None, (),
                                tuple(dict.fromkeys((*proof.rules, "commutative",
-                                                    "not_equality", "parens"))))
+                                                    "not_equality", "parens"))),
+                               check)
     hypothesis = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
     prefix = IDENTITY_GAP if proof.kind == "identity" and refusal == proof.reason \
         else GRAMMAR_GAP

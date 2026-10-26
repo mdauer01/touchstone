@@ -27,7 +27,7 @@ import sqlglot
 from sqlglot import exp
 
 from semantix.adapters.base import ComputedArtifact, topo_sort
-from semantix.extraction.sqlutil import table_fqname
+from semantix.extraction.sqlutil import faithful_render, table_fqname
 
 # Each dotted part may be double-quoted, backtick-quoted, or bare. The old
 # character-class regex stopped a quoted name at its first SPACE — so
@@ -199,7 +199,16 @@ def load_views_file(path: str | Path,
                            f"was scanned"),
             })
         seen_at[relation] = index
-        body_sql = body.sql(dialect=dialect)
+        body_sql = faithful_render(body, dialect)
+        if body_sql is None:
+            # The dialect's generator would rewrite this body (Spark hoists a
+            # derived table's own WITH), so its text is not what the view
+            # computes — reported, never scanned as something else.
+            skipped.append({"object_id": relation, "path": str(p),
+                            "reason": "the view body cannot be re-rendered faithfully in "
+                                      f"{dialect} (e.g. a nested WITH the generator "
+                                      "hoists) — not scanned"})
+            continue
         artifacts.append(
             ComputedArtifact(
                 system="views",

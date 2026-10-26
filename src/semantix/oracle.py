@@ -298,6 +298,43 @@ INLINE_VARIANTS = [
     f"SELECT COUNT(*) AS m FROM {_O} GROUP BY ()",
 ]
 
+# Round seventeen's blind spots: the generators never wrote `%`, a chain of
+# comparison / IS operators, a star modifier, a nested WITH, an inner ORDER BY
+# or a constant GROUP BY key — which is why the reviews, not the oracle, found
+# them. Each is refused today; listed so that anything which ever lets one in
+# is executed against what it is equated with, and its proof form.
+ROUND17_VARIANTS = [
+    f"SELECT SUM(qty + 1 % 3) AS m FROM {_O}", f"SELECT SUM((qty + 1) % 3) AS m FROM {_O}",
+    f"SELECT SUM(qty % 3 * 2) AS m FROM {_O}", f"SELECT SUM(qty % (3 * 2)) AS m FROM {_O}",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE qty = 1 IS NOT TRUE",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE qty = (1 IS NOT TRUE)",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE (qty = 1) IS NOT TRUE",
+    f"SELECT COUNT(*) FILTER (WHERE qty = customer_id IS NULL) AS m FROM {_O}",
+    f"SELECT COUNT(*) FILTER (WHERE (customer_id IS NULL) = qty) AS m FROM {_O}",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE NOT qty IN (1, 2) IN (TRUE, NULL)",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE (NOT qty IN (1, 2)) IN (TRUE, NULL)",
+    f"WITH s AS (SELECT * REPLACE (refund_amount AS amount) FROM {_O}) "
+    f"SELECT SUM(amount) AS m FROM s",
+    f"WITH s AS (SELECT * EXCLUDE (refund_amount) FROM {_O}) SELECT SUM(amount) AS m FROM s",
+    f"WITH s AS (SELECT * RENAME (refund_amount AS amount, amount AS refund_amount) "
+    f"FROM {_O}) SELECT SUM(amount) AS m FROM s",
+    f"SELECT *, COUNT(*) AS m FROM (SELECT channel FROM {_O}) d GROUP BY ALL",
+    f"WITH s AS (SELECT amount FROM {_O}) SELECT SUM(amount) AS m FROM "
+    f"(WITH s AS (SELECT refund_amount AS amount FROM {_O}) SELECT amount FROM s) d",
+    f"WITH s AS (SELECT amount FROM {_O} ORDER BY amount) SELECT SUM(amount) AS m FROM s",
+    f"SELECT AVG(amount) AS m FROM (SELECT amount FROM {_O} ORDER BY qty) t",
+    f"SELECT channel, SUM(amount) AS m FROM {_O} GROUP BY (1)",
+    f"SELECT qty, SUM(amount) AS m FROM {_O} GROUP BY (1)",
+    f"SELECT SUM(amount) AS m, 1 AS k FROM {_O} GROUP BY k",
+    f"WITH s AS (SELECT 'year' AS month, order_date, amount FROM {_O}) "
+    f"SELECT DATE_TRUNC(month, order_date) AS k, SUM(amount) AS m FROM s GROUP BY 1",
+    f"SELECT DATE_TRUNC('month', order_date) AS k, SUM(amount) AS m FROM {_O} GROUP BY 1",
+    f"SELECT COUNT(*) FILTER (WHERE like(status, 'comp%')) AS m FROM {_O}",
+    f"SELECT COUNT(*) FILTER (WHERE status LIKE 'comp%') AS m FROM {_O}",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE qty BETWEEN 2.5 AND '2.5'",
+    f"SELECT SUM(-qty ^ 2) AS m FROM {_O}", f"SELECT SUM(POWER(-qty, 2)) AS m FROM {_O}",
+]
+
 MULTIDB_QUERIES = [
     "SELECT SUM(amount) AS m FROM prod.raw.orders",
     "SELECT SUM(amount) AS m FROM dev.raw.orders",
@@ -433,7 +470,7 @@ def generate_queries(full: bool = False) -> list[str]:
         for (gs, gc), m, f in product(GRAINS, ["SUM(amount)", "COUNT(DISTINCT customer_id)", "AVG(amount)"],
                                       ["", "status = 'completed'"]):
             out.append(q(gs, m, f, gc))
-    out += SPECIALS + INLINE_VARIANTS + generate_grammar_combinations(full)
+    out += SPECIALS + INLINE_VARIANTS + ROUND17_VARIANTS + generate_grammar_combinations(full)
     return list(dict.fromkeys(out))
 
 
@@ -542,10 +579,16 @@ class OracleReport:
     # challenged one query at a time, not only through bucket pairs.
     transforms_executed: int = 0
     transform_mismatches: list[dict] = field(default_factory=list)
+    # The parser-disagreement detector on every query's ORIGINAL text, by
+    # status; a proof-grade query it says DuckDB reads differently fails the
+    # run (canonicalize refuses those, so any here is a broken refusal).
+    parse_checks: dict[str, int] = field(default_factory=dict)
+    parse_disagreements: list[dict] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not (self.mismatches or self.self_test_failures or self.transform_mismatches)
+        return not (self.mismatches or self.self_test_failures or self.transform_mismatches
+                    or self.parse_disagreements)
 
 
 def _registry(estate: str, queries: list[str]) -> SchemaRegistry:
@@ -569,7 +612,12 @@ def _registry(estate: str, queries: list[str]) -> SchemaRegistry:
 _TRANSFORMED: dict[str, str] = {}   # original SQL -> its proof form, per run
 
 
+_PARSE_CHECKS: dict[str, tuple[dict, bool]] = {}   # original SQL -> (check, proof grade)
+
+
 def _buckets(estate: str, queries: list[str]) -> tuple[dict[str, list[str]], int]:
+    from semantix.extraction.parse_agreement import check_parse
+
     registry = _registry(estate, queries)
     by_hash: dict[str, list[str]] = {}
     proof = 0
@@ -577,7 +625,9 @@ def _buckets(estate: str, queries: list[str]) -> tuple[dict[str, list[str]], int
         canon = canonicalize(sql, registry, DIALECT)
         fps = extract_fingerprints(canon, "oracle.q", Provenance("oracle", f"q{i}"),
                                    DIALECT, registry)
-        if len(fps) != 1 or fps[0].canon_level not in PROOF_LEVELS or fps[0].gaps:
+        graded = len(fps) == 1 and fps[0].canon_level in PROOF_LEVELS and not fps[0].gaps
+        _PARSE_CHECKS[sql] = (canon.parse_check or check_parse(sql, DIALECT).as_dict(), graded)
+        if not graded:
             continue
         proof += 1
         by_hash.setdefault(fps[0].core.hash(), []).append(sql)
@@ -589,8 +639,17 @@ def run_oracle(full: bool = False) -> OracleReport:
     report = OracleReport()
     for estate, queries in (("main", generate_queries(full)), ("multidb", MULTIDB_QUERIES)):
         _TRANSFORMED.clear()
+        _PARSE_CHECKS.clear()
         by_hash, proof = _buckets(estate, queries)
         transformed = dict(_TRANSFORMED)
+        from semantix.extraction.parse_agreement import DISAGREES
+
+        for sql, (check, graded) in _PARSE_CHECKS.items():
+            report.parse_checks[check["status"]] = report.parse_checks.get(
+                check["status"], 0) + 1
+            if graded and check["status"] == DISAGREES:
+                report.parse_disagreements.append({"estate": estate, "sql": sql,
+                                                   "detail": check["detail"]})
         report.queries += len(queries)
         report.proof_grade += proof
         shared = {h: qs for h, qs in by_hash.items() if len(qs) > 1}

@@ -206,6 +206,7 @@ def extract_fingerprints(
                 provenance=provenance,
                 gaps=fp_gaps,
                 rules=canon.rules if fp_level in PROOF_LEVELS else (),
+                parse_check=canon.parse_check if fp_level in PROOF_LEVELS else None,
             )
         )
     return fingerprints
@@ -699,14 +700,36 @@ def unrecognized_measures(stmt: exp.Expression) -> list[tuple[str | None, str, l
         return []
     aggregating = (select.args.get("group") is not None
                    or any(p.find(exp.AggFunc) is not None for p in select.expressions))
+    # A GROUPING KEY computed by an unknown function is a dimension, not a
+    # measure use (round 17: `initcap_custom(channel)` in GROUP BY was counted
+    # as one): by expression, ordinal, alias, or GROUP BY ALL.
+    group = select.args.get("group")
+    key_items, ordinals, key_names = [], set(), set()
+    group_all = bool(group is not None and group.args.get("all"))
+    if group is not None:
+        from semantix.extraction.sqlutil import split_group
+
+        for g in split_group(group)[0]:
+            if isinstance(g, exp.Literal) and g.is_int:
+                ordinals.add(int(g.name))
+            elif isinstance(g, exp.Column) and not g.table:
+                key_names.add(g.name.lower())
+                key_items.append(g)
+            else:
+                key_items.append(g)
     out = []
-    for proj in select.expressions:
+    for index, proj in enumerate(select.expressions, 1):
         inner = proj.this if isinstance(proj, exp.Alias) else proj
         if inner.find(exp.AggFunc) is not None:
             continue
         unknown = sorted({a.name.lower() for a in inner.find_all(exp.Anonymous)
                           if a.find_ancestor(exp.Window) is None})
         if not unknown:
+            continue
+        alias = proj.alias.lower() if isinstance(proj, exp.Alias) and proj.alias else None
+        if not any(u in _AGGREGATE_LIKE for u in unknown) and (
+                group_all or index in ordinals or (alias and alias in key_names)
+                or any(inner == g for g in key_items)):
             continue
         if aggregating or any(u in _AGGREGATE_LIKE for u in unknown):
             name = proj.alias if isinstance(proj, exp.Alias) and proj.alias else None

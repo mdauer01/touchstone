@@ -203,6 +203,9 @@ class Fingerprint:
     # The proof policy's rules (extraction.proof.RULES) that produced this
     # form; empty below proof grade. Recorded on positive verdicts.
     rules: tuple[str, ...] = ()
+    # The parser-disagreement detector's status for this form's ORIGINAL SQL
+    # ("no_disagreement_found" / "not_checked"; a disagreement is refused).
+    parse_check: dict | None = None
 
     @staticmethod
     def make_id(core: SemanticCore, concept_candidate: str, relation: str = "",
@@ -256,6 +259,7 @@ class Claim:
     # can be reported and diffed but never certified equal to anything.
     gaps: tuple[str, ...] = ()
     rules: tuple[str, ...] = ()   # as Fingerprint.rules
+    parse_check: dict | None = None   # as Fingerprint.parse_check
 
     @staticmethod
     def make_id(name: str, provenance: Provenance, expr_raw: str | None) -> str:

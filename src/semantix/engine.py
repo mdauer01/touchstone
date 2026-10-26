@@ -694,6 +694,7 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
     claim.canon_level = fps[0].canon_level
     claim.gaps = fps[0].gaps
     claim.rules = fps[0].rules
+    claim.parse_check = fps[0].parse_check
     if fps[0].gaps:
         claim.error = ("declaration uses constructs the semantic core cannot "
                        "represent: " + "; ".join(fps[0].gaps))
