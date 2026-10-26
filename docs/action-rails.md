@@ -25,7 +25,7 @@ semantix propose --db semantix.db --out proposals/ [--format metrics|ossie|uc-me
 gh pr create --body-file proposals/RESOLUTIONS.md   # the memo is the PR body
 ```
 
-For each CONTRADICTION: **Option A** — a declaration file emitted from what
+For each suspected divergence: **Option A** — a declaration file emitted from what
 the code computes today, in the ontology's format (the ontology drifted);
 **Option B** — the component diff describing the code change that would
 match the declaration instead (the code drifted). For each SHADOW_METRIC: the
@@ -39,6 +39,11 @@ applied itself would be the verifier deciding meaning.
 
 Use the shipped package — `integrations/dbt/semantix` — for generic tests
 (`no_contradictions`, `certified`, `fresh_scan`) with dbt-native severity.
+`no_contradictions` fails on suspected divergences (a triage gate on a suspicion);
+`certified` fails closed while positive verdicts are suspended
+([proof-policy.md](proof-policy.md)). After upgrading, run
+`semantix publish --refresh-policy --warehouse …` so tables published earlier carry
+the policy (`usable_for_reliance = false`) before any rail reads them.
 Failing tests block `dbt build` and flow into dbt Cloud, Elementary, and
 anything else that already consumes test results.
 
@@ -50,7 +55,7 @@ Snowflake:
 CREATE ALERT semantix_contradictions
   WAREHOUSE = alerting_wh
   SCHEDULE = '60 MINUTE'
-  IF (EXISTS (SELECT 1 FROM semantix.verdicts WHERE verdict = 'CONTRADICTION'))
+  IF (EXISTS (SELECT 1 FROM semantix.verdicts WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')))
   THEN CALL SYSTEM$SEND_EMAIL(...);  -- or a notification integration
 ALTER ALERT semantix_contradictions RESUME;  -- alerts are created SUSPENDED
 ```
@@ -76,7 +81,7 @@ def no_semantic_contradictions(context) -> AssetCheckResult:
     # project with a database, two-part otherwise — so match both forms.
     rows = warehouse.query(
         "SELECT concept, summary FROM semantix.verdicts "
-        "WHERE verdict = 'CONTRADICTION' "
+        "WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION') "
         "AND (lower(relation) = 'prod.analytics.fct_orders' "
         "     OR lower(relation) = 'analytics.fct_orders')")
     return AssetCheckResult(passed=not rows,
@@ -101,7 +106,7 @@ checks for semantix.verdicts:
       name: No semantic contradictions
       fail query: |
         SELECT concept, severity, summary
-        FROM semantix.verdicts WHERE verdict = 'CONTRADICTION'
+        FROM semantix.verdicts WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')
 ```
 
 Great Expectations: `unexpected_rows_expectation` with the same query.
@@ -109,7 +114,9 @@ Great Expectations: `unexpected_rows_expectation` with the same query.
 ## Runtime (agents)
 
 Already in-rail with no configuration: agents attesting through the MCP
-server are refused stale or contested certifications, and signed receipts in
-`agents.root` decay honestly (`verified_as_of` + freshness). Publish also on
+server never get a usable claim while positive verdicts are suspended
+(`semantic_claim_usable: false`, reported beside `signature_authentic` and
+`estate_unchanged`), and signed receipts in `agents.root` carry an
+`assessment/<concept>` row saying so. Publish also on
 a schedule so the projection the rails read stays current — and let the
 `fresh_scan` test (or an alert on `scanned_at`) fail loudly when it does not.

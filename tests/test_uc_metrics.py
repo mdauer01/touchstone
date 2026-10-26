@@ -16,6 +16,8 @@ from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.services.freshness import SOURCE_SYSTEMS, current_estate_shas
 
+from .policy import engine_verdict
+
 
 def _view(measures, tmp_path, name="revenue_view", **extra):
     doc = {"version": "1.1", "source": "db.main.orders",
@@ -212,7 +214,10 @@ def test_scan_certifies_agreeing_metric_view(tmp_path):
     store.close()
     assert len(result.claims) == 1 and result.claims[0].expressible
     concept = [v for v in result.verdicts if v.concept_label == "total_revenue"]
-    assert any(v.verdict_type == VerdictType.CERTIFIED for v in concept)
+    # The engine certifies; under the conclusions policy that surfaces as an
+    # experimental comparison (UNRESOLVED), never as CERTIFIED.
+    assert any(engine_verdict(v) == VerdictType.CERTIFIED
+               and v.verdict_type == VerdictType.UNRESOLVED for v in concept)
 
 
 def test_freshness_covers_uc_metrics(tmp_path):

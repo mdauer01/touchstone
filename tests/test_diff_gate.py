@@ -13,8 +13,11 @@ import pytest
 
 from semantix.cli import main
 from semantix.engine import run_scan
+from semantix.models import VerdictType
 from semantix.services.diff import diff_verdicts
 from semantix.store import Store
+
+from .policy import engine_verdict
 
 GROWTH = "dbt_project/target/compiled/acme/models/growth/growth_net_revenue.sql"
 ALIGNED = (
@@ -59,14 +62,18 @@ def test_rescanning_an_unchanged_estate_does_not_hide_a_regression(estate, tmp_p
 
     store = Store(str(db))
     first = diff_verdicts(store)
-    assert any(v["verdict"] == "CONTRADICTION" for v in first["new"]), (
+    # The diff reads effective verdicts: the engine's CONTRADICTION surfaces
+    # as a suspected divergence under the conclusions policy.
+    assert any(engine_verdict(v) == VerdictType.CONTRADICTION
+               and v["verdict"] == "SUSPECTED_DIVERGENCE" for v in first["new"]), (
         "the regression must be newly introduced on the first diff"
     )
 
     # The job is retried. Nothing about the estate changed.
     scan(estate, db)
     second = diff_verdicts(Store(str(db)))
-    assert any(v["verdict"] == "CONTRADICTION" for v in second["new"]), (
+    assert any(engine_verdict(v) == VerdictType.CONTRADICTION
+               and v["verdict"] == "SUSPECTED_DIVERGENCE" for v in second["new"]), (
         "a re-run of an unchanged estate hid the regression"
     )
 
@@ -95,5 +102,8 @@ def test_a_genuine_fix_still_reads_as_resolved(estate, tmp_path):
     scan(estate, db)
 
     diff = diff_verdicts(Store(str(db)))
-    assert any(v["verdict"] == "CONTRADICTION" for v in diff["resolved"])
-    assert not any(v["verdict"] == "CONTRADICTION" for v in diff["new"])
+    # Effective verdicts: the engine's CONTRADICTION is a suspected divergence.
+    assert any(engine_verdict(v) == VerdictType.CONTRADICTION
+               and v["verdict"] == "SUSPECTED_DIVERGENCE" for v in diff["resolved"])
+    assert not any(engine_verdict(v) == VerdictType.CONTRADICTION for v in diff["new"])
+    assert not any(v["verdict"] == "SUSPECTED_DIVERGENCE" for v in diff["new"])

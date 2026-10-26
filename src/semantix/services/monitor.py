@@ -52,6 +52,12 @@ from dataclasses import dataclass, field
 from sqlglot import exp
 
 from semantix.adapters.base import topo_sort
+from semantix.conclusions import (
+    POSITIVE_VERDICTS,
+    SUSPECTED_REASON,
+    SUSPENSION_REASON,
+    effective_finding,
+)
 from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints, unrecognized_measures
 from semantix.extraction.proof import is_grammar_gap
@@ -394,6 +400,9 @@ def monitor_history(
                      excluded, unreadable, models, dialect, as_of)
         if unqualified:
             out = [_withhold(f, unqualified) for f in out]
+        # Under the policy in force (semantix.conclusions): a match is an
+        # experimental comparison, a violation a suspected difference.
+        out = [effective_finding(f) for f in out]
         # The use's headline outcome is its MOST SEVERE finding: a supporting
         # match must never outrank a violation of the metric it claims.
         primary = max(out, key=lambda f: _PRECEDENCE[f["kind"]])
@@ -414,6 +423,11 @@ def monitor_history(
         "reference": ref_meta,
         "rule_set": RULE_SET,
         "excluded_semantics": list(EXCLUDED),
+        # The policy in force, beside every result: `toolchain` withholding is
+        # a separate, additional gate (an unqualified parser), not the policy.
+        "policy": {"positive_verdicts": POSITIVE_VERDICTS,
+                   "reason": SUSPENSION_REASON,
+                   "negative_verdicts": "suspected — " + SUSPECTED_REASON},
         "toolchain": {"run": run_toolchain, "reference_scan": scan_toolchain or None,
                       "positive_verdicts_withheld": bool(unqualified)},
         "comparison": (pilot.comparison_label() if pilot is not None else
@@ -725,7 +739,11 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
                 if any(a.core.hash() != b.core.hash() and _overlap(a, b)
                        for a in pool if a.concept == c
                        for b in pool if b.concept == c)),
-            "scan_contradicted_concepts": sorted(contradicted)}
+            # Concepts the scan reports as SUSPECTED divergences (the key keeps
+            # its name for consumers; nothing in it is a verified contradiction).
+            "scan_contradicted_concepts": sorted(contradicted),
+            "contested_basis": "suspected — authoritative definitions that differ "
+                               "under the experimental rules, not verified"}
     return authorities, computed, excluded, unreadable, meta
 
 
@@ -734,7 +752,7 @@ def _reference(store: Store, scan_id: str
     """(proof-grade definitions, excluded hash -> description, concepts the
     scan found CONTRADICTED)."""
     contradicted = {v["concept_label"] for v in store.verdicts_for_scan(scan_id)
-                    if v["verdict"] == "CONTRADICTION"}
+                    if v["verdict"] in ("CONTRADICTION", "SUSPECTED_DIVERGENCE")}
     refs: list[_RefDef] = []
     excluded: dict[str, str] = {}
     for concept in store.concepts_for_scan(scan_id):
@@ -1036,12 +1054,15 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
                          unverifiable("shape_unsupported", obs.hypothesis))]
     if obs.semantic_hash in excluded:
         return [_finding(base, "unverifiable", 0, None, "unverifiable", "none",
-                         f"matches the {excluded[obs.semantic_hash]}, which is "
-                         f"below proof grade in the reference — no comparison made",
+                         f"appears to match (experimental comparison) the "
+                         f"{excluded[obs.semantic_hash]}, which is outside the supported "
+                         f"grammar in the reference — no comparison made",
                          unverifiable("below_proof_grade", excluded[obs.semantic_hash]))]
-    summary = "recurring measure not defined by any authoritative definition"
+    summary = ("recurring measure that no authoritative definition matched under the "
+               "experimental comparison rules")
     if also:
-        summary += f" (matches the {also[0]}, which is not declared authoritative)"
+        summary += (f" (appears to match, under the experimental rules, the {also[0]}, "
+                    f"which is not declared authoritative)")
     return [_finding(base, "unregistered_recurring_measure", SEV_UNREGISTERED, None,
                      "not_applicable", "none", summary)]
 
@@ -1075,7 +1096,8 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
     if violated:
         auth, outcome = sorted(violated, key=lambda t: (len(t[1].reasons), t[0].label))[0]
         diff = _diff(auth.core, obs.components)
-        matched = (f" — its calculation is the {base['calculation_matches']}"
+        matched = (f" — its calculation appears to equal the "
+                   f"{base['calculation_matches']} under the experimental rules"
                    if base.get("calculation_matches") else "")
         return _finding(base, "definition_violation", _violation_severity(obs.uses),
                         concept, "violation", identity,
@@ -1094,9 +1116,10 @@ def _conforming(obs: _Observed, base: dict, auth: Authority, outcome: Outcome,
         return _finding(base, "contested_use", SEV_CONTESTED, auth.concept, "conforming",
                         identity,
                         f"conforms to the {auth.label}, but the authoritative "
-                        f"definitions of {auth.concept} disagree with each other — "
-                        f"agreeing with one side of an open contradiction is not "
-                        f"consistency", outcome)
+                        f"definitions of {auth.concept} appear to disagree with each "
+                        f"other (a suspected divergence, not verified) — agreeing with "
+                        f"one side of a suspected divergence is not consistency",
+                        outcome)
     how = "matches the" if outcome.shape == "exact" else "conforms to the"
     return _finding(base, "conforming_use", 0, auth.concept, "conforming", identity,
                     f"{how} {auth.label}{_variation_text(outcome)}", outcome)
@@ -1255,14 +1278,21 @@ def _withhold(f: dict, unqualified: list[str]) -> dict:
     if f.get("conformance") != "conforming":
         return f
     detail = "; ".join(unqualified) + " — equality under it is untested"
-    return {**f, "kind": "unverifiable", "severity": 0, "conformance": "unverifiable",
+    # What it would have said is labelled for what it is: at most an
+    # experimental match (round seventeen: the raw "conforming_use: conforms
+    # to …" text reached the JSON unlabelled). A contested use keeps its
+    # severity, as on the policy path, so the authority dispute is not lost.
+    return {**f, "kind": "unverifiable", "conformance": "unverifiable",
+            "severity": f["severity"] if f["kind"] == "contested_use" else 0,
             "reasons": [{"code": "toolchain_unqualified", "detail": detail}],
-            "withheld": f"{f['kind']}: {f['summary']}",
+            "withheld_kind": f["kind"],
+            "withheld": (f"experimental at most, not a conclusion — would have been "
+                         f"{f['kind']}: {f['summary']}"),
             "summary": f"not judged: {detail}"}
 
 
 # A use's headline bucket is its most severe finding.
-_PRECEDENCE = {"definition_violation": 5, "contested_use": 4,
+_PRECEDENCE = {"definition_violation": 5, "suspected_difference": 5, "contested_use": 4,
                "candidate_alt_definition": 3, "unverifiable": 2,
                "unregistered_recurring_measure": 1, "conforming_use": 0}
 # The summary is NOT attribution: it names the definition a verdict was
@@ -1294,7 +1324,7 @@ def _aggregate(judged: list[tuple[dict, _Observed]]) -> list[dict]:
             for key in ("executed_by", "clients", "assets"):
                 f[key] = sorted(set().union(*(getattr(o, key) for o in obss)))[:_SAMPLE]
             f["execution_ids"] = [i for o in obss for i in o.execution_ids][:_SAMPLE]
-            if f["kind"] == "definition_violation":
+            if f["kind"] in ("definition_violation", "suspected_difference"):
                 f["severity"] = _violation_severity(f["uses"])
             elif f["kind"] == "candidate_alt_definition":
                 f["severity"] = min(85, SEV_CANDIDATE_BASE + min(30, f["uses"]))
@@ -1304,18 +1334,21 @@ def _aggregate(judged: list[tuple[dict, _Observed]]) -> list[dict]:
 
 class _Funnel:
     """Every measure use lands in exactly one bucket; governed references
-    are counted alongside, never instead."""
+    are counted alongside, never instead. While positive verdicts are
+    suspended there is no conforming bucket: an experimental match is one
+    reason a use is unverifiable, and a violation is a suspected difference."""
 
     _KINDS = ("conforming_use", "contested_use", "definition_violation",
-              "candidate_alt_definition", "unregistered_recurring_measure",
-              "unverifiable")
+              "suspected_difference", "candidate_alt_definition",
+              "unregistered_recurring_measure", "unverifiable")
 
     def __init__(self):
         self.uses = 0
         self.governed = 0
         self.by_kind = {k: 0 for k in self._KINDS}
         self.below_threshold = 0
-        self.conforming_by_shape = {"exact": 0, "A": 0, "B": 0}
+        self.experimental_by_shape = {"exact": 0, "A": 0, "B": 0}
+        self.experimental = {"conforming_use": 0, "contested_use": 0}
         self.unverifiable_by = {}
 
     def add(self, obs: _Observed, primary: dict) -> None:
@@ -1324,8 +1357,14 @@ class _Funnel:
             self.governed += obs.uses
         kind = primary["kind"]
         self.by_kind[kind] += obs.uses
-        if kind == "conforming_use" and primary.get("shape"):
-            self.conforming_by_shape[primary["shape"]] += obs.uses
+        experimental = primary.get("experimental") or {}
+        if experimental.get("kind") in self.experimental:
+            self.experimental[experimental["kind"]] += obs.uses
+        elif primary.get("withheld_kind") == "contested_use":
+            # Withheld by the toolchain gate: still an authority dispute.
+            self.experimental["contested_use"] += obs.uses
+        if experimental.get("kind") == "conforming_use" and experimental.get("shape"):
+            self.experimental_by_shape[experimental["shape"]] += obs.uses
         if kind == "unverifiable":
             code = (primary.get("reasons") or [{"code": "below_proof_grade"}])[0]["code"]
             cat = CATEGORY.get(code, "other")
@@ -1338,15 +1377,19 @@ class _Funnel:
             self.governed += obs.uses
 
     def as_dict(self) -> dict:
-        checked = self.by_kind["conforming_use"] + self.by_kind["definition_violation"]
+        from semantix.conclusions import POSITIVE_VERDICTS
+
         return {"measure_uses": self.uses, "governed_references": self.governed,
-                "conforming": self.by_kind["conforming_use"],
-                "conforming_by_shape": dict(self.conforming_by_shape),
-                "contested": self.by_kind["contested_use"],
-                "violations": self.by_kind["definition_violation"],
+                "positive_verdicts": POSITIVE_VERDICTS,
+                # Engine matches, reported as experimental comparisons only
+                # (both are counted under `unverifiable`).
+                "experimental_matches": self.experimental["conforming_use"],
+                "experimental_matches_by_shape": dict(self.experimental_by_shape),
+                "experimental_contested": self.experimental["contested_use"],
+                "suspected_differences": (self.by_kind["suspected_difference"]
+                                          + self.by_kind["definition_violation"]),
                 "candidates": self.by_kind["candidate_alt_definition"],
                 "unregistered": self.by_kind["unregistered_recurring_measure"],
                 "unverifiable": self.by_kind["unverifiable"],
                 "unverifiable_by_reason": dict(sorted(self.unverifiable_by.items())),
-                "below_threshold": self.below_threshold,
-                "checked": checked}
+                "below_threshold": self.below_threshold}

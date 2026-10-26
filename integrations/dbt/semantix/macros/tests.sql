@@ -6,12 +6,13 @@
   inherits the triage muscle the project already has.
 -#}
 
-{#- Fails while any CONTRADICTION touches this model's relation (or the
-    named concept). The strongest gate: same name, different math. -#}
+{#- Fails while any SUSPECTED_DIVERGENCE (or a legacy CONTRADICTION row)
+    touches this model's relation or the named concept: same name, apparently
+    different math. A triage gate on a suspicion, not a verified finding. -#}
 {% test no_contradictions(model, concept=none) %}
     select concept, verdict, severity, summary, relation
     from {{ semantix.findings() }}
-    where verdict = 'CONTRADICTION'
+    where verdict in ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')
       and (
           {{ semantix.matches_relation('relation', model) }}
           {% if concept %} or lower(concept) = lower('{{ concept }}') {% endif %}
@@ -19,24 +20,14 @@
 {% endtest %}
 
 
-{#- Fails unless the named concept is affirmatively CERTIFIED — a missing
-    concept, a contradiction, or an unresolved state all fail. Attach to the
-    model that owns the metric. -#}
+{#- Fails closed: positive verdicts are suspended (semantix.conclusions), so
+    no concept is certified — whatever the projection holds, including rows
+    published before the suspension. Kept so existing attachments fail loudly
+    with the reason instead of passing. -#}
 {% test certified(model, concept) %}
-    with concept_verdicts as (
-        select verdict, severity, summary
-        from {{ semantix.findings() }}
-        where lower(concept) = lower('{{ concept }}')
-    )
-    select 'CONTRADICTION stands' as reason, severity, summary
-    from concept_verdicts where verdict = 'CONTRADICTION'
-    union all
-    {#- A one-row anchor: `select ... where not exists (...)` with no FROM is
-        not accepted everywhere; a derived single row is. -#}
-    select 'no CERTIFIED verdict for {{ concept }}' as reason,
+    select 'positive verdicts are suspended — {{ concept }} is not certified' as reason,
            cast(0 as integer) as severity, cast(null as {{ dbt.type_string() }}) as summary
     from (select 1 as one) as anchor
-    where not exists (select 1 from concept_verdicts where verdict = 'CERTIFIED')
 {% endtest %}
 
 

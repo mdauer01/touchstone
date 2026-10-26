@@ -5,7 +5,7 @@ never the messenger for pre-existing debt. `semantix scan --fail-on` gates on
 the absolute state; this module supplies the relative one — what did THIS
 change break or fix — which is the number a PR review can actually act on.
 
-Verdict identity for diffing is (concept_label, verdict_type), deliberately
+Verdict identity for diffing is (concept_label, engine verdict), deliberately
 coarse: a CONTRADICTION whose blame sentence shifts wording is still the same
 open problem, not a new one. Severity and summaries come along as detail.
 """
@@ -17,6 +17,7 @@ from typing import Any
 from semantix.store import Store
 
 _BADGE = {
+    "SUSPECTED_DIVERGENCE": "🔴",
     "CONTRADICTION": "🔴",
     "UNRESOLVED": "🟠",
     "SHADOW_METRIC": "🟡",
@@ -63,12 +64,31 @@ def diff_verdicts(store: Store, scan_id: str | None = None,
 
     current = store.verdicts_for_scan(scan_id)
     baseline = store.verdicts_for_scan(baseline_scan_id)
-    key = lambda v: (v["concept_label"], v["verdict"])  # noqa: E731
+    # Identity is what the ENGINE concluded, so a certification-then-break is
+    # a lost experimental equality — not one UNRESOLVED "resolved" — and
+    # CERTIFIED + ALIASING stay two verdicts. Rows are shown as the policy
+    # reports them (semantix.conclusions).
+    from semantix.conclusions import engine_row
+
+    for v in (*current, *baseline):
+        v["engine_verdict"] = engine_row(v)["verdict"]
+    key = lambda v: (v["concept_label"], v["engine_verdict"])  # noqa: E731
     baseline_keys = {key(v) for v in baseline}
     current_keys = {key(v) for v in current}
 
     new = [v for v in current if key(v) not in baseline_keys]
     resolved = [v for v in baseline if key(v) not in current_keys]
+    # A problem that disappeared because the experimental rules now find the
+    # definitions EQUAL is not fixed — that equality is suspended as a
+    # conclusion. Name what replaced it so no surface says "resolved".
+    positive = ("CERTIFIED", "ALIASING")
+    for v in resolved:
+        if v["engine_verdict"] not in positive:
+            replaced = sorted({c["engine_verdict"] for c in current
+                               if c["concept_label"] == v["concept_label"]
+                               and c["engine_verdict"] in positive})
+            if replaced:
+                v["replaced_by_experimental"] = replaced
     return {
         "scan_id": scan_id,
         "baseline_scan_id": baseline_scan_id,
@@ -102,19 +122,38 @@ def markdown_comment(diff: dict[str, Any]) -> str:
     # ALIASING is a regression, and a lost CONTRADICTION on a scan that read
     # nothing is a typo'd path, not a fix. Only problem verdicts are
     # "resolved"; the affirmative ones are reported as lost.
-    fixed = [v for v in resolved if v["verdict"] not in ("CERTIFIED", "ALIASING")]
-    lost = [v for v in resolved if v["verdict"] in ("CERTIFIED", "ALIASING")]
+    #
+    # Under the conclusions policy nothing is "resolved" by the rules alone:
+    # a problem the experimental rules now find EQUAL is replaced by an
+    # experimental equality, which is not a conclusion that it was fixed.
+    positive = ("CERTIFIED", "ALIASING")
+    gone = [v for v in resolved if v.get("engine_verdict", v["verdict"]) not in positive]
+    replaced = [v for v in gone if v.get("replaced_by_experimental")]
+    fixed = [v for v in gone if not v.get("replaced_by_experimental")]
+    lost = [v for v in resolved if v.get("engine_verdict", v["verdict"]) in positive]
     if fixed:
         s = "s" if len(fixed) != 1 else ""
-        lines.append(f"**{len(fixed)} verdict{s} resolved by this change:** "
+        lines.append(f"**{len(fixed)} verdict{s} no longer reported after this change:** "
                      + ", ".join(f"{_BADGE.get(v['verdict'], '')} {v['verdict']} "
                                  f"`{v['concept_label']}`" for v in fixed))
         lines.append("")
+    if replaced:
+        s = "s" if len(replaced) != 1 else ""
+        lines.append(f"**{len(replaced)} verdict{s} replaced by an experimental equality "
+                     f"(not a conclusion — positive verdicts are suspended; review the "
+                     f"change):** "
+                     + ", ".join(f"{_BADGE.get(v['verdict'], '')} {v['verdict']} "
+                                 f"`{v['concept_label']}` → "
+                                 f"{'/'.join(v['replaced_by_experimental'])} under the "
+                                 f"experimental rules" for v in replaced))
+        lines.append("")
     if lost:
         s = "s" if len(lost) != 1 else ""
-        lines.append(f"**{len(lost)} certification{s} LOST by this change:** "
-                     + ", ".join(f"🔴 {v['verdict']} `{v['concept_label']}`" for v in lost)
-                     + " — the estate no longer earns these; if the scan read "
+        lines.append(f"**{len(lost)} experimental equalit{'ies' if s else 'y'} LOST by "
+                     f"this change:** "
+                     + ", ".join(f"🔴 {v.get('engine_verdict', v['verdict'])} under the "
+                                 f"experimental rules `{v['concept_label']}`" for v in lost)
+                     + " — the rules no longer find these equal; if the scan read "
                        "fewer models than before, check the source paths first")
         lines.append("")
 

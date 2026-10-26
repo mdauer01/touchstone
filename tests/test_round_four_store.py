@@ -16,6 +16,8 @@ from semantix.engine import run_scan
 from semantix.signing import verify_receipt_dict
 from semantix.store import Store
 
+from .policy import engine_verdict
+
 
 @pytest.fixture
 def clock(monkeypatch):
@@ -131,14 +133,17 @@ def test_an_interrupted_scan_does_not_report_a_clean_estate(acme, tmp_path, cloc
     shutil.copytree(acme, estate)
     db = tmp_path / "s.db"
     result, store = scan(estate, db)
-    assert any(v.verdict_type.value == "CONTRADICTION" for v in result.verdicts)
+    assert any(engine_verdict(v).value == "CONTRADICTION" for v in result.verdicts)
 
     clock()
     store.begin_scan("interrupted", "duckdb")  # process dies here
 
     latest = store.latest_scan()
     verdicts = store.verdicts_for_scan(latest["scan_id"])
-    assert any(v["verdict"] == "CONTRADICTION" for v in verdicts), \
+    # Read back as the policy reports it: a suspected divergence carrying the
+    # engine's CONTRADICTION.
+    assert any(v["verdict"] == "SUSPECTED_DIVERGENCE"
+               and engine_verdict(v).value == "CONTRADICTION" for v in verdicts), \
         "an interrupted scan erased the estate's known contradiction from every read"
 
 
@@ -164,6 +169,7 @@ def test_a_stale_freshness_block_blocks_certification(acme, tmp_path, clock):
     receipt = store.issue_receipt(
         "gmv", freshness={"status": "stale", "removed": ["dbt:model.acme.gmv"]})
     assert receipt.status != "CERTIFIED"
+    assert receipt.status == "UNRESOLVED"
     assert receipt.scope.get("freshness") == "stale"
     assert any("freshness is stale" in d for d in receipt.known_divergences)
 

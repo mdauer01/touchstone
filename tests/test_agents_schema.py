@@ -10,9 +10,12 @@ from semantix.adapters.agents_schema import (
 )
 from semantix.cli import main
 from semantix.engine import run_scan
+from semantix.models import VerdictType
 from semantix.services.writeback import publish_receipts
 from semantix.signing import verify_receipt_dict
 from semantix.store import Store
+
+from .policy import engine_kinds, engine_verdict
 
 
 def test_osi_metric_resolves_model_through_dataset():
@@ -106,14 +109,18 @@ def test_cross_provider_scan_surfaces_underspecified_declarations(acme, tmp_path
         by_label.setdefault(v.concept_label, []).append(v)
 
     # gmv: the grain-less LookML declaration breaks cross-provider consensus,
-    # and blame names the missing grain.
-    gmv = [v for v in by_label["gmv"] if v.verdict_type.value == "CONTRADICTION"]
+    # and blame names the missing grain. (The engine's CONTRADICTION surfaces
+    # as a suspected divergence under the conclusions policy.)
+    gmv = [v for v in by_label["gmv"] if engine_verdict(v) == VerdictType.CONTRADICTION]
     assert gmv and "different grain" in gmv[0].summary
+    assert all(v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE for v in gmv)
 
     # net_revenue: still contradicted; the filterless OSI claim is now one of
     # the divergent members in evidence.
-    nr = [v for v in by_label["net_revenue"] if v.verdict_type.value == "CONTRADICTION"]
+    nr = [v for v in by_label["net_revenue"]
+          if engine_verdict(v) == VerdictType.CONTRADICTION]
     assert nr
+    assert all(v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE for v in nr)
     wheres = {d["where"] for d in nr[0].evidence["blame"]["divergent"]}
     assert "analytics.growth_net_revenue" in wheres
     # The OSI declaration itself — named as the declaration, not as the table
@@ -138,7 +145,15 @@ def test_publish_receipts_into_agents_root(acme, tmp_path):
     rows = {key: content for _, key, content in
             con.execute("SELECT * FROM agents.root WHERE provider = 'semantix'").fetchall()}
     receipt = json.loads(rows["receipt/net_revenue"])
-    assert receipt["status"] == "CONTRADICTION"
+    # The engine contradicts; the published receipt states the effective
+    # status under the conclusions policy, a suspected divergence.
+    assert receipt["status"] == "SUSPECTED_DIVERGENCE"
+    assert any(v["summary"].startswith("Suspected divergence (")
+               for v in receipt["verdicts"])
+    scanned = [r for r in store.verdicts_for_scan(receipt["scan_id"])
+               if r["concept_label"] == "net_revenue"]
+    assert VerdictType.CONTRADICTION in engine_kinds(scanned)
+    assert json.loads(rows["assessment/net_revenue"])["semantic_claim_usable"] is False
     ok, _ = verify_receipt_dict(receipt)  # what agents read IS the certificate
     assert ok
     assert "uses:" in rows["skill/verify-metric"]

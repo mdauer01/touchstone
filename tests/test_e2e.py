@@ -1,6 +1,7 @@
 from semantix.store import normalize_ts
 """End-to-end: scan the acme demo estate and check every verdict lands."""
 
+import json
 import shutil
 
 
@@ -8,6 +9,8 @@ import semantix.store as store_mod
 from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.report.html import render_report, report_json
+
+from .policy import engine_verdict
 
 
 def scan(acme, db_path, label="test"):
@@ -32,40 +35,60 @@ def test_acme_estate_produces_all_verdict_types(acme, tmp_path):
     (joined,) = [fp for fp in result.fingerprints if fp.concept_candidate == "refund_rate"]
     assert joined.gaps == ("outside the supported grammar (semantix-proof/2): uses a join",)
 
+    # The engine's verdicts (read through tests/policy.py) …
     by_concept = {}
     for v in result.verdicts:
-        by_concept.setdefault(v.concept_label, set()).add(v.verdict_type)
+        by_concept.setdefault(v.concept_label, set()).add(engine_verdict(v))
 
     assert by_concept["net_revenue"] == {VerdictType.CONTRADICTION}
     assert by_concept["gmv"] == {VerdictType.CERTIFIED, VerdictType.ALIASING}
     assert by_concept["customer_ltv"] == {VerdictType.ORPHAN_CLAIM}
     assert by_concept["refund_rate"] == {VerdictType.SHADOW_METRIC}
 
-    contradiction = next(v for v in result.verdicts if v.verdict_type == VerdictType.CONTRADICTION)
+    # … and what is reported while positive verdicts are suspended.
+    shown = {}
+    for v in result.verdicts:
+        shown.setdefault(v.concept_label, set()).add(v.verdict_type)
+    assert shown["net_revenue"] == {VerdictType.SUSPECTED_DIVERGENCE}
+    assert shown["gmv"] == {VerdictType.UNRESOLVED}
+    assert shown["customer_ltv"] == {VerdictType.ORPHAN_CLAIM}
+    assert shown["refund_rate"] == {VerdictType.SHADOW_METRIC}
+
+    contradiction = next(v for v in result.verdicts
+                         if engine_verdict(v) == VerdictType.CONTRADICTION)
     assert "analytics.growth_net_revenue" in contradiction.summary
     assert contradiction.evidence["component_diff"]["grain"] is True
     assert contradiction.evidence["component_diff"]["expression"] is False
     # highest severity item in the scan is the contradiction
-    assert result.verdicts[0].verdict_type == VerdictType.CONTRADICTION
+    assert engine_verdict(result.verdicts[0]) == VerdictType.CONTRADICTION
+    assert result.verdicts[0].verdict_type == VerdictType.SUSPECTED_DIVERGENCE
 
 
 def test_report_renders(acme, tmp_path):
     result, store = scan(acme, tmp_path / "r.db")
     meta = {"scan_id": result.scan_id, "observed_at": result.observed_at, "dialect": "duckdb", **result.stats()}
     html = render_report(result.concepts, result.verdicts, store, meta)
+    # Under the conclusions policy the report shows the contradiction as a
+    # suspected divergence and the certification / aliasing as experimental
+    # comparisons, each naming what the engine found.
     for needle in (
         "net_revenue",
-        "CONTRADICTION",
-        "CERTIFIED",
-        "ALIASING",
+        "SUSPECTED_DIVERGENCE",
+        "certified under the experimental rules",
+        "aliasing under the experimental rules",
         "ORPHAN_CLAIM",
         "SHADOW_METRIC",
         "gross_merchandise_value",
         "raw.orders.refund_amount",
     ):
         assert needle in html
+    for suspended in ("CONTRADICTION", "CERTIFIED", "ALIASING"):
+        assert suspended not in html
     js = report_json(result.verdicts, meta)
-    assert '"CONTRADICTION"' in js
+    assert '"CONTRADICTION"' in js          # the engine's verdict, in evidence.suspected
+    (net,) = [v for v in json.loads(js)["verdicts"] if v["concept"] == "net_revenue"]
+    assert net["verdict"] == "SUSPECTED_DIVERGENCE"
+    assert net["evidence"]["suspected"]["verdict"] == "CONTRADICTION"
 
 
 def test_definition_change_shows_in_history_and_asof(acme, tmp_path, monkeypatch):
@@ -119,5 +142,13 @@ group by 1
 
     receipt = store.issue_receipt("net_revenue")
     assert receipt is not None
-    assert receipt.status in ("CONTRADICTION", "CERTIFIED")
+    # Effective statuses of CONTRADICTION / CERTIFIED under the conclusions
+    # policy; the engine's verdict behind the status is still one of the two.
+    assert receipt.status in ("SUSPECTED_DIVERGENCE", "UNRESOLVED")
+    headline = [v["summary"] for v in receipt.verdicts if v["verdict"] == receipt.status]
+    if receipt.status == "SUSPECTED_DIVERGENCE":
+        assert headline and all(s.startswith("Suspected divergence") for s in headline)
+    else:
+        assert any(s.startswith("Experimental comparison, not a conclusion — certified")
+                   for s in headline)
     assert receipt.definition_version

@@ -16,8 +16,13 @@ from enum import Enum
 
 
 class VerdictType(str, Enum):
+    # CERTIFIED / ALIASING / CONTRADICTION are what the ENGINE computes. While
+    # positive verdicts are suspended (semantix.conclusions) users see
+    # UNRESOLVED (with the experimental result in evidence) and
+    # SUSPECTED_DIVERGENCE instead; the old values still parse stored rows.
     CERTIFIED = "CERTIFIED"
     CONTRADICTION = "CONTRADICTION"
+    SUSPECTED_DIVERGENCE = "SUSPECTED_DIVERGENCE"
     ALIASING = "ALIASING"
     ORPHAN_CLAIM = "ORPHAN_CLAIM"
     SHADOW_METRIC = "SHADOW_METRIC"
@@ -27,6 +32,7 @@ class VerdictType(str, Enum):
 # Order decides the primary badge when a concept accrues several verdicts
 # (e.g. CERTIFIED + ALIASING).
 VERDICT_PRECEDENCE: list[VerdictType] = [
+    VerdictType.SUSPECTED_DIVERGENCE,
     VerdictType.CONTRADICTION,
     VerdictType.CERTIFIED,
     VerdictType.ALIASING,

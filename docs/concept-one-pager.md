@@ -2,6 +2,8 @@
 
 **Concept one-pager — system-agnostic**
 
+> **Implementation status (2026-10-25):** positive verdicts (CERTIFIED, ALIASING, conforming uses) are **suspended** in the implementation; equalities are reported as experimental comparisons and differences as suspected, and no receipt authorizes reliance. Statements below about certification describe the design target, not current behaviour — see [proof-policy.md](proof-policy.md).
+
 ## The problem
 
 Enterprises are racing to give AI agents "business context" through ontologies, semantic layers, and knowledge graphs. The newest generation of these context layers is *inferred*: automatically extracted from tables, queries, dashboards, and documents, then ranked by authority signals such as source popularity, author seniority, and asset usage. This is consensus epistemology — the same approach that powers web-scale knowledge graphs — and it carries the same failure mode. Ranking the most *trusted* definition of a metric is not the same as verifying that the definition is *correct*. Meanwhile, the only artifact that cannot lie about what a metric actually computes is the transformation code itself. The compiled SQL is the de facto ontology of the business. In most stacks, nothing systematically reconciles the two: what the organization *declares* its metrics mean, and what its pipelines *actually compute*. Agents inherit that gap and answer with false confidence.

@@ -16,6 +16,8 @@ from semantix.adapters.sql_dir import load_sql_dir
 from semantix.engine import run_scan
 from semantix.services.monitor import build_registry, monitor_history
 
+from .policy import engine_kind
+
 MODEL_SQL = (
     "-- semantix: relation=db.main.rev_mart\n"
     "SELECT SUM(amount - refund_amount) AS net_revenue "
@@ -59,7 +61,9 @@ def test_exact_rerun_is_conforming_use(scanned):
          "FROM db.main.orders WHERE status = 'completed'")
     result = _run(store, registry, [q] * 3)
     (f,) = result["findings"]
-    assert f["kind"] == "conforming_use"
+    assert engine_kind(f) == "conforming_use"
+    # Positive verdicts are suspended: the match is reported as unverifiable.
+    assert f["kind"] == "unverifiable"
     assert f["concept"] == "net_revenue"
     assert f["uses"] == 3
     assert f["severity"] == 0
@@ -71,7 +75,9 @@ def test_same_name_different_math_is_definition_violation(scanned):
          "FROM db.main.orders")  # the filter quietly dropped
     result = _run(store, registry, [q] * 3)
     (f,) = result["findings"]
-    assert f["kind"] == "definition_violation"
+    assert engine_kind(f) == "definition_violation"
+    # Reported under the conclusions policy as a suspected difference.
+    assert f["kind"] == "suspected_difference"
     assert f["concept"] == "net_revenue"
     assert "filters" in f["diff"]
     assert any("completed" in x for x in f["diff"]["filters"]["reference"])

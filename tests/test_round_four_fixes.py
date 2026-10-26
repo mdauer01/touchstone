@@ -20,6 +20,8 @@ from semantix.services.blame import blame_members
 from semantix.services.execute import _relations_read, _same_relation
 from semantix.services.relationships import edge_status
 
+from .policy import engine_verdict
+
 CATALOG = {"raw.orders": {"order_id": "bigint", "customer_id": "bigint",
                           "status": "varchar", "amount": "decimal(18,2)"}}
 
@@ -119,8 +121,11 @@ def test_a_certification_is_measured_against_the_data(acme, tmp_path):
         db_path=str(tmp_path / "cert.db"),
         execute_seed=str(acme / "seed.sql"),
     )
-    certified = [v for v in result.verdicts if v.verdict_type is VerdictType.CERTIFIED]
+    # The engine's certifications (reported as experimental comparisons while
+    # positive verdicts are suspended).
+    certified = [v for v in result.verdicts if engine_verdict(v) is VerdictType.CERTIFIED]
     assert certified, "the demo estate should certify something"
+    assert all(v.verdict_type is VerdictType.UNRESOLVED for v in certified)
     assert any((v.evidence.get("measured") or {}).get("measured") for v in certified), \
         "no certification was measured — equality went unfalsified"
     # It survived: nothing the engine proved identical disagreed on real data.
@@ -171,7 +176,10 @@ def test_a_falsified_certification_is_withdrawn(tmp_path):
     assert verdict.verdict_type is VerdictType.CONTRADICTION, \
         "a certification the data falsified kept its certificate"
     assert verdict.severity >= 95
-    assert "WITHDRAWN" in verdict.summary
+    # Wording under the conclusions policy: "Certification WITHDRAWN" became
+    # an experimental equality falsified by an observed discrepancy.
+    assert verdict.summary.startswith("Experimental equality FALSIFIED by execution")
+    assert "(an observed discrepancy)" in verdict.summary
     assert "canonical equality unsound" in verdict.summary
 
 

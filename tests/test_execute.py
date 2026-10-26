@@ -3,6 +3,8 @@
 from semantix.engine import run_scan
 from semantix.models import VerdictType
 
+from .policy import engine_verdict
+
 
 def _scan(acme, db, **kw):
     return run_scan(
@@ -26,7 +28,9 @@ def test_contradiction_carries_measured_divergence(acme, tmp_path):
     # measuring certifications at all.
     assert result.execution["collisions"] == 0
 
-    v = next(v for v in result.verdicts if v.verdict_type == VerdictType.CONTRADICTION)
+    v = next(v for v in result.verdicts if engine_verdict(v) == VerdictType.CONTRADICTION)
+    # Reported as a suspected divergence under the conclusions policy.
+    assert v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE
     measured = v.evidence["measured"]
     assert measured["method"] == "duckdb-seed-execution"
     assert measured["baseline"] == "analytics.fct_orders"
@@ -41,13 +45,14 @@ def test_contradiction_carries_measured_divergence(acme, tmp_path):
 
     # Measurement is part of the recorded verdict, not display decoration.
     stored = store.verdicts_for_scan(result.scan_id)
-    stored_c = next(r for r in stored if r["verdict"] == "CONTRADICTION")
+    stored_c = next(r for r in stored if engine_verdict(r) == VerdictType.CONTRADICTION)
+    assert stored_c["verdict"] == "SUSPECTED_DIVERGENCE"
     assert stored_c["evidence"]["measured"]["max_divergence"]["abs"] == 30_000.0
 
 
 def test_matching_definitions_are_not_flagged_as_divergent(acme, tmp_path):
     result, _ = _scan(acme, tmp_path / "y.db", execute_seed=str(acme / "seed.sql"))
-    v = next(v for v in result.verdicts if v.verdict_type == VerdictType.CONTRADICTION)
+    v = next(v for v in result.verdicts if engine_verdict(v) == VerdictType.CONTRADICTION)
     measured = v.evidence["measured"]
     # finance matches the declared core: identical totals, never the "worst".
     assert measured["max_divergence"]["vs"] != "analytics.finance_net_revenue"
@@ -60,4 +65,4 @@ def test_broken_seed_degrades_to_error_note(acme, tmp_path):
     assert result.execution["measured"] == 0
     assert any("seed failed" in e for e in result.execution["errors"])
     # The scan itself is untouched: verdicts still land, just unmeasured.
-    assert any(v.verdict_type == VerdictType.CONTRADICTION for v in result.verdicts)
+    assert any(engine_verdict(v) == VerdictType.CONTRADICTION for v in result.verdicts)

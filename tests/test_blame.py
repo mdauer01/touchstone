@@ -4,6 +4,8 @@ from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.services.blame import blame_members
 
+from .policy import engine_verdict
+
 
 def _member(member_id, kind, where, core_hash, *, expression="SUM(t0.amount)",
             filters=(), grain=(), joins=("analytics.fct_orders",), lineage=()):
@@ -69,7 +71,10 @@ def test_acme_contradiction_summary_names_the_clauses(acme, tmp_path):
         catalog_path=str(acme / "catalog.yml"),
         db_path=str(tmp_path / "b.db"),
     )
-    v = next(v for v in result.verdicts if v.verdict_type == VerdictType.CONTRADICTION)
+    # The engine's CONTRADICTION surfaces as a suspected divergence under the
+    # conclusions policy; its summary and blame are carried unchanged.
+    v = next(v for v in result.verdicts if engine_verdict(v) == VerdictType.CONTRADICTION)
+    assert v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE
     assert "missing filter status = 'completed'" in v.summary
     assert "expression omits refund_amount" in v.summary
     assert "reads analytics.stg_orders instead of analytics.fct_orders" in v.summary

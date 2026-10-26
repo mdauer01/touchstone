@@ -11,6 +11,8 @@ from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.services.execute import _is_additive
 
+from .policy import engine_verdict
+
 pytest.importorskip("duckdb")
 
 SEED = """
@@ -77,10 +79,16 @@ def test_contested_sum_distinct_reports_no_number(tmp_path):
         "a": "select sum(distinct amount) as revenue from raw.orders where status = 'completed'",
         "b": "select sum(distinct amount) as revenue from raw.orders",
     })
+    # The engine's CONTRADICTION surfaces as a suspected divergence under the
+    # conclusions policy; the measurement evidence travels with it.
     contradiction = next(v for v in result.verdicts
-                         if v.verdict_type == VerdictType.CONTRADICTION)
+                         if engine_verdict(v) == VerdictType.CONTRADICTION)
+    assert contradiction.verdict_type == VerdictType.SUSPECTED_DIVERGENCE
     assert contradiction.evidence["measured"]["measured"] is False
+    # (the policy renamed "Measured on seed data" to "Observed discrepancy on
+    # seed data"; neither wording may appear)
     assert "Measured on seed data" not in contradiction.summary
+    assert "Observed discrepancy on seed data" not in contradiction.summary
 
 
 # ------------------------------------------------- stale / failed relations

@@ -23,6 +23,7 @@ from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.ossie import load_ossie
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.adapters.uc_metrics import load_uc_metrics
+from semantix.conclusions import effective_verdict
 from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints, unrecognized_measures
 from semantix.extraction.proof import POLICY_ID
@@ -378,6 +379,11 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
     }
     _qualify_for_ambiguous_relations(verdicts, concepts, contested_closure)
     _qualify_for_untranslated_claims(verdicts, concepts)
+    # Last: whatever the engine concluded, users see it under the policy in
+    # force (semantix.conclusions) — positives as experimental comparisons,
+    # definitive negatives as suspected divergences.
+    for verdict in verdicts:
+        effective_verdict(verdict)
     store.save_results(scan_id, concepts, verdicts)
 
     result = ScanResult(

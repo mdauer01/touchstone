@@ -1,7 +1,9 @@
 """Resolution proposals + the shared emitter.
 
 The invariant that makes proposals trustworthy: a declaration emitted from
-a fingerprint, scanned back in, CERTIFIES against that fingerprint. Then
+a fingerprint, scanned back in, CERTIFIES against that fingerprint (the
+engine's judgment; while positive verdicts are suspended it is reported as an
+experimental comparison, and read here through tests/policy.py). Then
 the refusals — join graphs, post-aggregate filters, Ossie's filterless
 metrics — and the memo's two-direction framing.
 """
@@ -17,6 +19,8 @@ from semantix.engine import run_scan
 from semantix.models import SemanticCore, VerdictType
 from semantix.services.emit import emit_declaration
 from semantix.services.propose import build_proposals, render_memo, write_proposals
+
+from .policy import engine_kinds
 
 CATALOG = (
     "db:\n  main:\n    orders:\n      amount: DOUBLE\n      refund_amount: DOUBLE\n"
@@ -61,7 +65,8 @@ def test_contradiction_proposal_round_trips_to_certified(tmp_path):
                "    model: db.main.orders\n    expr: \"sum(amount - refund_amount)\"\n")
     kwargs = _estate(tmp_path, drifted)
     result, store = run_scan(**kwargs)
-    assert _verdict(result, "net_revenue", VerdictType.CONTRADICTION)
+    assert VerdictType.CONTRADICTION in engine_kinds(result.verdicts, "net_revenue")
+    assert _verdict(result, "net_revenue", VerdictType.SUSPECTED_DIVERGENCE)
 
     proposals = build_proposals(store, fmt="metrics")
     store.close()
@@ -78,8 +83,9 @@ def test_contradiction_proposal_round_trips_to_certified(tmp_path):
     (tmp_path / "metrics.yml").write_text(cand["declaration"].text, encoding="utf-8")
     result2, store2 = run_scan(**{**kwargs, "db_path": str(tmp_path / "s2.db")})
     store2.close()
-    assert _verdict(result2, "net_revenue", VerdictType.CERTIFIED)
-    assert not _verdict(result2, "net_revenue", VerdictType.CONTRADICTION)
+    assert VerdictType.CERTIFIED in engine_kinds(result2.verdicts, "net_revenue")
+    assert VerdictType.CONTRADICTION not in engine_kinds(result2.verdicts, "net_revenue")
+    assert not _verdict(result2, "net_revenue", VerdictType.SUSPECTED_DIVERGENCE)
 
 
 def test_shadow_promotion_round_trips_to_certified(tmp_path):
@@ -95,7 +101,7 @@ def test_shadow_promotion_round_trips_to_certified(tmp_path):
     result2, store2 = run_scan(**{**kwargs, "metrics_path": str(tmp_path / "metrics.yml"),
                                   "db_path": str(tmp_path / "s2.db")})
     store2.close()
-    assert _verdict(result2, "net_revenue", VerdictType.CERTIFIED)
+    assert VerdictType.CERTIFIED in engine_kinds(result2.verdicts, "net_revenue")
 
 
 # -------------------------------------------------------------- emitter
@@ -215,7 +221,7 @@ def test_memo_when_nothing_to_propose(tmp_path):
         "    filters: [\"status = 'completed'\"]\n"
         "    group_by: [\"date_trunc('month', order_date)\"]\n"))
     result, store = run_scan(**kwargs)
-    assert _verdict(result, "net_revenue", VerdictType.CERTIFIED)
+    assert VerdictType.CERTIFIED in engine_kinds(result.verdicts, "net_revenue")
     proposals = build_proposals(store)
     store.close()
     assert proposals["proposals"] == []

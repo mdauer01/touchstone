@@ -23,6 +23,8 @@ import semantix.store as store_mod
 from semantix.engine import run_scan
 from semantix.models import VerdictType
 
+from .policy import engine_kinds, engine_verdict
+
 GROWTH = "dbt_project/target/compiled/acme/models/growth/growth_net_revenue.sql"
 
 
@@ -54,7 +56,9 @@ def test_partial_compile_does_not_erase_a_contradiction(acme, tmp_path, clock):
     db = tmp_path / "s.db"
 
     before, _ = scan(estate, db)
-    assert any(v.verdict_type == VerdictType.CONTRADICTION
+    # The engine contradicts; the policy states it as a suspected divergence.
+    assert any(engine_verdict(v) == VerdictType.CONTRADICTION
+               and v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE
                for v in before.verdicts if v.concept_label == "net_revenue")
 
     (estate / GROWTH).unlink()
@@ -66,9 +70,17 @@ def test_partial_compile_does_not_erase_a_contradiction(acme, tmp_path, clock):
     assert VerdictType.CERTIFIED not in verdicts, (
         "certified while a contradicting definition was unreadable"
     )
+    # The policy hides any certification, so the check that matters is the
+    # engine's own judgment: it must not certify either, not even
+    # experimentally.
+    assert VerdictType.CERTIFIED not in engine_kinds(after.verdicts, "net_revenue"), (
+        "certified while a contradicting definition was unreadable"
+    )
 
     receipt = store.issue_receipt("net_revenue")
     assert receipt.status != VerdictType.CERTIFIED.value
+    assert not any(v["summary"].startswith(
+        "Experimental comparison, not a conclusion — certified ") for v in receipt.verdicts)
     assert receipt.known_divergences
 
 

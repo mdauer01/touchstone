@@ -5,6 +5,9 @@ import json
 
 from semantix.engine import run_scan
 from semantix.mcp import McpServer, serve
+from semantix.models import VerdictType
+
+from .policy import engine_kinds
 
 
 def _db(acme, tmp_path):
@@ -45,7 +48,14 @@ def test_initialize_and_tool_listing(acme, tmp_path):
 def test_attest_returns_signed_receipt_and_flags_contradiction(acme, tmp_path):
     server = McpServer(_db(acme, tmp_path))
     receipt = _payload(_call(server, "attest", {"concept": "net_revenue"}))
-    assert receipt["status"] == "CONTRADICTION"
+    # The engine contradicts; under the conclusions policy the receipt states
+    # the effective status, a suspected divergence, never CONTRADICTION.
+    assert receipt["status"] == "SUSPECTED_DIVERGENCE"
+    assert any(v["summary"].startswith("Suspected divergence (")
+               for v in receipt["verdicts"])
+    scanned = [r for r in server.store.verdicts_for_scan(receipt["scan_id"])
+               if r["concept_label"] == "net_revenue"]
+    assert VerdictType.CONTRADICTION in engine_kinds(scanned)
     assert receipt["signature"]["alg"] == "ed25519"
     assert receipt["known_divergences"]
 
@@ -55,7 +65,11 @@ def test_attest_returns_signed_receipt_and_flags_contradiction(acme, tmp_path):
     verdict = _payload(_call(server, "verify_receipt", {"receipt": receipt}))
     assert verdict["detail"].startswith("signature valid")
     assert verdict["current_use"] is False and verdict["valid"] is False
-    # configured with every scanned source, the same check passes.
+    assert verdict["signature_authentic"] is True
+    assert verdict["estate_unchanged"] is None          # never re-checked
+    # configured with every scanned source, the estate check passes — but
+    # under the conclusions policy no claim is usable, so the receipt is
+    # still not valid for current use.
     configured = McpServer(server.store.path,
                            estate={"dbt_path": str(acme / "dbt_project"),
                                    "metrics_path": str(acme / "metrics.yml"),
@@ -63,7 +77,10 @@ def test_attest_returns_signed_receipt_and_flags_contradiction(acme, tmp_path):
     fresh_receipt = _payload(_call(configured, "attest", {"concept": "gmv"}))
     assert fresh_receipt["freshness"]["status"] == "fresh"
     checked = _payload(_call(configured, "verify_receipt", {"receipt": fresh_receipt}))
-    assert checked["current_use"] is True and checked["valid"] is True
+    assert checked["signature_authentic"] is True
+    assert checked["estate_unchanged"] is True
+    assert checked["semantic_claim_usable"] is False
+    assert checked["current_use"] is False and checked["valid"] is False
 
 
 def test_concepts_and_history_read_models(acme, tmp_path):
@@ -100,4 +117,10 @@ def test_stdio_serve_loop(acme, tmp_path):
     assert len(responses) == 2  # notification produced no reply
     receipt = json.loads(responses[1]["result"]["content"][0]["text"])
     assert receipt["concept"] == "gmv"
-    assert receipt["status"] in ("CERTIFIED", "ALIASING")
+    # The engine certifies / reports aliasing; under the conclusions policy
+    # the receipt states UNRESOLVED and every verdict is an experimental one.
+    assert receipt["status"] == "UNRESOLVED"
+    assert receipt["verdicts"] and all(
+        v["summary"].startswith(("Experimental comparison, not a conclusion — certified ",
+                                 "Experimental comparison, not a conclusion — aliasing "))
+        for v in receipt["verdicts"])

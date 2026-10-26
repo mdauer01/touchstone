@@ -5,6 +5,8 @@ import pytest
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.engine import run_scan
 
+from .policy import engine_verdict
+
 FINANCE_SQL = """-- semantix: relation=analytics.finance_net_revenue
 select date_trunc('month', order_date) as revenue_month,
        sum(amount - refund_amount) as net_revenue
@@ -70,7 +72,9 @@ def test_scan_without_dbt_reaches_a_contradiction(acme, tmp_path):
     )
     by_label = {v.concept_label: v for v in result.verdicts}
     v = by_label["net_revenue"]
-    assert v.verdict_type.value == "CONTRADICTION"
+    # The engine contradicts; the policy reports it as a suspected divergence.
+    assert engine_verdict(v).value == "CONTRADICTION"
+    assert v.verdict_type.value == "SUSPECTED_DIVERGENCE"
     assert "missing filter status = 'completed'" in v.summary
     # cross-source systems both contributed fingerprints
     systems = {fp.provenance.system for fp in result.fingerprints}

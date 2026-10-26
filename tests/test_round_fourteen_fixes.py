@@ -31,6 +31,7 @@ from semantix.mcp import McpServer
 from semantix.models import PROOF_LEVELS, Provenance, VerdictType
 from semantix.services.monitor import build_registry, monitor_history
 
+from .policy import engine_kinds, engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, VIEW, _rows, codes, run
 from .test_round_ten_fixes import headline_consistent
 
@@ -132,6 +133,8 @@ def test_scan_no_longer_reports_aliasing_for_different_dedup(tmp_path):
                              db_path=str(tmp_path / "s.db"))
     store.close()
     assert not [v for v in result.verdicts if v.verdict_type is VerdictType.ALIASING]
+    # The policy shows no ALIASING anyway; pin the ENGINE's judgment.
+    assert VerdictType.ALIASING not in engine_kinds(result.verdicts)
 
 
 @pytest.mark.parametrize("authoritative, observed", [
@@ -148,10 +151,12 @@ def test_monitor_does_not_call_the_changed_query_conforming(tmp_path, authoritat
                              authority_systems={"sql"})
     store.close()
     # Ordered LIMIT and plain DISTINCT are outside the proof grammar, so the
-    # model is no authority; nothing can conform to it.
+    # model is no authority; nothing can conform to it — not even as an
+    # experimental match.
     assert result["findings"]
+    assert all(engine_kind(f) != "conforming_use" for f in result["findings"])
     assert all(f["kind"] != "conforming_use" for f in result["findings"])
-    assert result["funnel"]["conforming"] == 0
+    assert engine_funnel(result["funnel"])["conforming"] == 0
 
 
 # ------------------------------------------------ 3. receipt current reliance
@@ -187,15 +192,27 @@ def _edit(c):
 def test_fresh_receipt_is_not_current_after_the_estate_changes_mcp(certified):
     server = McpServer(certified["db"], estate=certified["estate"])
     receipt = _call(server, "attest", {"concept": "m"})
-    assert receipt["status"] == "CERTIFIED" and receipt["freshness"]["status"] == "fresh"
-    assert _call(server, "verify_receipt", {"receipt": receipt})["current_use"] is True
+    # The engine certified m; under the conclusions policy the receipt states
+    # that only as an experimental comparison.
+    assert receipt["status"] == "UNRESOLVED" and receipt["freshness"]["status"] == "fresh"
+    (stated,) = receipt["verdicts"]
+    assert stated["summary"].startswith(
+        "Experimental comparison, not a conclusion — certified under the experimental rules")
+    fresh = _call(server, "verify_receipt", {"receipt": receipt})
+    # Fresh: authentic over an unchanged estate — and still never usable now
+    # (positive verdicts are suspended), so never current.
+    assert fresh["signature_authentic"] is True and fresh["estate_unchanged"] is True
+    assert fresh["semantic_claim_usable"] is False and fresh["current_use"] is False
     _edit(certified)
     verdict = _call(server, "verify_receipt", {"receipt": receipt})
     assert verdict["current_use"] is False and verdict["trusted"] is False
+    # The estate answer is what the edit changes.
+    assert verdict["signature_authentic"] is True and verdict["estate_unchanged"] is False
     assert verdict["live_freshness"]["status"] == "stale"
     # Offline (a server without estate sources): signature and history only.
     offline = _call(McpServer(certified["db"]), "verify_receipt", {"receipt": receipt})
     assert offline["historically_valid"] is True and offline["current_use"] is False
+    assert offline["estate_unchanged"] is None
 
 
 def test_fresh_receipt_is_not_current_after_the_estate_changes_cli(certified, capsys):
@@ -205,12 +222,20 @@ def test_fresh_receipt_is_not_current_after_the_estate_changes_cli(certified, ca
     live = ["--db", certified["db"], "--sql-dir", certified["estate"]["sql_dir"],
             "--metrics", certified["estate"]["metrics_path"],
             "--catalog", certified["estate"]["catalog_path"]]
-    assert main(["verify-receipt", str(path), "--require-current", *live]) == 0
+    capsys.readouterr()
+    # Positive verdicts are suspended: --require-current fails even over the
+    # unchanged estate — but the estate answer is still yes.
+    assert main(["verify-receipt", str(path), "--require-current", *live]) == 1
+    out = capsys.readouterr().out
+    assert "signature authentic: yes · estate unchanged: yes · claim usable: no" in out
     assert main(["verify-receipt", str(path), "--require-current"]) == 1   # offline
+    assert "estate unchanged: not checked" in capsys.readouterr().out
     _edit(certified)
     capsys.readouterr()
     assert main(["verify-receipt", str(path), "--require-current", *live]) == 1
-    assert "live re-check against scan" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "live re-check against scan" in out
+    assert "signature authentic: yes · estate unchanged: no · claim usable: no" in out
 
 
 def test_live_check_is_bound_to_the_receipts_own_scan(certified):
@@ -227,6 +252,9 @@ def test_live_check_is_bound_to_the_receipts_own_scan(certified):
     verdict = _call(server, "verify_receipt", {"receipt": receipt})
     assert verdict["live_freshness"]["scan_id"] == receipt["scan_id"]
     assert verdict["current_use"] is False
+    # current_use is always False while positive verdicts are suspended; the
+    # binding shows in the estate answer, which the latest scan would call yes.
+    assert verdict["estate_unchanged"] is False
 
 
 # --------------------------------------- 4. identical definitions, two names
@@ -253,9 +281,15 @@ EQUIV = VIEW.format(extra="") + ("  - name: total_revenue\n"
 def test_names_alone_do_not_establish_different_definitions(tmp_path, sql, kind):
     result = run(tmp_path, _rows(sql), view_text=EQUIV)
     (f,) = result["findings"]
-    assert f["kind"] == kind
+    assert engine_kind(f) == kind
     if kind == "conforming_use":
         assert f["concept"] == "total_revenue"
+        # Shown as an experimental match, not a conclusion.
+        assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
+    elif kind == "definition_violation":
+        assert f["kind"] == "suspected_difference"
+    else:
+        assert f["kind"] == kind
     headline_consistent(result)
 
 
@@ -299,16 +333,22 @@ def test_no_positive_monitor_verdict_from_an_unqualified_parser(
     result = _monitor_with(tmp_path, monkeypatch, scan_q, run_q, sql)
     (f,) = result["findings"]
     assert f["kind"] == "unverifiable" and codes(f) == ["toolchain_unqualified"]
-    assert f["withheld"].startswith("conforming_use")
+    # Withheld by the toolchain gate itself, not merely suspended by policy.
+    assert engine_kind(f) == "unverifiable" and engine_codes(f) == ["toolchain_unqualified"]
+    assert f["withheld_kind"] == "conforming_use"
+    assert f["withheld"].startswith("experimental at most, not a conclusion")
     assert result["toolchain"]["positive_verdicts_withheld"] is True
-    assert result["funnel"]["conforming"] == 0
+    assert engine_funnel(result["funnel"])["conforming"] == 0
     headline_consistent(result)
 
 
 @pytest.mark.parametrize("sql", CONFORMING_QUERIES)
 def test_qualified_parsers_still_conform(tmp_path, monkeypatch, sql):
     result = _monitor_with(tmp_path, monkeypatch, True, True, sql)
-    assert result["findings"][0]["kind"] == "conforming_use"
+    f = result["findings"][0]
+    assert engine_kind(f) == "conforming_use"
+    # Reported as an experimental match while positive verdicts are suspended.
+    assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
 
 
 # ------------------------------------------------- 6. exact comparator

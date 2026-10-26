@@ -206,6 +206,11 @@ def test_receipt_trust_unknown_freshness_as_of_is_disclosed_not_blocked():
     receipt = {"status": "CERTIFIED", "as_of": "2026-01-01T00:00:00Z",
                "freshness": {"status": "unknown"}}
     trusted, warnings = receipt_trust(receipt)
-    assert trusted and any("valid for that instant only" in w for w in warnings)
+    # Disclosed, not blocked: still a historical record. Untrusted only
+    # because the claim is suspended under the conclusions policy.
+    from semantix.signing import assess_receipt
+    assert assess_receipt(receipt).historical
+    assert any("a record of that instant only" in w for w in warnings)
+    assert trusted is False and any("suspended" in w for w in warnings)
     current = {"status": "CERTIFIED", "freshness": {"status": "unknown"}}
     assert receipt_trust(current)[0] is False

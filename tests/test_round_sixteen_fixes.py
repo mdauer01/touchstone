@@ -9,6 +9,7 @@ conforming verdict, a false accusation, or a misattributed one.
 
 from __future__ import annotations
 
+from .policy import engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, T_IN, codes, only, run
 
 Q_SHORT = f"SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'"
@@ -29,6 +30,7 @@ def test_an_unparseable_statement_before_a_short_name_is_uncertain(tmp_path):
     (f,) = run(tmp_path, [_row(0, f"CREATE TEMP VIEW orders AS SELECT ??? ; {Q_SHORT}",
                                 **CTX)])["findings"]
     assert f["kind"] == "unverifiable" and codes(f) == ["context_unresolved"]
+    assert engine_kind(f) == "unverifiable"
     assert "unparseable statement" in f["reasons"][0]["detail"]
 
 
@@ -40,6 +42,7 @@ def test_a_temp_view_in_an_earlier_execution_of_the_session_shadows(tmp_path):
             _row(1, Q_SHORT, session_id="sess-1", **CTX)]
     (f,) = run(tmp_path, rows)["findings"]
     assert f["kind"] == "unverifiable" and codes(f) == ["context_unresolved"]
+    assert engine_kind(f) == "unverifiable"
     assert "another execution of this session" in f["reasons"][0]["detail"]
 
 
@@ -47,7 +50,9 @@ def test_another_sessions_temp_view_changes_nothing(tmp_path):
     rows = [_row(0, "CREATE TEMPORARY VIEW orders AS SELECT 1 AS amount",
                  start_time="2026-10-02T09:00:00Z", session_id="sess-1", **CTX),
             _row(1, Q_SHORT, session_id="sess-2", **CTX)]
-    assert only(run(tmp_path, rows))["kind"] == "conforming_use"
+    f = only(run(tmp_path, rows))
+    assert engine_kind(f) == "conforming_use"
+    assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
 
 
 def test_an_unidentified_session_is_uncertain_unless_provably_later(tmp_path):
@@ -58,13 +63,14 @@ def test_an_unidentified_session_is_uncertain_unless_provably_later(tmp_path):
     assert "session is not recorded" in f["reasons"][0]["detail"]
     later = [_row(0, "CREATE TEMPORARY VIEW orders AS SELECT 1 AS amount",
                   start_time="2026-10-02T11:00:00Z", **CTX), _row(1, Q_SHORT, **CTX)]
-    assert only(run(tmp_path / "later", later))["kind"] == "conforming_use"
+    assert engine_kind(only(run(tmp_path / "later", later))) == "conforming_use"
 
 
 def test_fully_qualified_names_do_not_depend_on_use_or_set(tmp_path):
     """#49: one leading USE made every later statement unverifiable."""
     f = only(run(tmp_path, [_row(0, f"USE SCHEMA staging; SET x = 1; {Q_FULL}")]))
-    assert f["kind"] == "conforming_use"
+    assert engine_kind(f) == "conforming_use"
+    assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
 
 
 def test_statements_that_resolve_nothing_change_nothing(tmp_path):
@@ -72,7 +78,7 @@ def test_statements_that_resolve_nothing_change_nothing(tmp_path):
     text = (f"INSERT INTO main.finance.audit SELECT 1; SHOW TABLES; "
             f"DESCRIBE TABLE main.finance.orders; {Q_SHORT}")
     result = run(tmp_path, [_row(0, text, **CTX)])
-    assert only(result)["kind"] == "conforming_use"
+    assert engine_kind(only(result)) == "conforming_use"
     assert result["history"]["statements_after_session_change"] == 0
 
 
@@ -82,7 +88,7 @@ def test_a_created_fully_qualified_name_is_affected_only_where_read(tmp_path):
     (f,) = run(tmp_path, [_row(0, text)])["findings"]
     assert codes(f) == ["context_unresolved"]
     other = (f"CREATE OR REPLACE VIEW main.finance.something_else AS SELECT 1; {Q_FULL}")
-    assert only(run(tmp_path / "other", [_row(0, other)]))["kind"] == "conforming_use"
+    assert engine_kind(only(run(tmp_path / "other", [_row(0, other)]))) == "conforming_use"
 
 
 def test_a_sql_log_orders_statements_but_does_not_identify_sessions(tmp_path):
@@ -112,7 +118,7 @@ def test_a_sql_log_orders_statements_but_does_not_identify_sessions(tmp_path):
                                  registry, "databricks", min_runs=1, pilot=pilot)
     finally:
         store.close()
-    kinds = sorted(f["kind"] for f in result["findings"])
+    kinds = sorted(engine_kind(f) for f in result["findings"])
     assert result["history"]["statements_with_reconstructed_context"] == 0
     assert "conforming_use" in kinds   # the fully qualified one
     assert result["history"]["statements_after_session_change"] == 1
@@ -122,18 +128,18 @@ def test_a_sql_log_orders_statements_but_does_not_identify_sessions(tmp_path):
 
 def test_a_trailing_tag_names_its_own_statement(tmp_path):
     """#37 / #56: `…; -- semantix: metric=x` was applied to the NEXT one."""
-    gross = (f"SELECT SUM(amount) AS gross FROM main.finance.orders "
-             f"WHERE status = 'completed'")
+    gross = ("SELECT SUM(amount) AS gross FROM main.finance.orders "
+             "WHERE status = 'completed'")
     text = f"{gross}; -- semantix: metric=gross_revenue\n{Q_FULL}"
     result = run(tmp_path, [_row(0, text)])
     net = only(result)
-    assert net["kind"] == "conforming_use" and net["identity_source"] != "tag"
+    assert engine_kind(net) == "conforming_use" and net["identity_source"] != "tag"
 
 
 def test_a_json_query_tag_is_identity(tmp_path):
     """#48: `{"metric": "net_revenue"}` was silently ignored."""
-    q = (f"SELECT SUM(amount) - SUM(refund_amount) AS rev FROM main.finance.orders "
-         f"WHERE status = 'completed'")
+    q = ("SELECT SUM(amount) - SUM(refund_amount) AS rev FROM main.finance.orders "
+         "WHERE status = 'completed'")
     f = only(run(tmp_path, [_row(0, q, query_tag='{"metric": "net_revenue"}')]))
     assert f["identity_source"] == "query_tag"
 
@@ -186,10 +192,20 @@ def _verify(server, receipt):
 def test_a_file_that_turns_unreadable_is_drift(certified):
     """#50: the live check ignored files the scan's loaders refuse."""
     server, receipt = _attest(certified)
-    assert receipt["status"] == "CERTIFIED" and _verify(server, receipt)["current_use"]
+    # The engine certified m; the receipt states it as an experimental
+    # comparison (positive verdicts are suspended), so it is never current —
+    # what the unreadable file must change is the estate answer.
+    assert receipt["status"] == "UNRESOLVED"
+    (stated,) = receipt["verdicts"]
+    assert stated["summary"].startswith(
+        "Experimental comparison, not a conclusion — certified under the experimental rules")
+    fresh = _verify(server, receipt)
+    assert fresh["signature_authentic"] is True and fresh["estate_unchanged"] is True
+    assert fresh["semantic_claim_usable"] is False and fresh["current_use"] is False
     (certified["models"] / "broken.sql").write_bytes(b"SELECT \xff\xfe FROM x")
     verdict = _verify(server, receipt)
     assert verdict["current_use"] is False
+    assert verdict["estate_unchanged"] is False
     assert verdict["live_freshness"]["status"] == "stale"
 
 
@@ -236,7 +252,7 @@ def test_the_scans_own_dialect_rehashes_the_estate(tmp_path):
     assert "dialect" not in _estate_kwargs(args)
 
 
-def test_a_receipt_this_store_did_not_issue_is_never_current(certified, tmp_path):
+def test_a_receipt_this_store_did_not_issue_is_never_current(certified, tmp_path, capsys):
     """#54: rewritten and re-signed with another key, it verified for CURRENT
     use against this store's estate."""
     server, receipt = _attest(certified)
@@ -253,13 +269,18 @@ def test_a_receipt_this_store_did_not_issue_is_never_current(certified, tmp_path
         other.close()
     verdict = _verify(server, forged)
     assert verdict["current_use"] is False
+    # current_use is always False while positive verdicts are suspended; the
+    # forgery shows in the signature answer.
+    assert verdict["signature_authentic"] is False
     assert "did not issue" in verdict["live_freshness"]["note"]
     path = tmp_path / "forged.json"
     path.write_text(json.dumps(forged))
+    capsys.readouterr()
     assert main(["verify-receipt", str(path), "--require-current", "--db", certified["db"],
                  "--sql-dir", certified["estate"]["sql_dir"],
                  "--metrics", certified["estate"]["metrics_path"],
                  "--catalog", certified["estate"]["catalog_path"]]) == 1
+    assert "signature authentic: no" in capsys.readouterr().out
 
 
 # ------------------------------------------------ judgment (#38 #39 #40 #41 #42 #57)
@@ -292,13 +313,15 @@ def test_equal_values_in_other_spellings_are_not_a_replaced_filter(tmp_path, req
     view = NET_VIEW.replace("filter: status = 'completed'", f"filter: {required}")
     q = f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders WHERE {query}"
     f = only(run(tmp_path, _rows(q), view_text=view))
-    assert f["kind"] != "definition_violation", f
+    assert engine_kind(f) != "definition_violation", f
+    assert f["kind"] != "suspected_difference", f
 
 
 def test_distinct_values_are_still_a_replaced_filter(tmp_path):
     q = f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders WHERE status = 'pending'"
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "definition_violation"
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
     assert codes(f) == ["required_filter_not_preserved"]
 
 
@@ -309,7 +332,8 @@ def test_an_or_restored_by_another_condition_is_not_weakened(tmp_path, restore):
     q = (f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders "
          f"WHERE (status = 'completed' OR country = 'US') AND {restore}")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] != "definition_violation", f
+    assert engine_kind(f) != "definition_violation", f
+    assert f["kind"] != "suspected_difference", f
 
 
 def _two_view_run(tmp_path, sql, gross_text):
@@ -358,9 +382,10 @@ def test_a_metric_named_after_an_unreadable_expired_definition_stays_named(tmp_p
         "  - name: net_revenue\n    expr: SUM(amount) - SUM(refund_amount)\n",
         "  - name: gross_revenue\n    expr: SUM(amount) / MEASURE(net_revenue)\n")
     result = _two_view_run(tmp_path, sql, unreadable)
-    assert result["funnel"]["conforming"] == 0
+    assert engine_funnel(result["funnel"])["conforming"] == 0
     named = [f for f in result["findings"] if f["concept"] == "gross_revenue"]
-    assert named and all(f["kind"] == "unverifiable" for f in named)
+    assert named and all(engine_kind(f) == "unverifiable" for f in named)
+    assert all(f["kind"] == "unverifiable" for f in named)
 
 
 @pytest.mark.parametrize("projection", ["CAST(MEASURE(net_revenue) AS DOUBLE)",
@@ -371,13 +396,15 @@ def test_value_preserving_wrappers_over_measure_are_not_accusations(tmp_path, pr
     q = f"SELECT {projection} AS net_revenue FROM main.finance.revenue_mv"
     f = only(run(tmp_path, _rows(q)))
     assert f["kind"] == "unverifiable" and codes(f) == ["transformation_undecided"]
+    assert engine_kind(f) == "unverifiable"
     assert f["suspected"]
 
 
 def test_a_definite_change_over_measure_is_still_a_violation(tmp_path):
     q = "SELECT MEASURE(net_revenue) + 100 AS net_revenue FROM main.finance.revenue_mv"
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "definition_violation"
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
     assert codes(f) == ["transformed_governed_measure"]
 
 
@@ -390,6 +417,7 @@ def test_a_column_alias_list_on_the_metric_view_is_refused(tmp_path):
          "WHERE country = 'US'")
     f = only(run(tmp_path, _rows(q), view_text=two))
     assert f["kind"] == "unverifiable"
+    assert engine_kind(f) == "unverifiable"
     assert "column alias list" in f["reasons"][0]["detail"]
 
 
@@ -405,7 +433,7 @@ def test_a_measure_with_a_display_name_is_readable(tmp_path):
          f"WHERE status = 'completed'")
     result = run(tmp_path, _rows(q), view_text=view)
     assert result["reference"]["excluded_below_proof"] == 0
-    assert result["funnel"]["conforming"] == 1
+    assert engine_funnel(result["funnel"])["conforming"] == 1
 
 
 def test_current_mode_keeps_a_definition_whose_window_ends_later(tmp_path):
@@ -413,7 +441,7 @@ def test_current_mode_keeps_a_definition_whose_window_ends_later(tmp_path):
     q = f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders WHERE status = 'completed'"
     result = run(tmp_path, _rows(q), compare="current",
                  applies=("2026-09-01T00:00:00Z", "2999-01-01T00:00:00Z"))
-    assert only(result)["kind"] == "conforming_use"
+    assert engine_kind(only(result)) == "conforming_use"
 
 
 def test_a_multi_measure_projection_is_one_use_on_every_path(tmp_path):

@@ -19,6 +19,8 @@ from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.services.freshness import SOURCE_SYSTEMS, current_estate_shas
 
+from .policy import engine_verdict
+
 
 def _doc(datasets, metrics, version="0.1.1", **model_extra):
     return {
@@ -395,7 +397,10 @@ def test_scan_certifies_agreeing_ossie_claim(tmp_path):
     store.close()
     assert len(result.claims) == 1 and result.claims[0].expressible
     concept = [v for v in result.verdicts if v.concept_label == "total_revenue"]
-    assert any(v.verdict_type == VerdictType.CERTIFIED for v in concept)
+    # The engine certifies; under the conclusions policy that surfaces as an
+    # experimental comparison (UNRESOLVED), never as CERTIFIED.
+    assert any(engine_verdict(v) == VerdictType.CERTIFIED
+               and v.verdict_type == VerdictType.UNRESOLVED for v in concept)
 
 
 def test_scan_contradicts_disagreeing_dialect_variants(tmp_path):
@@ -414,7 +419,9 @@ def test_scan_contradicts_disagreeing_dialect_variants(tmp_path):
     store.close()
     assert len(result.claims) == 2
     concept = [v for v in result.verdicts if v.concept_label == "total_revenue"]
-    assert any(v.verdict_type == VerdictType.CONTRADICTION for v in concept)
+    # The engine contradicts; the policy reports it as a suspected divergence.
+    assert any(engine_verdict(v) == VerdictType.CONTRADICTION
+               and v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE for v in concept)
 
 
 def test_scan_result_ossie_skips_stay_informational(tmp_path):

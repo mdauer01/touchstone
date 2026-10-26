@@ -12,12 +12,17 @@ before an unsupported condition, LIMIT or HAVING was considered.
 Now both paths settle the boundary first. Outside it, the use is
 unverifiable and what would have been a violation travels as `suspected`
 context, never as a verdict and never in the headline.
+
+Under the conclusions policy (semantix.conclusions) a violation the rules do
+find inside the boundary is reported as a suspected difference; these tests
+pin the engine's judgment through tests.policy and the reported kind beside it.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from .policy import engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, VIEW, _rows, codes, run
 from .test_round_ten_fixes import headline_consistent
 
@@ -55,9 +60,12 @@ def test_transformed_or_renamed_projection_outside_the_boundary_is_unverifiable(
         tmp_path, projection, concept, tail, code):
     result = run(tmp_path, _rows(_select(projection, tail)), view_text=VIEW_WITH)
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("unverifiable", concept)
-    assert code in codes(f)
-    assert result["funnel"]["violations"] == 0
+    # The rules themselves leave it unverifiable (not an experimental match,
+    # which the policy would also report as unverifiable).
+    assert (engine_kind(f), f["concept"]) == ("unverifiable", concept)
+    assert f["kind"] == "unverifiable"
+    assert code in engine_codes(f) and codes(f) == engine_codes(f)
+    assert engine_funnel(result["funnel"])["violations"] == 0
     # What would have been the violation is kept, as context only.
     assert f["suspected"], f
     headline_consistent(result)
@@ -80,8 +88,11 @@ def test_inside_the_boundary_the_violation_still_stands(tmp_path, projection, ki
     sql = f"SELECT channel, {projection} FROM {V} WHERE country = 'US' GROUP BY channel"
     result = run(tmp_path, _rows(sql), view_text=VIEW_WITH)
     (f,) = result["findings"]
-    assert f["kind"] == kind and codes(f) == [code]
-    assert result["funnel"]["violations"] == (1 if kind == "definition_violation" else 0)
+    assert engine_kind(f) == kind and engine_codes(f) == [code]
+    # Reported under the policy: a violation is a suspected difference.
+    assert f["kind"] == ("suspected_difference" if kind == "definition_violation" else kind)
+    assert engine_funnel(result["funnel"])["violations"] == (
+        1 if kind == "definition_violation" else 0)
     headline_consistent(result)
 
 
@@ -107,10 +118,11 @@ def test_inside_the_boundary_the_violation_still_stands(tmp_path, projection, ki
 def test_raw_table_violation_outside_the_boundary_is_unverifiable(tmp_path, sql, code):
     result = run(tmp_path, _rows(sql), view_text=VIEW_WITH)
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("unverifiable", "net_revenue")
-    assert code in codes(f)
+    assert (engine_kind(f), f["concept"]) == ("unverifiable", "net_revenue")
+    assert f["kind"] == "unverifiable"
+    assert code in engine_codes(f) and codes(f) == engine_codes(f)
     assert f["suspected"]
-    assert result["funnel"]["violations"] == 0
+    assert engine_funnel(result["funnel"])["violations"] == 0
     headline_consistent(result)
 
 
@@ -119,6 +131,8 @@ def test_raw_table_violation_inside_the_boundary_still_stands(tmp_path):
            "WHERE status = 'completed' AND country = 'US' GROUP BY channel")
     result = run(tmp_path, _rows(sql), view_text=VIEW_WITH)
     (f,) = result["findings"]
-    assert f["kind"] == "definition_violation" and codes(f) == ["measure_changed"]
+    assert engine_kind(f) == "definition_violation" and engine_codes(f) == ["measure_changed"]
+    assert f["kind"] == "suspected_difference" and codes(f) == ["measure_changed"]
+    assert engine_funnel(result["funnel"])["violations"] == 1
     assert "suspected" not in f
     headline_consistent(result)

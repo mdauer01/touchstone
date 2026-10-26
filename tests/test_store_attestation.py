@@ -13,6 +13,8 @@ from semantix.engine import run_scan
 from semantix.signing import verify_receipt_dict
 from semantix.store import Store, normalize_ts
 
+from .policy import engine_verdict
+
 GROWTH = "dbt_project/target/compiled/acme/models/growth/growth_net_revenue.sql"
 # Growth aligning with finance: same expression, same filter, and crucially
 # the same source relation (reading stg_orders instead of fct_orders is itself
@@ -76,9 +78,10 @@ def test_as_of_accepts_offset_timestamps(acme, tmp_path, monkeypatch):
 
 def test_as_of_receipt_carries_the_verdict_that_was_true_then(acme, tmp_path, monkeypatch):
     """The critical one: growth's model contradicted finance in January and
-    agreed in February. An as-of receipt for January must say CONTRADICTION —
-    stamping February's CERTIFIED onto it would sign the opposite of what the
-    store records."""
+    agreed in February. An as-of receipt for January must carry January's
+    verdict (the engine's CONTRADICTION, stated as SUSPECTED_DIVERGENCE under
+    the conclusions policy) — stamping February's (experimental) CERTIFIED
+    onto it would sign the opposite of what the store records."""
     times = iter(["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"])
     now = {}
     monkeypatch.setattr(store_mod, "utcnow", lambda: now["t"])
@@ -89,16 +92,21 @@ def test_as_of_receipt_carries_the_verdict_that_was_true_then(acme, tmp_path, mo
 
     now["t"] = next(times)
     before, _ = scan(estate, db)
-    january_verdict = next(v.verdict_type.value for v in before.verdicts
-                           if v.concept_label == "net_revenue")
+    january = next(v for v in before.verdicts if v.concept_label == "net_revenue")
+    january_verdict = january.verdict_type.value          # effective (policy)
 
     (estate / GROWTH).write_text(ALIGNED)
     now["t"] = next(times)
     after, store = scan(estate, db)
-    february_verdict = next(v.verdict_type.value for v in after.verdicts
-                            if v.concept_label == "net_revenue")
+    february = next(v for v in after.verdicts if v.concept_label == "net_revenue")
+    february_verdict = february.verdict_type.value
 
-    assert january_verdict == "CONTRADICTION"
+    # The engine contradicted in January; the policy states it as a suspected
+    # divergence.
+    assert engine_verdict(january).value == "CONTRADICTION"
+    assert january_verdict == "SUSPECTED_DIVERGENCE"
+    assert engine_verdict(february) != engine_verdict(january), (
+        "estate must actually have changed")
     assert february_verdict != january_verdict, "estate must actually have changed"
 
     historical = store.issue_receipt("net_revenue", as_of="2026-01-15T00:00:00Z")
@@ -137,7 +145,7 @@ def test_receipt_never_signs_an_empty_definition(acme, tmp_path):
 def test_deleted_definition_site_stops_being_live(acme, tmp_path, monkeypatch):
     """A model that no longer exists is not still computing. Without reading
     absence, its last observation stays open forever and the deleted model
-    keeps appearing in the current CERTIFIED receipt."""
+    keeps appearing in the current (experimentally certified) receipt."""
     times = iter(["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"])
     now = {}
     monkeypatch.setattr(store_mod, "utcnow", lambda: now["t"])

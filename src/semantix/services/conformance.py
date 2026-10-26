@@ -101,6 +101,7 @@ CATEGORY = {
     "toolchain_unqualified": "unqualified parser",
     "transformation_undecided": "implication not decided",
     "unrecognized_function": "unrecognized function",
+    "positive_suspended": "experimental match (positive verdicts suspended)",
 }
 
 _MARKERS = ("HAVING ", "QUALIFY ", "SELECT DISTINCT", "BOUND ")

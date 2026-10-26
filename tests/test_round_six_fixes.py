@@ -15,6 +15,8 @@ from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
 from semantix.signing import receipt_trust
 
+from .policy import engine_verdict
+
 CATALOG = {
     "raw.orders": {"order_id": "bigint", "customer_id": "bigint", "status": "varchar",
                    "channel": "varchar", "amount": "decimal(18,2)"},
@@ -226,8 +228,10 @@ def test_cte_mediated_and_transitive_readers_of_contested_relations(tmp_path):
     result, _ = run_scan(sql_dir=str(tmp_path / "sql"),
                          catalog_path=str(tmp_path / "catalog.yml"),
                          db_path=str(tmp_path / "s.db"))
+    # The ENGINE must not certify them — not merely the conclusions policy
+    # hiding a certification it made.
     surviving = [v for v in result.verdicts
-                 if v.verdict_type.value in ("CERTIFIED", "ALIASING")
+                 if engine_verdict(v).value in ("CERTIFIED", "ALIASING")
                  and v.concept_label in ("cte_rev", "hop_rev")]
     assert not surviving, (
         f"non-direct consumers of a contested relation kept certificates: "
@@ -241,7 +245,9 @@ def test_partial_no_drift_receipts_are_historical_not_drifted():
     drifted', and the advice must change the outcome. Round eight: it is also
     not valid for CURRENT use — systems that were not re-checked may hold the
     very change that breaks the certificate — and the warning names them, so
-    re-attesting with those sources yields a different (fresh) receipt."""
+    re-attesting with those sources yields a different (fresh) receipt.
+    Conclusions policy: a fresh live check shows the estate unchanged, but a
+    suspended CERTIFIED claim is never usable for current reliance."""
     receipt = {"status": "CERTIFIED",
                "freshness": {"status": "partial", "unchecked_systems": ["metrics_yaml"],
                              "estate_drift": {"changed": [], "added": [], "removed": []}}}
@@ -252,14 +258,25 @@ def test_partial_no_drift_receipts_are_historical_not_drifted():
     fresh = {"status": "CERTIFIED", "scan_id": "scan_1", "freshness": {"status": "fresh"},
              "proof_policy": "semantix-proof/2"}
     # Issuance freshness alone is historical (round fourteen); a live check
-    # bound to the receipt's scan establishes current use.
+    # bound to the receipt's scan establishes that the estate is unchanged —
+    # but under the conclusions policy a CERTIFIED claim is suspended, so even
+    # then it is not valid for current use.
+    from semantix.signing import assess_receipt
     assert receipt_trust(fresh)[0] is False
-    assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_1"})[0] is True
+    assert assess_receipt(fresh).estate_unchanged is None
+    bound = assess_receipt(fresh, {"status": "fresh", "scan_id": "scan_1"})
+    assert bound.signature_authentic is True and bound.estate_unchanged is True
+    assert bound.semantic_claim_usable is False and bound.current_use is False
+    assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_1"})[0] is False
     assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_2"})[0] is False
+    assert assess_receipt(fresh, {"status": "fresh", "scan_id": "scan_2"}).estate_unchanged \
+        is not True
     # ...and only under the proof policy in force.
     legacy = {k: v for k, v in fresh.items() if k != "proof_policy"}
     trusted, warnings = receipt_trust(legacy, {"status": "fresh", "scan_id": "scan_1"})
     assert trusted is False and any("rescan and re-attest" in w for w in warnings)
+    assert assess_receipt(legacy, {"status": "fresh", "scan_id": "scan_1"}).estate_unchanged \
+        is not True
 
 
 def test_stale_with_drift_is_still_distrusted():
@@ -278,11 +295,14 @@ def test_as_of_receipts_survive_current_estate_drift():
                "freshness": {"status": "stale",
                              "estate_drift": {"changed": ["dbt:model.x"]}}}
     trusted, warnings = receipt_trust(receipt)
-    assert trusted
-    assert any("valid for that instant only" in w for w in warnings)
-    # Round nine: valid for its instant is not valid for current use.
+    # Drift is disclosure, not decay: still a historical record. Untrusted
+    # only because the claim is suspended under the conclusions policy.
     from semantix.signing import assess_receipt
-    assert assess_receipt(receipt).current_use is False
+    a = assess_receipt(receipt)
+    assert a.historical and not a.semantic_claim_usable and trusted is False
+    assert any("a record of that instant only" in w for w in warnings)
+    # Round nine: valid for its instant is not valid for current use.
+    assert a.current_use is False
 
 
 # ----------------------------------------------------------------- adapters
@@ -365,7 +385,7 @@ def test_supersession_disclosure_does_not_block_certification(tmp_path):
                          catalog_path=str(tmp_path / "catalog.yml"),
                          metrics_path=str(tmp_path / "metrics.yml"),
                          db_path=str(tmp_path / "s.db"))
-    kinds = {v.verdict_type.value for v in result.verdicts}
+    kinds = {engine_verdict(v).value for v in result.verdicts}
     assert "CERTIFIED" in kinds, (
         f"a disclosed supersession blocked certification: "
         f"{[(v.verdict_type.value, v.summary[:80]) for v in result.verdicts]}")

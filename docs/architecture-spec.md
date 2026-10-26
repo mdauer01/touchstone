@@ -4,6 +4,8 @@
 **Status:** Draft v0.1 — architecture for review prior to build
 **Design stance:** system-agnostic core with thin platform adapters; the fingerprint history store is the primary asset and is designed first.
 
+> **Implementation status (2026-10-25):** positive verdicts (CERTIFIED, ALIASING, conforming uses) are **suspended** in the implementation; equalities are reported as experimental comparisons and differences as suspected, and no receipt authorizes reliance. Statements below about certification describe the design target, not current behaviour — see [proof-policy.md](proof-policy.md).
+
 ---
 
 ## 1. Architecture overview

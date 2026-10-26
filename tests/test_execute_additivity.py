@@ -13,6 +13,8 @@ from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.services.execute import _is_additive
 
+from .policy import engine_verdict
+
 pytest.importorskip("duckdb")
 
 SEED = """
@@ -63,12 +65,18 @@ def test_contested_ratio_is_not_measured(tmp_path):
     result, _ = run_scan(sql_dir=str(sql_dir), catalog_path=str(tmp_path / "catalog.yml"),
                          db_path=str(tmp_path / "s.db"), execute_seed=str(tmp_path / "seed.sql"))
 
+    # The engine's CONTRADICTION surfaces as a suspected divergence under the
+    # conclusions policy; the measurement evidence travels with it.
     contradiction = next(v for v in result.verdicts
-                         if v.verdict_type == VerdictType.CONTRADICTION)
+                         if engine_verdict(v) == VerdictType.CONTRADICTION)
+    assert contradiction.verdict_type == VerdictType.SUSPECTED_DIVERGENCE
     assert contradiction.evidence["measured"]["measured"] is False
     assert "not additive" in contradiction.evidence["measured"]["reason"]
     # crucially: no fabricated number reaches the human-readable summary
+    # (the policy renamed "Measured on seed data" to "Observed discrepancy on
+    # seed data"; neither wording may appear)
     assert "Measured on seed data" not in contradiction.summary
+    assert "Observed discrepancy on seed data" not in contradiction.summary
     assert result.execution["declined"]
     assert result.execution["measured"] == 0
 
@@ -83,10 +91,15 @@ def test_contested_additive_measure_is_still_measured(tmp_path):
     result, _ = run_scan(sql_dir=str(sql_dir), catalog_path=str(tmp_path / "catalog.yml"),
                          db_path=str(tmp_path / "s.db"), execute_seed=str(tmp_path / "seed.sql"))
 
+    # The engine's CONTRADICTION surfaces as a suspected divergence under the
+    # conclusions policy; the measurement evidence travels with it.
     contradiction = next(v for v in result.verdicts
-                         if v.verdict_type == VerdictType.CONTRADICTION)
+                         if engine_verdict(v) == VerdictType.CONTRADICTION)
+    assert contradiction.verdict_type == VerdictType.SUSPECTED_DIVERGENCE
     measured = contradiction.evidence["measured"]
     assert measured["measured"] is True
     assert measured["max_divergence"]["abs"] == pytest.approx(350.0)  # 1000 vs 650
-    assert "Measured on seed data" in contradiction.summary
+    # (the policy renamed "Measured on seed data" to "Observed discrepancy on
+    # seed data")
+    assert "Observed discrepancy on seed data" in contradiction.summary
     assert result.execution["measured"] == 1

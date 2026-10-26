@@ -4,8 +4,11 @@ import shutil
 
 from semantix.cli import main
 from semantix.engine import run_scan
+from semantix.models import VerdictType
 from semantix.services.diff import diff_verdicts, markdown_comment
 from semantix.store import Store
+
+from .policy import engine_verdict
 
 FIXED_GROWTH = """select date_trunc('month', order_date) as revenue_month,
        sum(amount - refund_amount) as net_revenue
@@ -40,13 +43,24 @@ def test_fixing_the_contradiction_shows_as_resolved(acme, tmp_path):
     _scan(estate, db, "after")
 
     diff = diff_verdicts(Store(str(db)))
-    assert [v["verdict"] for v in diff["resolved"]] == ["CONTRADICTION"]
-    assert "CERTIFIED" in [v["verdict"] for v in diff["new"]]
+    # The diff reads effective verdicts under the conclusions policy: the
+    # engine's CONTRADICTION is a suspected divergence, its CERTIFIED an
+    # experimental comparison (UNRESOLVED).
+    assert [v["verdict"] for v in diff["resolved"]] == ["SUSPECTED_DIVERGENCE"]
+    assert [engine_verdict(v) for v in diff["resolved"]] == [VerdictType.CONTRADICTION]
+    assert VerdictType.CERTIFIED in [engine_verdict(v) for v in diff["new"]]
+    assert all(v["verdict"] == "UNRESOLVED" for v in diff["new"]
+               if engine_verdict(v) == VerdictType.CERTIFIED)
     assert diff["unchanged"] >= 3  # gmv, customer_ltv, refund_rate untouched
 
+    # The divergence disappeared only because the experimental rules now find
+    # the definitions equal: replaced by an experimental equality, never
+    # "resolved".
+    assert diff["resolved"][0]["replaced_by_experimental"] == ["CERTIFIED"]
     md = markdown_comment(diff)
-    assert "resolved by this change" in md
-    assert "`net_revenue`" in md
+    assert "resolved" not in md
+    assert "replaced by an experimental equality" in md
+    assert "`net_revenue` → CERTIFIED under the experimental rules" in md
 
 
 def test_breaking_a_metric_is_a_new_verdict_and_fails_the_gate(acme, tmp_path, capsys):
@@ -66,7 +80,13 @@ def test_breaking_a_metric_is_a_new_verdict_and_fails_the_gate(acme, tmp_path, c
     assert rc == 1  # the PR introduced a contradiction → gate fails
     md = md_out.read_text()
     assert "newly introduced verdict" in md
-    assert "CONTRADICTION" in md
+    # The comment shows the effective verdict: the engine's CONTRADICTION is a
+    # suspected divergence under the conclusions policy.
+    assert "| SUSPECTED_DIVERGENCE | `net_revenue` |" in md
+    assert "Suspected divergence (" in md
+    assert "| CONTRADICTION |" not in md
+    assert VerdictType.CONTRADICTION in [
+        engine_verdict(v) for v in diff_verdicts(Store(str(db)))["new"]]
     assert "🔴" in md
 
 

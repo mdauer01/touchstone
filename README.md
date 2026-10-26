@@ -1,8 +1,24 @@
 # semantix
 
 semantix finds where a metric's declared definition and the SQL that computes it
-disagree, and explains each difference clause by clause. It certifies that two
-definitions are the same only within a narrow scope that it states and tests.
+appear to disagree, and explains each suspected difference clause by clause.
+
+> **Positive verdicts are suspended.** Nine successive review rounds found new false
+> certifications, the last ones in how SQL is *parsed*: the parser binds `%` and `IS`
+> differently from DuckDB and Spark, and a guard operating on a misparsed tree may
+> never see the dangerous construct. So, until the re-enable criteria in
+> [docs/proof-policy.md](docs/proof-policy.md) are met:
+>
+> - an equality the engine finds is reported as an **experimental comparison**,
+>   never as CERTIFIED / ALIASING / conforming;
+> - a difference that rests on the same interpretation is a **suspected divergence**
+>   or **suspected difference**, never a definitive contradiction or violation;
+> - **no receipt authorizes reliance.** Verification reports three separate answers —
+>   signature authentic, estate unchanged, claim usable — and the claim is never
+>   usable now, however authentic the receipt and however unchanged the estate.
+>
+> Stores and receipts written earlier are read under the same policy; tables
+> published earlier are brought under it with `semantix publish --refresh-policy`.
 
 It reads computed definitions from dbt projects, plain SQL directories and view-DDL
 dumps, and declared definitions from metrics YAML, the dbt Semantic Layer, Apache
@@ -39,8 +55,8 @@ engineered so one scan produces every verdict type:
 
 | Concept | Verdict | Why |
 | --- | --- | --- |
-| `net_revenue` | **CONTRADICTION** (sev 94) | Finance's model matches the declared definition; the engine's own blame sentence: *"growth_net_revenue diverges: missing filter status = 'completed'; adds filter status IN ('completed', 'pending'); expression omits refund_amount; reads analytics.stg_orders instead of analytics.fct_orders. Measured on seed data: totals 114,000 vs baseline 84,000 (+35.7%)."* |
-| `gmv` | **CERTIFIED + ALIASING** | `total_gmv` and `gross_merchandise_value` are canonically identical to the declared metric — CTE vs. inline, flipped predicate order, `NOT =` vs. `<>` and `SELECT *` all normalize away. |
+| `net_revenue` | **SUSPECTED_DIVERGENCE** (sev 94) | Finance's model appears to match the declared definition; the engine's own blame sentence (unverified observations): *"growth_net_revenue diverges: missing filter status = 'completed'; adds filter status IN ('completed', 'pending'); expression omits refund_amount; reads analytics.stg_orders instead of analytics.fct_orders."* With `--execute`, an observed discrepancy on seed data: totals 114,000 vs baseline 84,000 (+35.7%). |
+| `gmv` | **UNRESOLVED** — experimental comparison | Under the experimental rules, `total_gmv` and `gross_merchandise_value` are equal to the declared metric (the engine would have said CERTIFIED + ALIASING) — CTE vs. inline, flipped predicate order, `NOT =` vs. `<>` and `SELECT *`. Not a conclusion while positive verdicts are suspended. |
 | `customer_ltv` | **ORPHAN_CLAIM** | Declared, never computed anywhere. |
 | `refund_rate` | **SHADOW_METRIC** | Computed in ops, absent from the ontology. |
 
@@ -52,15 +68,14 @@ Computed definitions come from dbt manifests, directories of `.sql` files, or
 shipped warehouse driver is DuckDB, so other warehouses are read through exported
 files.
 
-**What a CERTIFIED verdict means.** Both definitions are inside the proof grammar
-of policy [`semantix-proof/2`](docs/proof-policy.md), and their proof forms are
-equal. A proof form comes from a short list of stated transformations (CTE inlining,
-`*` expansion, conjunct and operand ordering, `BETWEEN`, parentheses …), never from a
-general optimizer. Relation identity came from names the SQL wrote or from
-`--default-database` / `--default-schema`, and the parser is a qualified sqlglot
-version. The verdict records the policy, the rules and the assumptions it rests on.
-For the full statement and its limits, see
-[What a certification guarantees](#what-a-certification-guarantees-stated-narrowly).
+**What an experimental equality means.** Both definitions are inside the proof
+grammar of policy [`semantix-proof/2`](docs/proof-policy.md), and their proof forms
+are equal. A proof form comes from a short list of stated transformations (CTE
+inlining, `*` expansion, conjunct and operand ordering, `BETWEEN`, parentheses …),
+never from a general optimizer. That is what the engine checks; it is **not reported
+as a conclusion** while positive verdicts are suspended — reviews showed the parse the
+rules operate on can differ from the engine's. See
+[What an experimental equality does not establish](#what-an-experimental-equality-does-not-establish).
 
 **What it refuses rather than guesses.** Everything outside the grammar is
 unverifiable, and the reason names the construct:
@@ -142,8 +157,8 @@ some scanned systems not re-checked — never claims more than was verified), `s
 (the estate drifted; the receipt says exactly where), `unknown` (a check was attempted
 and could not answer — blocks certification), `unchecked` (no sources passed — disclosed,
 does not block). The freshness block is embedded **before signing**, so
-"fresh as of T" is itself tamper-evident. A stale CERTIFIED receipt is a rescan
-demand, not a truth claim.
+"fresh as of T" is itself tamper-evident. Freshness answers only whether the estate is
+unchanged; it never makes a receipt's claim usable (see the suspension above).
 
 Trust model, honestly: the embedded key makes receipts *tamper-evident*; *identity*
 comes from pinning a published key. Phase 0 keeps the private key in the store's
@@ -250,20 +265,23 @@ Most of what it sees is a governed metric used correctly: net revenue filtered t
 grouped by channel. Some of it is a definition quietly changed. It tells them apart with
 **bounded rules** (`monitor-conformance/1`, [conformance.py](src/semantix/services/conformance.py)):
 
+Positive verdicts are suspended, so the rules' conclusions are reported one step weaker:
+
 | Finding | Meaning |
 | --- | --- |
-| CONFORMING | Exact canonical equality with an authoritative definition, **or** one of the listed shapes: the definition's own measure over its base table, every required filter kept as a top-level AND condition, extra conditions only on *supported declared dimensions*, grouping only by them — or a bare `MEASURE(m)` / `AGG(m)` over an approved metric view, filtered and grouped by its dimensions, in a statement built entirely from an allow-listed set of constructs |
-| VIOLATION | Only for a query inside the supported boundary (outside it, the would-be violation is kept as `suspected` context on an unverifiable use). A true statement about the SQL as written: the measure changed or transformed, a required filter absent / weakened through OR / broadened / replaced, a slice on a column the model does not declare as a dimension, a different source, or a governed measure presented under another metric's name |
+| UNVERIFIABLE — experimental match | What the rules would call conforming: exact equality with an authoritative definition under the experimental rules, **or** one of the listed shapes (the definition's own measure over its base table, every required filter kept as a top-level AND condition, extra conditions only on *supported declared dimensions*, grouping only by them — or a bare `MEASURE(m)` / `AGG(m)` over an approved metric view, filtered and grouped by its dimensions). Kept under `experimental`; not a conclusion |
+| SUSPECTED | What the rules would call a violation, for a query inside the supported boundary: the measure changed or transformed, a required filter absent / weakened through OR / broadened / replaced, a slice on a column the model does not declare as a dimension, a different source, or a governed measure presented under another metric's name. The reasons are observations from SQL interpretation that is not verified; `--fail-on-alt` gates on these as a triage signal |
 | CANDIDATE | The same measure over the same columns, unnamed, that would be a violation — a hypothesis, ranked lower |
 | UNVERIFIABLE | Everything outside the rules, with the reason: SQL outside the proof grammar (joins, LIMIT, DISTINCT, windows, subqueries …), a governed calculation consumed by a CTE or join, HAVING, unsupported dimension expressions, a short table name with no evidenced session context, no definition evidenced for the execution time, or a query below proof grade. A select-project-filter CTE is inlined and judged as the query it is. Outside the grammar, a would-be violation is shown only as `suspected` ("under the optimizer's reading (a hypothesis)") |
 | UNREGISTERED | A recurring measure no authoritative definition covers |
 
 Referencing an approved metric is tracked **separately** from preserving it:
-`MEASURE(net_revenue) * 2 AS net_revenue` is a governed reference *and* a violation.
+`MEASURE(net_revenue) * 2 AS net_revenue` is a governed reference *and* a suspected
+difference.
 A query is judged as the metric it **claims** to compute: two analysts running the same
 `SUM(amount)` as `gross_revenue` and as `net_revenue` get separate findings, each with only
 their own executions, and the second one's match to gross revenue's definition is
-evidence on its violation (`its calculation: …`), never a conforming finding that could
+evidence on its suspected difference (`its calculation: …`), never a match that could
 stand in for it. Each use's headline bucket is its most severe finding. A
 filter on `amount` is permitted only when the governed model declares `amount` a
 dimension. A short table name resolves only from its own history row's catalog/schema, or
@@ -277,18 +295,18 @@ Every measure use lands in exactly one bucket, reported against an explicit deno
 ```
 measure uses: 12 — every use counted once below; governed references counted alongside
   governed references (MEASURE/AGG, approved view)        4/12 (33%)
-  conforming                                              4/12 (33%)  exact 0 · raw-table slice 2 · metric view 2
-  definition violations                                   4/12 (33%)
+  positive verdicts are suspended: a match is an experimental comparison, a difference is suspected — nothing below is a conclusion
+  suspected differences (named metric)                    4/12 (33%)
   candidates (unnamed near misses)                        2/12 (17%)
   unregistered                                            0/12 (0%)
-  unverifiable                                            2/12 (17%)  execution context 2
+  unverifiable                                            6/12 (50%)  execution context 2 · experimental match (positive verdicts suspended) 4
   below recurrence threshold (≥2 runs; not judged)        0/12 (0%)
-  checked = conforming + violations                       8/12 (67%)
+  (of the unverifiable: 4 matched under the experimental rules — exact 0 · raw-table slice 2 · metric view 2; not conclusions)
 ```
 
-A conforming verdict asserts nothing beyond its rule set, which states what it does not
-cover; execution testing challenges the rules (see the execution oracle below) but does
-not establish them. Client-side math (spreadsheet pivots, non-pushdown calculated
+An experimental match asserts nothing beyond its rule set, which states what it does
+not cover; execution testing challenges the rules (see the execution oracle below) but
+does not establish them. Client-side math (spreadsheet pivots, non-pushdown calculated
 fields) never reaches the warehouse and is out of scope. v1 is read-only: findings are
 reported, not recorded.
 
@@ -307,9 +325,12 @@ claims, which makes it both a semantix input and a semantix output:
   --agents-schema examples/acme/agents_schema.json \
   --catalog examples/acme/catalog.yml --db out/semantix.db
 
-# Out: signed receipts written back into AGENTS.ROOT (write-back certification,
-# spec §7 Phase 2), plus a skill/verify-metric row teaching agents the check —
-# and a structured semantix.verdicts projection beside it.
+# Out: signed receipts written back into AGENTS.ROOT (spec §7 Phase 2), each with an
+# assessment/<concept> row saying whether its claim may be relied on (not while
+# positive verdicts are suspended), a policy/conclusions row, a skill/verify-metric
+# row teaching agents the check — and a structured semantix.verdicts projection
+# (policy_status, usable_for_reliance) beside it. Rows published before the
+# suspension: `semantix publish --refresh-policy --warehouse …`.
 .venv/bin/semantix publish --db out/semantix.db --warehouse out/agents.duckdb
 ```
 
@@ -319,25 +340,26 @@ semantix grows no alert channel of its own. `publish` projects verdicts into
 `semantix.verdicts` (one row per verdict per affected relation), and the
 estate's existing immune system gates on it: the shipped **dbt package**
 ([integrations/dbt/semantix](integrations/dbt/semantix)) turns findings into
-ordinary tests (`semantix.no_contradictions`, `semantix.certified`,
-`semantix.fresh_scan`) with dbt-native severity that stay red until the
-finding is resolved — state, not a one-shot alert. Non-dbt estates gate on
+ordinary tests (`semantix.no_contradictions`, which fails on suspected
+divergences; `semantix.certified`, which fails closed while positive verdicts
+are suspended; `semantix.fresh_scan`) with dbt-native severity that stay red
+until the finding is resolved — state, not a one-shot alert. Non-dbt estates gate on
 the same table through Snowflake/Databricks SQL alerts, Dagster asset
 checks, Soda/Great Expectations checks, or the CLI's exit codes in any
 scheduler — copy-paste templates in
 [docs/action-rails.md](docs/action-rails.md). The doctrinal line every rail
 shares: semantix routes, proposes, and gates; it never auto-decides which
-side of a contradiction is the truth.
+side of a suspected divergence is the truth.
 
 The *propose* half is `semantix propose --out proposals/`: for every
-CONTRADICTION it emits the definition the code actually computes as a
+suspected divergence it emits the definition the code actually computes as a
 declaration in the ontology's own format (`--format metrics|ossie|uc-metrics`)
 — Option A, the ontology drifted — and describes the code change that would
 match the declaration instead — Option B, the code drifted — in a
 `RESOLUTIONS.md` written to be a PR body. SHADOW_METRICs get their missing
 declaration drafted from the fingerprint: accept it or delete the model.
 Nothing is applied; the human picks in the review rail, and a declaration
-emitted from a fingerprint scans back in as CERTIFIED (tested round-trip).
+emitted from a fingerprint re-scans to an experimental match (tested round-trip).
 The same emitter will back the planned Ossie export (`publish --definitions`,
 still open).
 
@@ -421,7 +443,7 @@ maintaining YAML that drifts.
 #     join-type-inner-vs-left: uses a join
 #     limit-is-not-neutral: uses LIMIT
 #     ...
-#   false certifications: 0 ✓
+#   false equalities: 0 ✓ (experimental rules; not a certification)
 ```
 
 The equivalence corpus ships in the repo (`src/semantix/benchmark/equivalence.yaml`):
@@ -517,9 +539,14 @@ prove them, and whether a slice is *permitted* is policy, tested by the acceptan
 `MEASURE()` cannot run in DuckDB; `tests/test_databricks_integration.py` checks it on a
 real workspace when `SEMANTIX_DATABRICKS_*` is set (opt-in, not yet run).
 
-### What a certification guarantees, stated narrowly
+### What an experimental equality does not establish
 
-A `CERTIFIED` verdict means all of the following:
+While positive verdicts are suspended, no output is a certification. When they are
+re-enabled (criteria in [docs/proof-policy.md](docs/proof-policy.md): an explicitly
+defined grammar, justified transformations, and evidence that parsing matches each
+target engine — not one clean review or pilot), a `CERTIFIED` verdict would mean all
+of the following, and today an experimental equality means only that the engine's
+checks below held on the tree sqlglot parsed:
 
 - Both definitions are inside the proof grammar of [`semantix-proof/2`](docs/proof-policy.md),
   and their proof forms are equal. Those forms come only from the policy's stated
@@ -536,18 +563,26 @@ A `CERTIFIED` verdict means all of the following:
 
 The verdict's evidence names the policy, the rules and the assumptions it rests on.
 A scan made under an earlier policy, including one with every file unchanged, is
-reported `stale`, and a receipt issued from it is `UNRESOLVED` until a rescan
-recertifies it. It does not cover semantics the SQL text does not
+reported `stale`, and a receipt issued from it is `UNRESOLVED`. It does not cover
+semantics the SQL text does not
 carry (session time zones, collations, user-defined functions), engine-specific
 runtime behaviour beyond the DuckDB oracle, or definitions the scan did not reach. A
-receipt answers two separate questions. It is a valid record of the instant it
-describes, and it may be relied on for current use only when a LIVE re-check at
-verification time — against the snapshot of the receipt's own scan — re-hashes every
-scanned source and finds them unchanged. The freshness recorded at issuance says what
+receipt verification answers separately whether it is a valid record of the instant
+it describes, and — for current use — three questions: is the signature authentic (this
+store issued exactly this payload), is the estate unchanged (a LIVE re-check at
+verification time against the snapshot of the receipt's own scan re-hashes every
+scanned source and finds them unchanged), and is the claim usable under the policy in
+force. Current use needs all three; while positive verdicts are suspended the third is
+always no. The freshness recorded at issuance says what
 was true then, not now: offline verification establishes signature integrity and
 historical validity only. `verify-receipt --require-current --db … <estate sources>`
 and the MCP tool on a server configured with the estate perform the live check; an
-`--as-of` receipt is never valid for current use.
+`--as-of` receipt is never valid for current use. An as-of receipt is valid for *its*
+stated use only if it is an authentic record whose claim is usable, so while positive
+verdicts are suspended `verify-receipt` exits 1 for every receipt, as-of included, and
+MCP `verify_receipt` returns `valid: false`. The signed status is printed as signed
+(`CERTIFIED (as signed; suspended …)`), never as a current conclusion. A receipt that
+the store passed with `--db` did not issue is not a historical record of anything.
 
 What the live check requires:
 
@@ -658,7 +693,7 @@ reproducible data (`scan --execute`; the full harness with warehouse creds, samp
 windows, and cost controls is still Phase 1) · the CI bot's core (`semantix diff`
 + `--fail-on-new`; the GitHub App wrapper that posts the comment remains) · the
 attestation MCP server (was Phase 2; receipt schema unchanged) · signed receipts ·
-write-back certification into Agents Schema (`semantix publish`; DuckDB target now,
+receipt write-back into Agents Schema (`semantix publish`; DuckDB target now,
 Snowflake connector remains) · an Agents Schema claims adapter (second-platform
 declared source: OSI + LookML) · an Apache Ossie document adapter (`scan --osi`;
 per-dialect variants as sibling claims, cross-dialect drift as contradictions).

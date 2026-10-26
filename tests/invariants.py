@@ -98,14 +98,19 @@ def _receipts_are_substantiated(result, store) -> list[str]:
         receipt = store.issue_receipt(label)
         if receipt is None:
             continue
-        if receipt.status == VerdictType.CERTIFIED.value and not receipt.definition_version:
-            problems.append(f"I5 {label}: CERTIFIED receipt names no definitions")
+        # While positive verdicts are suspended no receipt may state one at
+        # all (semantix.conclusions); a definitive CONTRADICTION is reported
+        # as a SUSPECTED_DIVERGENCE.
+        if receipt.status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value,
+                              VerdictType.CONTRADICTION.value):
+            problems.append(f"I5 {label}: receipt states {receipt.status}, a suspended "
+                            "or definitive claim")
         worst = {v.verdict_type for v in result.verdicts if v.concept_label == label}
-        if VerdictType.CONTRADICTION in worst and receipt.status != \
-                VerdictType.CONTRADICTION.value:
+        if VerdictType.SUSPECTED_DIVERGENCE in worst and receipt.status != \
+                VerdictType.SUSPECTED_DIVERGENCE.value:
             problems.append(
                 f"I5 {label}: receipt says {receipt.status} while the scan found a "
-                "CONTRADICTION"
+                "SUSPECTED_DIVERGENCE"
             )
         if receipt.scope and receipt.scope.get("complete") is False and \
                 receipt.status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):

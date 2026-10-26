@@ -34,6 +34,8 @@ from semantix.services.freshness import check_freshness
 from semantix.signing import assess_receipt
 from semantix.store import Store
 
+from .policy import engine_codes, engine_funnel, engine_kind, engine_verdict
+
 CAT = {"db.main.t": {"amount": "DOUBLE", "refund": "DOUBLE", "status": "VARCHAR",
                      "a": "DOUBLE", "b": "DOUBLE", "c": "DOUBLE"},
        "db.main.u": {"id": "INTEGER", "amount": "DOUBLE"}}
@@ -139,7 +141,9 @@ def test_identical_hypotheses_never_certify_or_alias(tmp_path):
                           metrics="version: 1\nmetrics:\n  - name: rev\n    model: db.main.t\n"
                                   "    expr: \"sum(amount)\"\n")
     store.close()
-    kinds = {v.verdict_type for v in result.verdicts}
+    # The ENGINE never certifies or aliases a hypothesis (not merely: the
+    # conclusions policy hides it).
+    kinds = {engine_verdict(v) for v in result.verdicts}
     assert VerdictType.CERTIFIED not in kinds and VerdictType.ALIASING not in kinds
 
 
@@ -149,16 +153,33 @@ def test_positive_verdicts_record_policy_rules_and_assumptions(tmp_path):
                         "WHERE (status = 'done')"},
         metrics="version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n"
                 "    expr: \"sum(amount)\"\n    filters: [\"status = 'done'\"]\n")
-    (v,) = [v for v in result.verdicts if v.verdict_type is VerdictType.CERTIFIED]
-    proof = v.evidence["proof"]
+    (v,) = [v for v in result.verdicts if engine_verdict(v) is VerdictType.CERTIFIED]
+    # The certification is an experimental comparison under the conclusions
+    # policy; the proof it rests on travels with it.
+    assert v.verdict_type is VerdictType.UNRESOLVED
+    proof = v.evidence["experimental"]["proof"]
     assert proof["policy"] == POLICY_ID
     assert {"inline", "star", "parens", "conjuncts"} <= set(proof["rules"])
     assert proof["assumptions"] == list(ASSUMPTIONS)
     assert result.stats()["proof_policy"] == POLICY_ID
     receipt = store.issue_receipt("m")
-    store.close()
-    assert receipt.status == "CERTIFIED" and receipt.proof_policy == POLICY_ID
-    assert receipt.verdicts[0]["proof"]["policy"] == POLICY_ID
+    try:
+        stored = [r for r in store.verdicts_for_scan(receipt.scan_id)
+                  if r["concept_label"] == "m" and engine_verdict(r) is VerdictType.CERTIFIED]
+    finally:
+        store.close()
+    assert receipt.status == "UNRESOLVED" and receipt.proof_policy == POLICY_ID
+    assert receipt.verdicts[0]["summary"].startswith(
+        "Experimental comparison, not a conclusion — certified under the experimental rules")
+    # The signed entry keeps what the engine's equality rests on — the policy,
+    # rules and assumptions — labelled experimental, never as a verdict.
+    (row,) = stored
+    assert receipt.verdicts[0]["summary"] == row["summary"]
+    assert row["evidence"]["experimental"]["proof"]["policy"] == POLICY_ID
+    entry = receipt.verdicts[0]["experimental"]
+    assert entry["verdict"] == "CERTIFIED" and entry["proof"]["policy"] == POLICY_ID
+    assert entry["proof"]["assumptions"] == list(ASSUMPTIONS)
+    assert "proof" not in receipt.verdicts[0]
 
 
 # ------------------------------------------- requalification of old evidence
@@ -170,7 +191,7 @@ def legacy(tmp_path):
     result, store = _scan(tmp_path, {"m": "SELECT SUM(amount) AS m FROM db.main.t"},
                           metrics="version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n"
                                   "    expr: \"sum(amount)\"\n")
-    assert any(v.verdict_type is VerdictType.CERTIFIED for v in result.verdicts)
+    assert any(engine_verdict(v) is VerdictType.CERTIFIED for v in result.verdicts)
     store.close()
     db = tmp_path / "s.db"
     con = sqlite3.connect(db)
@@ -191,14 +212,22 @@ def test_unchanged_files_do_not_carry_an_old_certification_forward(legacy):
         live = check_freshness(store, **legacy["estate"])
         assert live["status"] == "stale"
         assert live["proof_policy"] == {"scan": None, "current": POLICY_ID}
-        assert "rescan to recertify" in live["note"]
+        assert "rescan under it" in live["note"]
         receipt = store.issue_receipt("m", freshness=live)
     finally:
         store.close()
     assert receipt.status == "UNRESOLVED" and receipt.proof_policy is None
-    assert any("rescan to recertify" in d for d in receipt.known_divergences)
+    assert any("rescan under it" in d for d in receipt.known_divergences)
     assert all(v["verdict"] != "CERTIFIED" for v in receipt.verdicts)
-    assert any(v.get("superseded") == "CERTIFIED" for v in receipt.verdicts)
+    # The proof-policy change downgrades the old certification entry. The
+    # conclusions policy is applied to the engine verdict first, so the entry
+    # is labelled an experimental comparison and the engine's CERTIFIED is
+    # kept only under `experimental`.
+    assert any(v["summary"].startswith("[downgraded] Experimental comparison")
+               and v["experimental"]["verdict"] == "CERTIFIED"
+               and v["verdict"] == "UNRESOLVED" for v in receipt.verdicts)
+    assert all(v.get("superseded") not in ("CERTIFIED", "ALIASING", "CONTRADICTION")
+               for v in receipt.verdicts)
 
 
 def test_a_receipt_issued_under_the_old_policy_is_never_current(legacy):
@@ -209,6 +238,9 @@ def test_a_receipt_issued_under_the_old_policy_is_never_current(legacy):
     a = assess_receipt(receipt, {"status": "fresh", "scan_id": receipt["scan_id"]})
     assert a.current_use is False
     assert any("rescan and re-attest" in w for w in a.warnings)
+    # Never current for the old policy itself, independent of the suspension
+    # of positive verdicts: the live check does not count as establishing it.
+    assert a.estate_unchanged is not True
 
 
 def test_a_rescan_recertifies(legacy):
@@ -221,9 +253,17 @@ def test_a_rescan_recertifies(legacy):
     finally:
         store.close()
     assert live["status"] == "fresh"
-    assert receipt.status == "CERTIFIED" and receipt.proof_policy == POLICY_ID
+    # The rescan recertifies under the policy in force — reported as an
+    # experimental comparison while positive verdicts are suspended.
+    assert receipt.status == "UNRESOLVED" and receipt.proof_policy == POLICY_ID
+    assert all("rescan under it" not in d for d in receipt.known_divergences)
+    assert any(v["summary"].startswith("Experimental comparison, not a conclusion — certified")
+               for v in receipt.verdicts)
     a = assess_receipt(receipt.as_dict(), {**live, "scan_id": receipt.scan_id})
-    assert a.current_use is True
+    # The estate and signature check out; the suspended claim is never usable.
+    assert a.signature_authentic is True and a.estate_unchanged is True
+    assert a.semantic_claim_usable is False
+    assert a.current_use is False
 
 
 # ----------------------------------------------- the monitor on hypotheses
@@ -235,12 +275,14 @@ def test_monitor_never_conforms_or_accuses_from_a_hypothesis(tmp_path):
              f"WHERE status = 'completed' LIMIT 5")
     f = only(run(tmp_path / "exact", _rows(exact)))
     assert f["kind"] == "unverifiable" and codes(f) == ["shape_unsupported"]
+    assert engine_kind(f) == "unverifiable" and engine_codes(f) == ["shape_unsupported"]
     assert "outside the supported grammar" in f["reasons"][0]["detail"]
 
     dropped = f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders LIMIT 5"
     result = run(tmp_path / "dropped", _rows(dropped))
     f = only(result)
-    assert f["kind"] == "unverifiable" and result["funnel"]["violations"] == 0
+    assert f["kind"] == "unverifiable" and engine_funnel(result["funnel"])["violations"] == 0
+    assert engine_kind(f) == "unverifiable"
     assert f["suspected"] and all(s.startswith("under the optimizer's reading (a hypothesis)")
                                   for s in f["suspected"])
 
@@ -252,4 +294,5 @@ def test_monitor_judges_an_inlined_cte_as_the_query_it_is(tmp_path):
          f"SELECT channel, {GOVERNED} AS net_revenue FROM o WHERE country = 'US' "
          f"GROUP BY channel")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "conforming_use", f
+    assert engine_kind(f) == "conforming_use", f
+    assert f["kind"] == "unverifiable"      # positive verdicts are suspended

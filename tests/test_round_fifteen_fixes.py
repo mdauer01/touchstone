@@ -14,6 +14,10 @@
    definition covered the run. Time-disjoint versions also made the metric
    "contested". Every match candidate, and contestedness, is now drawn from
    the definitions that apply to the execution.
+
+Under the conclusions policy (semantix.conclusions) matches are reported as
+experimental and violations as suspected differences; the tests pin the
+engine's judgment through tests.policy and the reported kind beside it.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from semantix.services.history import read_history
 from semantix.services.monitor import build_registry, monitor_history
 from semantix.services.pilot import load_pilot
 
+from .policy import engine_codes, engine_funnel, engine_kind, engine_kinds
 from .test_monitor_conformance import CATALOG, GOVERNED, MODEL, VIEW, codes
 from .test_round_fourteen_fixes import SEED, _estate, _fp
 from .test_round_ten_fixes import headline_consistent
@@ -82,6 +87,8 @@ def test_scan_reports_no_aliasing_for_different_distinct_on_keys(tmp_path):
     store.close()
     assert not [v for v in result.verdicts
                 if v.verdict_type in (VerdictType.ALIASING, VerdictType.CERTIFIED)]
+    # …nor does the engine, behind the policy's experimental label.
+    assert not engine_kinds(result.verdicts) & {VerdictType.ALIASING, VerdictType.CERTIFIED}
 
 
 def test_monitor_does_not_call_a_different_distinct_on_key_conforming(tmp_path):
@@ -96,8 +103,9 @@ def test_monitor_does_not_call_a_different_distinct_on_key_conforming(tmp_path):
     # The DISTINCT ON model is outside the proof grammar, so it is no
     # authority at all; nothing can conform to it.
     assert result["findings"]
-    assert all(f["kind"] != "conforming_use" for f in result["findings"])
-    assert result["funnel"]["conforming"] == 0
+    assert all(engine_kind(f) != "conforming_use" and f["kind"] != "conforming_use"
+               for f in result["findings"])
+    assert engine_funnel(result["funnel"])["conforming"] == 0
     headline_consistent(result)
 
 
@@ -162,18 +170,21 @@ def test_expired_equivalent_definition_is_not_matched(tmp_path, sql):
     total revenue is a violation, judged against the definition that applied."""
     result = three_view_pilot(tmp_path, sql)
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("definition_violation", "total_revenue")
+    assert (engine_kind(f), f["concept"]) == ("definition_violation", "total_revenue")
+    assert f["kind"] == "suspected_difference"
     assert "total_old_mv" not in json.dumps(f)
     headline_consistent(result)
 
 
 @pytest.mark.parametrize("sql", [VIEW_SQL, RAW_SQL])
 def test_while_the_equivalent_definition_applies_the_names_agree(tmp_path, sql):
-    """On Sep 15 the OLD total_revenue (equal to net_revenue) applies: the same
-    query conforms, as total_revenue, against the old view."""
+    """On Sep 15 the OLD total_revenue (equal to net_revenue) applies: the
+    engine's rules find the same query conforming, as total_revenue, against
+    the old view (reported as an experimental match under the policy)."""
     result = three_view_pilot(tmp_path, sql, start_time="2026-09-15T10:00:00Z")
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("conforming_use", "total_revenue")
+    assert (engine_kind(f), f["concept"]) == ("conforming_use", "total_revenue")
+    assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
     headline_consistent(result)
 
 
@@ -181,7 +192,7 @@ def test_time_disjoint_versions_are_not_contested(tmp_path):
     result = three_view_pilot(tmp_path, "SELECT MEASURE(net_revenue) AS net_revenue "
                                         "FROM main.finance.revenue_mv")
     assert "total_revenue" not in result["reference"]["contested_concepts"]
-    assert result["funnel"]["contested"] == 0
+    assert engine_funnel(result["funnel"])["contested"] == 0
     # Overlapping windows with different definitions ARE a dispute.
     result = three_view_pilot(tmp_path / "overlap", VIEW_SQL,
                               total_old_to="2026-10-05T00:00:00Z")
@@ -189,7 +200,8 @@ def test_time_disjoint_versions_are_not_contested(tmp_path):
     # …and an execution inside the overlap sees two applicable definitions
     # that disagree: the equivalent one may not be presented as THE match.
     (f,) = result["findings"]
-    assert f["kind"] == "contested_use" and f["concept"] == "total_revenue"
+    assert engine_kind(f) == "contested_use" and f["concept"] == "total_revenue"
+    assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
 
 
 def test_calculation_matching_only_an_expired_definition_is_context(tmp_path):
@@ -200,5 +212,6 @@ def test_calculation_matching_only_an_expired_definition_is_context(tmp_path):
            f"WHERE status = 'completed'")
     result = three_view_pilot(tmp_path, sql)
     (f,) = result["findings"]
-    assert f["kind"] == "definition_violation"
-    assert codes(f) and "total_new_mv" in f["summary"]
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) and "total_new_mv" in f["summary"]

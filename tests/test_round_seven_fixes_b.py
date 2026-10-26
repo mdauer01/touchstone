@@ -19,6 +19,8 @@ from semantix.services.emit import emit_declaration
 from semantix.services.monitor import build_registry, monitor_history
 from semantix.services.propose import build_proposals
 
+from .policy import engine_funnel, engine_kind, engine_kinds
+
 CATALOG_YML = ("db:\n  main:\n    orders:\n      amount: DOUBLE\n      refunds: DOUBLE\n"
                "      status: VARCHAR\n      customer_id: INTEGER\n")
 
@@ -85,7 +87,10 @@ def test_ossie_field_substitution_round_trips_and_refuses_nesting(tmp_path):
     result, store = run_scan(osi_path=str(osi), **kwargs)
     store.close()
     # The Paren wrapped around the substituted field was a false CONTRADICTION.
-    assert _verdict(result, "net_revenue", VerdictType.CERTIFIED)
+    assert VerdictType.CERTIFIED in engine_kinds(result.verdicts, "net_revenue")
+    # Under the conclusions policy the equality is reported as experimental.
+    assert VerdictType.CONTRADICTION not in engine_kinds(result.verdicts, "net_revenue")
+    assert not _verdict(result, "net_revenue", VerdictType.CERTIFIED)
 
     nested = tmp_path / "nested.json"
     nested.write_text(json.dumps(doc([field("net", "amount - refunds"),
@@ -160,9 +165,11 @@ def _kinds(store, registry, statements, min_runs=2, authority=frozenset({"sql"})
 
 def test_monitor_reaggregation_over_mart_is_unverifiable(monitored):
     store, registry = monitored
-    kinds, _ = _kinds(store, registry,
-                      ["SELECT SUM(net_revenue) AS net_revenue FROM db.main.rev_mart"] * 3)
+    kinds, result = _kinds(store, registry,
+                           ["SELECT SUM(net_revenue) AS net_revenue FROM db.main.rev_mart"] * 3)
     assert kinds == [("unverifiable", None)]
+    # Unverifiable by the rules, not a suspended match.
+    assert [engine_kind(f) for f in result["findings"]] == ["unverifiable"]
 
 
 def test_monitor_other_concepts_name_on_matching_math_is_a_violation(monitored):
@@ -178,14 +185,21 @@ def test_monitor_other_concepts_name_on_matching_math_is_a_violation(monitored):
     # `refunds = 0` can make SUM(amount - refunds) gross revenue on its rows.
     assert kinds == [("unverifiable", "gross_revenue")]
     (f,) = _.get("findings")
+    # The rules themselves found it unverifiable (not a suspended match).
+    assert engine_kind(f) == "unverifiable"
     assert "rev_mart" in f["calculation_matches"]
     assert any("measure is" in s for s in f["suspected"])
-    assert _["funnel"]["violations"] == 0 and _["funnel"]["conforming"] == 0
-    # Inside the boundary — no unjudgeable filter — the violation stands.
+    funnel = engine_funnel(_["funnel"])
+    assert funnel["violations"] == 0 and funnel["conforming"] == 0
+    # Inside the boundary — no unjudgeable filter — the violation stands
+    # (reported as a suspected difference under the conclusions policy).
     kinds, _ = _kinds(store, registry,
                       ["SELECT SUM(amount - refunds) AS gross_revenue FROM db.main.orders"] * 3)
-    assert kinds == [("definition_violation", "gross_revenue")]
-    assert _["funnel"]["violations"] == 3
+    assert [(engine_kind(f), f.get("concept")) for f in _["findings"]] == \
+        [("definition_violation", "gross_revenue")]
+    assert kinds == [("suspected_difference", "gross_revenue")]
+    assert engine_funnel(_["funnel"])["violations"] == 3
+    assert _["funnel"]["suspected_differences"] == 3
 
 
 def test_monitor_mixed_grade_reruns_kept_apart(monitored):
@@ -194,8 +208,11 @@ def test_monitor_mixed_grade_reruns_kept_apart(monitored):
              "WHERE status = 'completed'")
     sampled = clean.replace("db.main.orders", "db.main.orders TABLESAMPLE 10 PERCENT")
     kinds, result = _kinds(store, registry, [clean] * 5 + [sampled] * 2)
-    assert ("conforming_use", "net_revenue") in kinds
-    assert ("unverifiable", None) in kinds
+    engine = [(engine_kind(f), f.get("concept")) for f in result["findings"]]
+    assert ("conforming_use", "net_revenue") in engine
+    assert ("unverifiable", None) in engine
+    # The positive verdict is suspended: no finding is reported as conforming.
+    assert ("conforming_use", "net_revenue") not in kinds
 
 
 def test_monitor_semicolon_in_literal_is_one_statement(monitored):
@@ -223,7 +240,8 @@ def test_monitor_contested_definition_is_not_consistency(tmp_path):
         "    expr: \"sum(amount)\"\n    filters: [\"status = 'completed'\"]\n",
         encoding="utf-8")
     result, store = run_scan(metrics_path=str(tmp_path / "metrics.yml"), **kwargs)
-    assert _verdict(result, "rev", VerdictType.CONTRADICTION)
+    assert VerdictType.CONTRADICTION in engine_kinds(result.verdicts, "rev")
+    assert _verdict(result, "rev", VerdictType.SUSPECTED_DIVERGENCE)
     from semantix.adapters.catalog import load_catalog
     from semantix.adapters.sql_dir import load_sql_dir
     registry = build_registry(load_catalog(kwargs["catalog_path"]),
@@ -232,7 +250,8 @@ def test_monitor_contested_definition_is_not_consistency(tmp_path):
     # of them is agreeing with one side of an open contradiction.
     kinds, _ = _kinds(store, registry, ["SELECT SUM(amount) AS rev FROM db.main.orders"] * 2,
                       authority={"sql", "metrics_yaml"})
-    assert kinds == [("contested_use", "rev")]
+    assert [(engine_kind(f), f.get("concept")) for f in _["findings"]] == [("contested_use", "rev")]
+    assert kinds == [("unverifiable", "rev")]
     # Default authority is the DECLARED definition: the query matches the
     # computed mart, which contradicts it, so it is a violation of the
     # declaration — with the mart cited as evidence, not as a verdict.
@@ -240,7 +259,8 @@ def test_monitor_contested_definition_is_not_consistency(tmp_path):
                              registry, "duckdb")
     store.close()
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("definition_violation", "rev")
+    assert (engine_kind(f), f["concept"]) == ("definition_violation", "rev")
+    assert f["kind"] == "suspected_difference"
     assert [r["code"] for r in f["reasons"]] == ["required_filter_missing"]
     assert any("computed definition" in m for m in f["also_matches"])
 
@@ -330,7 +350,7 @@ def test_diff_markdown_names_lost_certifications():
                            "new": [],
                            "resolved": [{"verdict": "CERTIFIED", "concept_label": "gmv",
                                          "severity": 5}]})
-    assert "LOST" in md and "resolved by this change" not in md
+    assert "LOST" in md and "no longer reported" not in md
 
 
 def test_warehouse_url_grammar(tmp_path):

@@ -41,8 +41,11 @@ source is refused with that reason. Without a registry the result is
 marked unverified, and the memo says so.
 
 Invariant this module is tested against: a declaration emitted from a
-fingerprint, scanned back in through its own adapter, CERTIFIES against
-that fingerprint — for every format that emits.
+fingerprint, scanned back in through its own adapter, re-canonicalizes to
+that fingerprint's core — for every format that emits. That is the engine's
+CERTIFIED relation, an experimental equality while positive verdicts are
+suspended (semantix.conclusions): a consistency check of the emitter, not a
+verification of the declaration's meaning.
 """
 
 from __future__ import annotations

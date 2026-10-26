@@ -15,6 +15,10 @@ conformance helper:
    claimed to compute.
 4. AGG(), Databricks' second spelling of MEASURE(), vanished from the
    measure denominator.
+
+Under the conclusions policy a conforming use is reported as unverifiable
+(an experimental match) and a violation as a suspected difference; the
+monitor's own judgment is pinned through tests/policy.py.
 """
 
 from __future__ import annotations
@@ -24,12 +28,17 @@ import json
 import pytest
 
 from semantix.cli import main
+
+from .policy import engine_codes, engine_conformance, engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, T_IN, VIEW, _rows, codes, make_pilot, run
 
 TWO = VIEW.format(extra="") + "  - name: gross_revenue\n    expr: SUM(amount)\n"
 GROSS = "SELECT SUM(amount) AS {name} FROM main.finance.orders WHERE status = 'completed'"
-_KINDS = {"conforming_use": "conforming", "contested_use": "contested",
-          "definition_violation": "violations", "candidate_alt_definition": "candidates",
+# User-facing buckets under the conclusions policy: no conforming bucket (a
+# match is one reason a use is unverifiable) and no violations bucket (a
+# violation is a suspected difference).
+_KINDS = {"suspected_difference": "suspected_differences",
+          "candidate_alt_definition": "candidates",
           "unregistered_recurring_measure": "unregistered", "unverifiable": "unverifiable"}
 
 
@@ -41,10 +50,15 @@ def headline_consistent(result):
                       if f["role"] == "primary" and f["kind"] == kind)
         assert fn[bucket] == primary, (kind, fn, result["findings"])
     assert sum(fn[b] for b in _KINDS.values()) + fn["below_threshold"] == fn["measure_uses"]
-    # A violation finding is never hidden behind a different headline bucket.
-    violated = sum(f["uses"] for f in result["findings"]
-                   if f["kind"] == "definition_violation" and f["role"] == "primary")
-    assert fn["violations"] == violated
+    # No positive conclusion on any finding, primary or additional.
+    assert not [f for f in result["findings"]
+                if f["kind"] in ("conforming_use", "contested_use", "definition_violation")]
+    # The experimental counts are exactly the primary findings the rules matched.
+    for engine, key in (("conforming_use", "experimental_matches"),
+                        ("contested_use", "experimental_contested")):
+        matched = sum(f["uses"] for f in result["findings"] if f["role"] == "primary"
+                      and (f.get("experimental") or {}).get("kind") == engine)
+        assert fn[key] == matched, (key, fn)
 
 
 def row(sid, sql, who):
@@ -60,14 +74,15 @@ def test_same_math_under_different_names_is_attributed_per_execution(tmp_path):
     by_concept = {f["concept"]: f for f in result["findings"]}
     assert set(by_concept) == {"gross_revenue", "net_revenue"}
     good, bad = by_concept["gross_revenue"], by_concept["net_revenue"]
-    assert good["kind"] == "conforming_use"
+    assert engine_kind(good) == "conforming_use" and good["kind"] == "unverifiable"
     assert (good["executed_by"], good["execution_ids"]) == (["analyst_a"], ["A1"])
     assert "gross_revenue" in good["sample_sql"] and "net_revenue" not in good["sample_sql"]
-    assert bad["kind"] == "definition_violation"
+    assert engine_kind(bad) == "definition_violation" and bad["kind"] == "suspected_difference"
     assert (bad["executed_by"], bad["execution_ids"]) == (["analyst_b"], ["B1"])
     assert "net_revenue" in bad["sample_sql"]
     assert "gross_revenue" in bad["calculation_matches"]
-    assert result["funnel"]["conforming"] == 1 and result["funnel"]["violations"] == 1
+    fn = engine_funnel(result["funnel"])
+    assert fn["conforming"] == 1 and fn["violations"] == 1
     headline_consistent(result)
 
 
@@ -123,9 +138,11 @@ def test_cli_json_carries_per_execution_attribution(tmp_path, capsys):
     assert main(["monitor", "--pilot", str(root), "--sql-dir", str(models), "--db", db,
                  "--min-runs", "1", "--json", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "its calculation: declared definition uc_metrics:main.finance.revenue_mv/gross_revenue" in printed
+    assert ("its calculation: under the experimental rules (not a conclusion): declared "
+            "definition uc_metrics:main.finance.revenue_mv/gross_revenue") in printed
     result = json.loads(out.read_text())
-    bad = next(f for f in result["findings"] if f["kind"] == "definition_violation")
+    bad = next(f for f in result["findings"] if engine_kind(f) == "definition_violation")
+    assert bad["kind"] == "suspected_difference"
     assert bad["executed_by"] == ["analyst_b"] and bad["execution_ids"] == ["B1"]
     headline_consistent(result)
 
@@ -151,9 +168,12 @@ def test_cli_json_carries_per_execution_attribution(tmp_path, capsys):
 def test_metric_view_constructs_outside_the_allow_list_never_conform(tmp_path, sql, fragment):
     result = run(tmp_path, _rows(sql))
     (f,) = result["findings"]
+    # An experimental match is also REPORTED as unverifiable: pin that the
+    # rules themselves refused it.
     assert f["kind"] == "unverifiable" and f["governed_reference"] is True
+    assert engine_kind(f) == "unverifiable" and engine_conformance(f) != "conforming"
     assert fragment in json.dumps(f["reasons"])
-    assert result["funnel"]["conforming"] == 0
+    assert engine_funnel(result["funnel"])["conforming"] == 0
     headline_consistent(result)
 
 
@@ -164,7 +184,10 @@ def test_metric_view_tablesample_matches_the_raw_table_verdict(tmp_path):
             "TABLESAMPLE (50 PERCENT)")
     result = run(tmp_path, _rows(raw, view))
     assert {f["kind"] for f in result["findings"]} == {"unverifiable"}
+    # Refused by the rules, not experimental matches reported as unverifiable.
+    assert {engine_kind(f) for f in result["findings"]} == {"unverifiable"}
     assert result["funnel"]["unverifiable"] == 2
+    assert engine_funnel(result["funnel"])["conforming"] == 0
     headline_consistent(result)
 
 
@@ -174,6 +197,7 @@ def test_raw_aggregates_beside_governed_ones_are_disclosed(tmp_path):
     result = run(tmp_path, _rows(q))
     (f,) = result["findings"]
     assert f["kind"] == "unverifiable" and "raw aggregate" in json.dumps(f["reasons"])
+    assert engine_kind(f) == "unverifiable"
     assert result["statements_mixing_raw_aggregates"] == 1
     headline_consistent(result)
 
@@ -183,10 +207,11 @@ def test_raw_aggregates_beside_governed_ones_are_disclosed(tmp_path):
 def test_calculation_match_never_hides_the_claimed_metrics_violation(tmp_path):
     result = run(tmp_path, _rows(GROSS.format(name="net_revenue")), view_text=TWO)
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"], f["role"]) == ("definition_violation", "net_revenue",
-                                                    "primary")
+    assert (engine_kind(f), f["concept"], f["role"]) == ("definition_violation", "net_revenue",
+                                                         "primary")
+    assert f["kind"] == "suspected_difference"
     assert "gross_revenue" in f["calculation_matches"]
-    fn = result["funnel"]
+    fn = engine_funnel(result["funnel"])
     assert (fn["measure_uses"], fn["conforming"], fn["violations"]) == (1, 0, 1)
     headline_consistent(result)
 
@@ -194,8 +219,9 @@ def test_calculation_match_never_hides_the_claimed_metrics_violation(tmp_path):
 def test_governed_reference_under_another_name_counts_as_a_violation(tmp_path):
     q = "SELECT MEASURE(net_revenue) AS gross_revenue FROM main.finance.revenue_mv"
     result = run(tmp_path, _rows(q), view_text=TWO)
-    fn = result["funnel"]
+    fn = engine_funnel(result["funnel"])
     assert (fn["measure_uses"], fn["conforming"], fn["violations"]) == (1, 0, 1)
+    assert result["funnel"]["suspected_differences"] == 1
     assert fn["governed_references"] == 1
     headline_consistent(result)
 
@@ -208,9 +234,13 @@ def test_mixed_stream_headline_matches_its_findings(tmp_path):
                "TABLESAMPLE (10 PERCENT)",
                f"SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'"]
     result = run(tmp_path, _rows(*queries), view_text=TWO)
-    fn = result["funnel"]
+    fn = engine_funnel(result["funnel"])
     assert fn["measure_uses"] == 6
-    assert (fn["conforming"], fn["violations"], fn["unverifiable"]) == (2, 2, 2)
+    # The policy counts the experimental matches (and contested uses) inside
+    # `unverifiable`; the uses the rules refused are what remains — still 2.
+    outside_rules = fn["unverifiable"] - fn["conforming"] - fn["contested"]
+    assert (fn["conforming"], fn["violations"], outside_rules) == (2, 2, 2)
+    assert result["funnel"]["unverifiable"] == 4
     assert fn["governed_references"] == 3
     headline_consistent(result)
 
@@ -222,7 +252,8 @@ def test_agg_spelling_is_a_measure_reference(tmp_path):
          "WHERE country = 'US' GROUP BY channel")
     result = run(tmp_path, _rows(q))
     (f,) = result["findings"]
-    assert f["kind"] == "conforming_use" and f["shape"] == "B"
+    assert engine_kind(f) == "conforming_use" and f["shape"] == "B"
+    assert f["kind"] == "unverifiable"
     assert result["funnel"]["measure_uses"] == 1
     assert result["funnel"]["governed_references"] == 1
     headline_consistent(result)
@@ -232,9 +263,12 @@ def test_agg_transformed_and_unapproved_are_counted(tmp_path):
     transformed = "SELECT AGG(net_revenue) * 2 AS net_revenue FROM main.finance.revenue_mv"
     unapproved = "SELECT AGG(net_revenue) AS net_revenue FROM main.finance.other_mv"
     result = run(tmp_path, _rows(transformed, unapproved))
-    kinds = sorted((f["kind"], tuple(codes(f))) for f in result["findings"])
+    kinds = sorted((engine_kind(f), tuple(engine_codes(f))) for f in result["findings"])
     assert kinds == [("definition_violation", ("transformed_governed_measure",)),
                      ("unverifiable", ("unapproved_view",))]
+    assert sorted((f["kind"], tuple(codes(f))) for f in result["findings"]) == [
+        ("suspected_difference", ("transformed_governed_measure",)),
+        ("unverifiable", ("unapproved_view",))]
     assert result["funnel"]["measure_uses"] == 2
     headline_consistent(result)
 

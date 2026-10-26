@@ -585,6 +585,13 @@ class Store:
         self._conn.commit()
 
     def verdicts_for_scan(self, scan_id: str) -> list[dict]:
+        """The scan's verdicts as the policy in force reports them
+        (semantix.conclusions). The ONE read path for every consumer — mcp,
+        cli, diff, publish, propose, report, receipts — so a store written
+        before the policy can never surface a suspended claim. Stored rows
+        are not rewritten; a mapped row carries `stored_verdict`."""
+        from semantix.conclusions import effective_row
+
         rows = self._conn.execute(
             "SELECT * FROM verdicts WHERE scan_id = ? ORDER BY severity DESC, concept_label",
             (scan_id,),
@@ -593,7 +600,7 @@ class Store:
         for r in rows:
             d = dict(r)
             d["evidence"] = json.loads(d.pop("evidence_json") or "{}")
-            out.append(d)
+            out.append(effective_row(d))
         return out
 
     def fingerprint_row(self, fingerprint_id: str) -> dict | None:
@@ -1147,6 +1154,12 @@ class Store:
         # aliasing is housekeeping. The defect was never the choice of primary;
         # it was that every OTHER verdict was silently dropped. They are all
         # carried in `verdicts` below.
+        # Every guard below decides on what the ENGINE concluded, so its
+        # disclosures still reach the receipt; the conclusions policy is
+        # applied once, at the end (semantix.conclusions).
+        from semantix.conclusions import effective_scan_fields, engine_row
+
+        verdicts = [engine_row(v) for v in verdicts]
         primary = min(
             verdicts,
             key=lambda v: VERDICT_PRECEDENCE.index(VerdictType(v["verdict"])),
@@ -1234,9 +1247,11 @@ class Store:
                 lineage.update(json.loads(row["source_columns_json"] or "[]"))
 
         divergences = [
-            v["summary"]
+            v["effective_summary"]
             for v in verdicts
-            if v["verdict"] in (VerdictType.CONTRADICTION.value, VerdictType.UNRESOLVED.value)
+            if v["verdict"] in (VerdictType.CONTRADICTION.value,
+                                VerdictType.SUSPECTED_DIVERGENCE.value,
+                                VerdictType.UNRESOLVED.value)
         ]
 
         # Scope limitation. A scan that could not read part of the estate
@@ -1294,7 +1309,8 @@ class Store:
         # silenced a real disagreement down to "unresolved".
         _, claim_ids = self.concept_members(concept_label)
         has_evidence = bool(definition_version) or (
-            status == VerdictType.CONTRADICTION.value and bool(claim_ids)
+            status in (VerdictType.CONTRADICTION.value,
+                       VerdictType.SUSPECTED_DIVERGENCE.value) and bool(claim_ids)
         )
         # SHADOW_METRIC asserts "computed at N sites in the estate" — an
         # EXISTENCE claim about a computed definition. Omitting it from this
@@ -1304,6 +1320,7 @@ class Store:
             VerdictType.CERTIFIED.value,
             VerdictType.ALIASING.value,
             VerdictType.CONTRADICTION.value,
+            VerdictType.SUSPECTED_DIVERGENCE.value,
             VerdictType.SHADOW_METRIC.value,
         )
         if evidence_required and not has_evidence:
@@ -1331,7 +1348,7 @@ class Store:
             status = VerdictType.UNRESOLVED.value
             divergences = divergences + [
                 f"computed under proof policy {policy or 'before semantix-proof/2'}; "
-                f"the policy in force is {POLICY_ID} — rescan to recertify"
+                f"the policy in force is {POLICY_ID} — rescan under it"
             ]
 
         # A receipt whose OWN freshness block reports a definition removed, or
@@ -1376,18 +1393,33 @@ class Store:
         # CERTIFIED entry in `verdicts` while the status was downgraded made
         # the signed receipt contradict itself, and a reader taking the more
         # favourable of the two would be back where they started.
+        #
+        # The policy in force is applied to each ENGINE verdict first — a
+        # positive is an experimental comparison (its proof record kept,
+        # labelled as such), a definitive negative a suspected divergence —
+        # and a downgrade is applied to that. Downgrading first (round
+        # seventeen's audit) skipped the mapping on every downgrade path: a
+        # pre-policy store signed "[downgraded] … canonically identical" with
+        # "superseded: CERTIFIED" and no experimental label.
+        effective_status = effective_scan_fields(status, 0, "", {})[0]
         emitted = []
         for v in sorted(verdicts, key=lambda v: -v["severity"]):
-            entry = {"verdict": v["verdict"], "severity": v["severity"],
-                     "summary": v["summary"]}
-            if (v.get("evidence") or {}).get("proof"):
-                entry["proof"] = v["evidence"]["proof"]
+            proof = (v.get("evidence") or {}).get("proof")
+            value, _, text, ev = effective_scan_fields(
+                v["verdict"], v["severity"], v["summary"],
+                {"proof": proof} if proof else {})
+            entry = {"verdict": value, "severity": v["severity"], "summary": text}
             if status != primary["verdict"] and (policy_changed or v["verdict"] in (
                     VerdictType.CERTIFIED.value, VerdictType.ALIASING.value)):
-                entry = {**entry, "verdict": status,
-                         "superseded": v["verdict"],
-                         "summary": f"[downgraded] {v['summary']}"}
+                if effective_status != value:
+                    entry["superseded"] = value
+                entry = {**entry, "verdict": effective_status,
+                         "summary": f"[downgraded] {text}"}
+            for key in ("experimental", "suspected"):
+                if key in ev:
+                    entry[key] = ev[key]
             emitted.append(entry)
+        status = effective_status
 
         receipt = Receipt(
             receipt_id="rcpt_" + uuid.uuid4().hex[:12],

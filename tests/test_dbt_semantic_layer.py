@@ -14,6 +14,8 @@ from semantix.adapters.dbt import load_dbt_detailed, load_dbt_metrics
 from semantix.engine import run_scan
 from semantix.models import VerdictType
 
+from .policy import engine_kinds
+
 
 def with_semantic_layer(acme, tmp_path):
     """The acme project plus a MetricFlow declaration of net_revenue that
@@ -113,9 +115,12 @@ def test_declared_dbt_metrics_reconcile_against_the_code(acme, tmp_path):
     assert VerdictType.SHADOW_METRIC not in kinds, (
         "a declared metric was reported as undeclared"
     )
-    assert VerdictType.CONTRADICTION in kinds, (
+    # The engine contradicts; under the conclusions policy that surfaces as a
+    # suspected divergence.
+    assert VerdictType.CONTRADICTION in engine_kinds(net_revenue), (
         "growth's model disagrees with the declaration and must be caught"
     )
+    assert VerdictType.SUSPECTED_DIVERGENCE in kinds
 
 
 def test_non_model_node_types_are_disclosed(acme, tmp_path):

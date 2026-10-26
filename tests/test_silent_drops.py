@@ -14,6 +14,8 @@ from semantix.adapters.dbt import load_dbt_detailed
 from semantix.engine import run_scan
 from semantix.models import VerdictType
 
+from .policy import engine_kinds
+
 
 def artifact(system, object_id, relation, sql="select 1", depends_on=()):
     return ComputedArtifact(system=system, object_id=object_id, relation=relation,
@@ -86,7 +88,11 @@ def test_two_definitions_of_one_relation_contradict_instead_of_certifying(tmp_pa
     assert result.artifacts == 2
     assert len(result.fingerprints) == 2
     assert "analytics.revenue" in result.duplicate_relations
-    assert any(v.verdict_type == VerdictType.CONTRADICTION for v in result.verdicts)
+    # The engine contradicts (and never certifies); under the conclusions
+    # policy that surfaces as a suspected divergence.
+    assert VerdictType.CONTRADICTION in engine_kinds(result.verdicts)
+    assert VerdictType.CERTIFIED not in engine_kinds(result.verdicts)
+    assert any(v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE for v in result.verdicts)
 
 
 def test_dbt_nodes_without_compiled_sql_are_surfaced_not_dropped(tmp_path, acme):

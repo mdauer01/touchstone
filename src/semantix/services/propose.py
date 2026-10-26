@@ -68,7 +68,7 @@ def build_proposals(store: Store, fmt: str = "metrics",
         if target is not None and label != target:
             continue
         types = verdict_types.get(label, set())
-        if "CONTRADICTION" in types:
+        if types & {"CONTRADICTION", "SUSPECTED_DIVERGENCE"}:
             kind = "resolution"
         elif "SHADOW_METRIC" in types:
             kind = "promotion"
@@ -152,8 +152,10 @@ def write_proposals(result: dict, out_dir: str | Path) -> dict:
 def render_memo(result: dict) -> str:
     lines = [f"# semantix resolution proposals — scan `{result['scan_id']}` "
              f"({result['scanned_at']})", "",
-             "Generated declarations describe what the code **computes today**. "
-             "For a contradiction with a declaration there are two honest "
+             "Generated declarations describe what the code computes **as semantix "
+             "reads it** — an interpretation that is not verified (positive verdicts "
+             "are suspended), so review each against its SQL. "
+             "For a suspected divergence from a declaration there are two honest "
              "resolutions and only a human can pick: **A** — the code is right and "
              "the ontology drifted, so replace the declaration; **B** — the "
              "ontology is right and the code drifted, so change the model. "
@@ -162,7 +164,7 @@ def render_memo(result: dict) -> str:
         lines += [f"_Filtered to concept `{result['filtered_to']}`; other concepts "
                   f"in this scan are not shown._", ""]
     if not result.get("verified"):
-        lines += ["_Round trips NOT verified: pass the estate sources "
+        lines += ["_Round trips NOT checked: pass the estate sources "
                   "(`--sql-dir`/`--dbt`/`--views` and `--catalog`) so each emitted "
                   "declaration is checked against the scan's registry before it "
                   "is offered._", ""]
@@ -172,7 +174,7 @@ def render_memo(result: dict) -> str:
                         " in the latest scan") + "._")
         return "\n".join(lines) + "\n"
     for p in result["proposals"]:
-        head = "CONTRADICTION" if p["kind"] == "resolution" else "SHADOW_METRIC"
+        head = "SUSPECTED DIVERGENCE" if p["kind"] == "resolution" else "SHADOW_METRIC"
         lines += [f"## {p['concept']} — {head} (sev {p['severity']})", ""]
         if p["declared"]:
             parts = []
@@ -183,22 +185,28 @@ def render_memo(result: dict) -> str:
                 parts.append(text)
             lines.append("Declared by: " + "; ".join(parts))
         elif p["kind"] == "resolution":
-            lines.append("Declared nowhere — the code disagrees with ITSELF across "
-                         "sites. Option A below would CREATE a declaration for one "
+            lines.append("Declared nowhere — the code appears to compute different "
+                         "definitions across sites (a suspected divergence, not "
+                         "verified). Option A below would CREATE a declaration for one "
                          "side; there is no Option B, because there is no "
                          "declaration to hold the code to.")
         else:
             lines.append("Declared nowhere.")
         if p["excluded_below_proof"]:
             lines.append(f"_{p['excluded_below_proof']} computed definition(s) "
-                         f"below proof grade were not proposed from._")
+                         f"outside the supported grammar were not proposed from._")
         lines.append("")
         multiple = len(p["candidates"]) > 1
         for i, cand in enumerate(p["candidates"], 1):
             sites = ", ".join(f"`{s}`" for s in cand["sites"])
             if cand["matches_declaration"]:
-                lines += [f"### {sites} already matches "
-                          f"{', '.join(cand['matches_declaration'])} — no change needed", ""]
+                # The match is the engine's canonical equality — suspended as
+                # a conclusion, so it never tells a reviewer to take no action.
+                lines += [f"### {sites} appears to match "
+                          f"{', '.join(cand['matches_declaration'])} (experimental "
+                          f"comparison, not a conclusion — positive verdicts are "
+                          f"suspended); review it against the declaration like any "
+                          f"other site", ""]
                 continue
             if p["kind"] == "resolution":
                 lines.append(f"### Option A{i if multiple else ''} · update the "
@@ -207,9 +215,11 @@ def render_memo(result: dict) -> str:
                 lines.append(f"### Proposed declaration · as computed at {sites}")
             if cand["declaration"] is not None:
                 lines.append(f"File: `{cand.get('file', '(not written)')}`"
-                             + ("  — round trip verified against the estate"
+                             + ("  — round trip re-scans to an experimental match "
+                                "with its source (a consistency check, not a "
+                                "verification)"
                                 if cand["declaration"].verified else
-                                "  — round trip NOT verified (no estate sources passed)"))
+                                "  — round trip NOT checked (no estate sources passed)"))
                 lines += ["", "```" + ("json" if cand["declaration"].format == "ossie" else "yaml"),
                           cand["declaration"].text.rstrip(), "```", ""]
             else:

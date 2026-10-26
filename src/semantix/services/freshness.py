@@ -186,7 +186,7 @@ def check_freshness(
                 "unchecked_systems": [],
                 "note": f"the scan's verdicts were computed under proof policy "
                         f"{policy or 'before semantix-proof/2'}; the policy in force "
-                        f"is {POLICY_ID} — rescan to recertify"}
+                        f"is {POLICY_ID} — rescan under it"}
 
     snapshot = store.scan_snapshot(scan["scan_id"])
     if not snapshot:

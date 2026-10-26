@@ -139,9 +139,9 @@ def annotate_with_execution(
             verdict.verdict_type = VerdictType.CONTRADICTION
             verdict.severity = max(verdict.severity, 95)
             verdict.summary = (
-                "Certification WITHDRAWN by execution: definitions the engine "
-                "proved canonically identical compute different values on the "
-                "same data. " + verdict.summary)
+                "Experimental equality FALSIFIED by execution: definitions the "
+                "engine's rules equated compute different values on the same seed "
+                "data (an observed discrepancy). " + verdict.summary)
 
         # The divergence suffix belongs ONLY on CONTRADICTION. The measurement
         # is concept-wide, so the "worst divergence" can be claim-vs-code —
@@ -156,7 +156,7 @@ def annotate_with_execution(
             if worst:
                 pct = f" ({worst['pct']:+.1f}%)" if worst["pct"] is not None else ""
                 verdict.summary += (
-                    f" Measured on seed data: {worst['vs']} totals "
+                    f" Observed discrepancy on seed data: {worst['vs']} totals "
                     f"{worst['actual']:,.0f} vs baseline {worst['baseline']:,.0f}"
                     f"{pct}.")
         # Additive, not elif: a CONTRADICTION whose worst divergence excludes

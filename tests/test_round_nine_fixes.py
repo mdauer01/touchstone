@@ -57,7 +57,10 @@ def test_mcp_stale_historical_receipt_is_never_current_use(edited_estate):
     assert verdict["describes"] == "as_of"
     assert verdict["historically_valid"] is True
     assert verdict["current_use"] is False
-    assert verdict["valid"] is True   # valid as the historical statement it makes
+    # A valid historical record, but its claim is not usable under the
+    # conclusions policy — so not valid for its stated use, an error result.
+    assert verdict["semantic_claim_usable"] is False
+    assert verdict["valid"] is False and verdict["trusted"] is False
 
 
 def test_mcp_unchecked_current_receipt_is_neither_current_nor_valid(edited_estate):
@@ -77,7 +80,13 @@ def test_mcp_fresh_current_receipt_is_current_use(acme, tmp_path):
                                         "catalog_path": str(acme / "catalog.yml")})
     receipt = _call(server, "attest", {"concept": "gmv"})
     verdict = _call(server, "verify_receipt", {"receipt": receipt})
-    assert verdict["current_use"] is True and verdict["valid"] is True
+    # The fresh live re-check still establishes what it can — an authentic
+    # signature over an unchanged estate — but under the conclusions policy
+    # positive claims are suspended, so the receipt is never usable now.
+    assert verdict["signature_authentic"] is True
+    assert verdict["estate_unchanged"] is True
+    assert verdict["semantic_claim_usable"] is False
+    assert verdict["current_use"] is False and verdict["valid"] is False
 
 
 # ------------------------------------------------------------- CLI endpoints
@@ -86,13 +95,18 @@ def test_cli_attest_never_calls_a_historical_receipt_current(edited_estate, caps
     assert main(["attest", "m", "--as-of", edited_estate["as_of"], "--db", edited_estate["db"]]) == 0
     reliance = [line for line in capsys.readouterr().err.splitlines() if line.startswith("reliance:")]
     assert reliance and "CURRENT" not in reliance[0] and "re-checked" not in reliance[0]
-    assert "valid for that instant only" in reliance[0]
+    # Wording under the reliance policy: a record of the instant, with the
+    # three reliance answers spelled out.
+    assert "a record of what was said about that instant only" in reliance[0]
+    assert "claim usable: no" in reliance[0]
 
 
 def test_cli_attest_unchecked_current_receipt_is_historical(edited_estate, capsys):
     assert main(["attest", "m", "--db", edited_estate["db"]]) == 0
     err = capsys.readouterr().err
-    assert "not valid for current use" in err and "valid for CURRENT use" not in err
+    # The reliance line now reads "NOT valid for current use (… claim usable: no)".
+    assert "NOT valid for current use" in err and "valid for CURRENT use" not in err
+    assert "claim usable: no" in err
 
 
 def test_cli_verify_receipt_require_current_rejects_historical(edited_estate, capsys):
@@ -100,8 +114,12 @@ def test_cli_verify_receipt_require_current_rejects_historical(edited_estate, ca
                  "--sql-dir", edited_estate["sql_dir"], "--metrics", edited_estate["metrics"]]) == 0
     receipt_path = edited_estate["tmp"] / "r.json"
     receipt_path.write_text(capsys.readouterr().out)
-    assert main(["verify-receipt", str(receipt_path)]) == 0           # valid historically
-    assert "valid for that instant only" in capsys.readouterr().out
+    # Historically valid, but its claim is suspended under the conclusions
+    # policy: not valid for its stated use either.
+    assert main(["verify-receipt", str(receipt_path)]) == 1
+    captured = capsys.readouterr()
+    assert "a record of what was said about that instant only" in captured.out
+    assert "a record of that instant only" in captured.err   # the stated-use warning
     assert main(["verify-receipt", str(receipt_path), "--require-current"]) == 1
 
 

@@ -9,11 +9,35 @@ is the entire point of ALIASING) the receipt named zero definitions, zero
 lineage, and was signed anyway.
 """
 
+import re
+
 import pytest
 
 from semantix.engine import run_scan
 from semantix.models import VerdictType
 from semantix.signing import verify_receipt_dict
+
+from .policy import engine_verdict
+
+_EXPERIMENTAL = re.compile(
+    r"^Experimental comparison, not a conclusion — (\w+) under the experimental rules")
+
+
+def _engine_kinds(receipt) -> set[str]:
+    """The engine's verdicts a receipt states. Under the conclusions policy a
+    receipt lists effective verdicts (UNRESOLVED / SUSPECTED_DIVERGENCE) and
+    carries the engine's result in each summary."""
+    out = set()
+    for v in receipt.verdicts:
+        m = _EXPERIMENTAL.match(v["summary"])
+        if m:
+            out.add(m.group(1).upper())
+        elif v["verdict"] == VerdictType.SUSPECTED_DIVERGENCE.value:
+            assert v["summary"].startswith("Suspected divergence"), v["summary"]
+            out.add(VerdictType.CONTRADICTION.value)
+        else:
+            out.add(v["verdict"])
+    return out
 
 
 @pytest.fixture
@@ -44,7 +68,10 @@ def test_certified_receipt_names_its_definitions(scanned):
     zero definitions and zero source columns."""
     _, store = scanned
     receipt = store.issue_receipt("gmv")
-    assert receipt.status == VerdictType.CERTIFIED.value
+    # Positive verdicts are suspended: the receipt states UNRESOLVED and
+    # carries the engine's certification as an experimental comparison.
+    assert receipt.status == VerdictType.UNRESOLVED.value
+    assert VerdictType.CERTIFIED.value in _engine_kinds(receipt)
     assert receipt.definition_version, "CERTIFIED with no definitions is evidence-free"
     assert receipt.lineage, "CERTIFIED with no lineage is evidence-free"
     assert {d["relation"] for d in receipt.definition_version} == {
@@ -58,12 +85,18 @@ def test_certified_receipt_names_its_definitions(scanned):
 def test_no_certified_receipt_is_ever_signed_without_evidence(scanned):
     """The backstop, independent of why the evidence went missing."""
     _, store = scanned
+    checked = 0
     for label in ("gmv", "net_revenue", "refund_rate", "customer_ltv"):
         receipt = store.issue_receipt(label)
         if receipt is None:
             continue
-        if receipt.status == VerdictType.CERTIFIED.value:
+        assert receipt.status != VerdictType.CERTIFIED.value     # suspended
+        # The engine's certification, now carried as an experimental
+        # comparison, still never travels without evidence.
+        if VerdictType.CERTIFIED.value in _engine_kinds(receipt):
+            checked += 1
             assert receipt.definition_version, f"{label}: signed CERTIFIED with no evidence"
+    assert checked, "the backstop must exercise at least one certified concept"
 
 
 def test_receipt_exposes_every_verdict_not_just_the_primary(scanned):
@@ -72,7 +105,10 @@ def test_receipt_exposes_every_verdict_not_just_the_primary(scanned):
     _, store = scanned
     receipt = store.issue_receipt("gmv")
     kinds = {v["verdict"] for v in receipt.verdicts}
-    assert kinds == {VerdictType.CERTIFIED.value, VerdictType.ALIASING.value}
+    # Both are reported, as experimental comparisons under the policy.
+    assert kinds == {VerdictType.UNRESOLVED.value}
+    assert len(receipt.verdicts) == 2
+    assert _engine_kinds(receipt) == {VerdictType.CERTIFIED.value, VerdictType.ALIASING.value}
 
 
 def test_a_contradiction_can_never_be_headlined_as_anything_else(scanned):
@@ -80,18 +116,26 @@ def test_a_contradiction_can_never_be_headlined_as_anything_else(scanned):
     answer to "can I trust this number"."""
     _, store = scanned
     receipt = store.issue_receipt("net_revenue")
-    assert receipt.status == VerdictType.CONTRADICTION.value
+    # Under the conclusions policy the disagreement headlines as a suspected
+    # divergence — the engine's CONTRADICTION, carried in its evidence.
+    assert receipt.status == VerdictType.SUSPECTED_DIVERGENCE.value
     assert receipt.known_divergences
+    rows = [r for r in store.verdicts_for_scan(receipt.scan_id)
+            if r["concept_label"] == "net_revenue" and r["verdict"] == receipt.status]
+    assert rows and {engine_verdict(r) for r in rows} == {VerdictType.CONTRADICTION}
+    assert VerdictType.CONTRADICTION.value in _engine_kinds(receipt)
 
 
 def test_secondary_verdicts_are_never_silently_dropped(scanned):
-    """gmv is CERTIFIED *and* ALIASING. CERTIFIED is the right headline — the
-    number is trustworthy — but the duplicate implementation must still reach
-    whoever reads the receipt."""
+    """gmv is CERTIFIED *and* ALIASING by the engine. CERTIFIED was the
+    headline before positive verdicts were suspended; whatever the headline,
+    the duplicate implementation must still reach whoever reads the receipt."""
     _, store = scanned
     receipt = store.issue_receipt("gmv")
-    assert receipt.status == VerdictType.CERTIFIED.value
-    assert VerdictType.ALIASING.value in {v["verdict"] for v in receipt.verdicts}
+    # Under the conclusions policy nothing headlines as CERTIFIED; both the
+    # certification and the duplicate implementation still reach the reader.
+    assert receipt.status == VerdictType.UNRESOLVED.value
+    assert {VerdictType.CERTIFIED.value, VerdictType.ALIASING.value} <= _engine_kinds(receipt)
 
 
 def test_orphan_claim_receipt_is_honest_about_having_no_computed_definition(scanned):

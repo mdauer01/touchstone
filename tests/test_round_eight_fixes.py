@@ -23,6 +23,8 @@ from semantix.extraction.sqlutil import split_group
 from semantix.models import PROOF_LEVELS, Provenance, VerdictType
 from semantix.signing import receipt_trust
 
+from .policy import engine_kinds, engine_verdict
+
 
 def _estate(tmp_path, models: dict, catalog: str, metrics: str | None = None, **kw):
     root = tmp_path / "estate"
@@ -58,7 +60,8 @@ def test_prod_and_dev_never_certify_as_one_table(tmp_path):
     store.close()
     nodes = {fp.relation: fp.core.join_nodes for fp in result.fingerprints}
     assert nodes["analytics.m_prod"] != nodes["analytics.m_dev"]
-    assert VerdictType.CERTIFIED not in _kinds(result, "m")
+    # The ENGINE must not certify them (not merely the policy hiding it).
+    assert VerdictType.CERTIFIED not in engine_kinds(result.verdicts, "m")
 
 
 FULL_CATALOG = ("prod:\n  raw:\n    orders:\n      amount: DOUBLE\n"
@@ -75,7 +78,8 @@ def test_execution_context_resolves_the_short_declaration(tmp_path):
                                        default_database="prod"))
     store.close()
     (v,) = [v for v in result.verdicts if v.concept_label == "m"]
-    assert v.verdict_type == VerdictType.CONTRADICTION
+    assert engine_verdict(v) == VerdictType.CONTRADICTION
+    assert v.verdict_type == VerdictType.SUSPECTED_DIVERGENCE   # conclusions policy
     assert "dev.raw.orders" in v.summary
 
 
@@ -83,7 +87,7 @@ def test_short_catalog_without_its_own_columns_is_unresolved(tmp_path):
     result, store = run_scan(**_estate(tmp_path, PROD_DEV, SHORT_CATALOG, DECLARED_M,
                                        default_database="prod"))
     store.close()
-    kinds = _kinds(result, "m")
+    kinds = engine_kinds(result.verdicts, "m")
     assert VerdictType.CERTIFIED not in kinds and VerdictType.CONTRADICTION not in kinds
 
 
@@ -124,7 +128,8 @@ def test_reassociated_declaration_contradicts(tmp_path):
         "db:\n  main:\n    t:\n      a: DOUBLE\n      b: DOUBLE\n      c: DOUBLE\n",
         "version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n    expr: \"sum(a + c + b)\"\n"))
     store.close()
-    assert _kinds(result, "m") == {VerdictType.CONTRADICTION}
+    assert engine_kinds(result.verdicts, "m") == {VerdictType.CONTRADICTION}
+    assert _kinds(result, "m") == {VerdictType.SUSPECTED_DIVERGENCE}   # conclusions policy
 
 
 # ------------------------------------------- finding 3: the parser is trusted
@@ -156,7 +161,8 @@ def test_unqualified_parser_version_withholds_certification(tmp_path, monkeypatc
                              catalog_path=str(acme / "catalog.yml"),
                              db_path=str(tmp_path / "s.db"))
     store.close()
-    assert not any(v.verdict_type in (VerdictType.CERTIFIED, VerdictType.ALIASING)
+    # The ENGINE withholds certification (not merely the conclusions policy).
+    assert not any(engine_verdict(v) in (VerdictType.CERTIFIED, VerdictType.ALIASING)
                    for v in result.verdicts)
     assert any("sqlglot 99.0.0" in v.summary for v in result.verdicts)
     assert result.stats()["toolchain"]["qualified"] is False
@@ -200,14 +206,24 @@ def test_edited_sql_without_recheck_is_not_valid_for_current_use(tmp_path):
     assert fresh["status"] == "stale"
     rechecked = store.issue_receipt("m", freshness=fresh).as_dict()
     store.close()
-    assert receipt_trust(rechecked)[0] is False
+    trusted, warnings = receipt_trust(rechecked)
+    assert trusted is False
+    # Distrusted for the edit itself, not only because positive verdicts are
+    # suspended under the conclusions policy.
+    assert any("the estate has moved" in w for w in warnings), warnings
 
 
 def test_as_of_receipts_remain_historical_attestations():
     receipt = {"status": "CERTIFIED", "as_of": "2026-01-01T00:00:00Z",
                "freshness": {"status": "unchecked"}}
     trusted, warnings = receipt_trust(receipt)
-    assert trusted and "valid for that instant" in warnings[0]
+    assert "a record of that instant only" in warnings[0]
+    # Still a valid historical record; not valid for its stated use only
+    # because its claim (CERTIFIED) is suspended under the conclusions policy.
+    from semantix.signing import assess_receipt
+    a = assess_receipt(receipt)
+    assert a.historical and not a.semantic_claim_usable
+    assert trusted is False and any("suspended" in w for w in warnings)
 
 
 # --------------------------------------------- finding 5: honest coverage

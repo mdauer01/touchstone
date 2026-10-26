@@ -6,6 +6,11 @@ channel grouping) from a definition quietly changed, and must say
 its rules. Each case below is one acceptance criterion; none may be
 weakened to make an implementation pass.
 
+While positive verdicts are suspended (semantix.conclusions) a conforming
+use is REPORTED as unverifiable (an experimental match) and a violation as a
+suspected difference; each case pins the monitor's own judgment through
+tests/policy.py and, where it adds something, the user-facing label too.
+
 Authority: the approved metric view main.finance.revenue_mv,
     net_revenue = SUM(amount) - SUM(refund_amount), view filter
     status = 'completed', dimensions country, channel, order_date and
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 import pytest
 import yaml
@@ -27,6 +33,8 @@ from semantix.engine import run_scan
 from semantix.services.history import read_history
 from semantix.services.monitor import build_registry, monitor_history
 from semantix.services.pilot import load_pilot
+
+from .policy import engine_codes, engine_conformance, engine_funnel, engine_kind
 
 D = "databricks"
 CATALOG = """main:
@@ -130,7 +138,9 @@ def test_approved_slice_and_grouping_conform_raw_table(tmp_path):
     q = (f"SELECT channel, {GOVERNED} AS net_revenue FROM main.finance.orders "
          f"WHERE status = 'completed' AND country = 'US' GROUP BY channel")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "conforming_use" and f["conformance"] == "conforming"
+    assert engine_kind(f) == "conforming_use" and engine_conformance(f) == "conforming"
+    # Reported as an experimental match, never as a conclusion.
+    assert f["kind"] == "unverifiable" and codes(f) == ["positive_suspended"]
     assert f["shape"] == "A" and f["governed_reference"] is False
     assert any("country" in s for s in f["variation"]["slices"])
     assert any("channel" in g for g in f["variation"]["grain"])
@@ -142,25 +152,25 @@ def test_approved_slice_and_grouping_conform_metric_view(tmp_path):
          "FROM main.finance.revenue_mv WHERE country = 'US' GROUP BY channel")
     result = run(tmp_path, _rows(q))
     f = only(result)
-    assert f["kind"] == "conforming_use" and f["shape"] == "B"
+    assert engine_kind(f) == "conforming_use" and f["shape"] == "B"
     assert f["governed_reference"] is True
     assert f["identity_source"] == "measure_invocation"
     assert result["funnel"]["governed_references"] == 1
-    assert result["funnel"]["conforming_by_shape"]["B"] == 1
+    assert engine_funnel(result["funnel"])["conforming_by_shape"]["B"] == 1
 
 
 def test_month_dimension_and_relative_date_slice_conform(tmp_path):
     q = (f"SELECT DATE_TRUNC('MONTH', order_date) AS m, {GOVERNED} AS net_revenue "
          f"FROM main.finance.orders WHERE status = 'completed' "
          f"AND order_date >= CURRENT_DATE - INTERVAL 30 DAYS GROUP BY 1")
-    assert only(run(tmp_path, _rows(q)))["kind"] == "conforming_use"
+    assert engine_kind(only(run(tmp_path, _rows(q)))) == "conforming_use"
 
 
 def test_exact_definition_conforms_whatever_the_syntax(tmp_path):
     q = (f"WITH o AS (SELECT * FROM main.finance.orders) "
          f"SELECT {GOVERNED} AS net_revenue FROM o WHERE status = 'completed'")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "conforming_use" and f["shape"] == "exact"
+    assert engine_kind(f) == "conforming_use" and f["shape"] == "exact"
 
 
 # -------------------------------------------- definition changes are caught
@@ -169,26 +179,29 @@ def test_required_status_weakened_through_or_never_conforms(tmp_path):
     q = (f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders "
          f"WHERE status = 'completed' OR country = 'US'")
     f = only(run(tmp_path, _rows(q)))
-    assert f["conformance"] != "conforming"
-    assert f["kind"] == "definition_violation"
-    assert codes(f) == ["required_filter_not_preserved"]
+    assert engine_conformance(f) != "conforming"
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) == ["required_filter_not_preserved"]
     assert "OR" in f["reasons"][0]["detail"]
 
 
 def test_refund_subtraction_removed_is_a_violation(tmp_path):
     q = "SELECT SUM(amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed'"
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "definition_violation"
-    assert codes(f) == ["measure_changed"]
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) == ["measure_changed"]
     assert f["severity"] >= 60
 
 
 def test_transformed_governed_measure_never_conforms(tmp_path):
     q = "SELECT MEASURE(net_revenue) * 2 AS net_revenue FROM main.finance.revenue_mv"
     f = only(run(tmp_path, _rows(q)))
-    assert f["conformance"] != "conforming"
-    assert f["kind"] == "definition_violation"
-    assert codes(f) == ["transformed_governed_measure"]
+    assert engine_conformance(f) != "conforming"
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) == ["transformed_governed_measure"]
     assert f["governed_reference"] is True   # references, does not preserve
 
 
@@ -196,8 +209,9 @@ def test_raw_table_transformation_is_named_as_such(tmp_path):
     q = (f"SELECT ({GOVERNED}) * 2 AS net_revenue FROM main.finance.orders "
          f"WHERE status = 'completed'")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "definition_violation"
-    assert codes(f) == ["transformed_governed_measure"]
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) == ["transformed_governed_measure"]
 
 
 @pytest.mark.parametrize("wrapper", ["ROUND({}, 2)", "CAST({} AS DOUBLE)", "({}) * 1",
@@ -219,22 +233,24 @@ def test_a_wrapper_that_may_preserve_the_value_is_not_an_accusation(tmp_path, wr
 def test_required_filter_missing_broadened_or_replaced(tmp_path, where, code):
     q = f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders WHERE {where}"
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "definition_violation" and codes(f) == [code]
+    assert engine_kind(f) == "definition_violation" and engine_codes(f) == [code]
+    assert f["kind"] == "suspected_difference"
 
 
 def test_slice_on_declared_numeric_dimension_conforms(tmp_path):
     q = (f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders "
          f"WHERE status = 'completed' AND amount > 0")
     extra = "  - name: amount\n    expr: amount\n"
-    assert only(run(tmp_path, _rows(q), extra_dims=extra))["kind"] == "conforming_use"
+    assert engine_kind(only(run(tmp_path, _rows(q), extra_dims=extra))) == "conforming_use"
 
 
 def test_slice_on_undeclared_column_is_unpermitted(tmp_path):
     q = (f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders "
          f"WHERE status = 'completed' AND amount > 0")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "definition_violation"
-    assert codes(f) == ["unpermitted_slice"]
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) == ["unpermitted_slice"]
 
 
 def test_unnamed_violating_near_miss_is_only_a_candidate(tmp_path):
@@ -267,17 +283,19 @@ def test_short_table_name_with_unknown_context_is_unverifiable(tmp_path):
 def test_short_table_name_resolves_from_its_own_row(tmp_path):
     q = f"SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'"
     f = only(run(tmp_path, _rows(q, catalog="main", schema="finance")))
-    assert f["kind"] == "conforming_use"
+    assert engine_kind(f) == "conforming_use"
 
 
 def test_short_table_name_resolves_from_asserted_context_only(tmp_path):
     q = f"SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'"
     stated = {"catalog": "main", "schema": "finance"}
     f = only(run(tmp_path, _rows(q), context={**stated, "asserted_for_all_executions": True}))
-    assert f["kind"] == "conforming_use"
+    assert engine_kind(f) == "conforming_use"
     (tmp_path / "s.db").unlink()
     result = run(tmp_path, _rows(q), context={**stated, "asserted_for_all_executions": False})
+    # engine_kind: genuinely unverifiable, not an experimental match.
     assert result["findings"][0]["kind"] == "unverifiable"
+    assert engine_kind(result["findings"][0]) == "unverifiable"
 
 
 @pytest.mark.parametrize("tail, code", [
@@ -311,9 +329,10 @@ def test_sql_source_view_is_unverifiable_not_accused(tmp_path):
     view = VIEW.format(extra="").replace(
         "source: main.finance.orders",
         "source: SELECT * FROM main.finance.orders WHERE amount > 0")
-    q = f"SELECT SUM(amount) AS net_revenue FROM main.finance.orders"
+    q = "SELECT SUM(amount) AS net_revenue FROM main.finance.orders"
     f = only(run(tmp_path, _rows(q), view_text=view))
-    assert f["kind"] == "unverifiable"
+    # engine_kind: not an experimental match, which is also reported unverifiable.
+    assert f["kind"] == "unverifiable" and engine_kind(f) == "unverifiable"
     assert "could not be read" in f["summary"]
 
 
@@ -331,7 +350,8 @@ def test_execution_without_start_time_is_unverifiable(tmp_path):
          f"WHERE status = 'completed'")
     rows = [{"statement_id": "s0", "statement_text": q}]
     result = run(tmp_path, rows)
-    assert only(result)["kind"] == "unverifiable"
+    # engine_kind: not an experimental match, which is also reported unverifiable.
+    assert only(result)["kind"] == "unverifiable" and engine_kind(only(result)) == "unverifiable"
     assert result["history"]["executions_without_time"] == 1
 
 
@@ -344,7 +364,9 @@ def test_compare_against_current_labels_every_finding(tmp_path):
     assert result["findings"]
     for f in result["findings"]:
         assert "not verified as of execution time" in f["compare_against"]
-    assert {f["kind"] for f in result["findings"]} == {"conforming_use", "definition_violation"}
+    assert {engine_kind(f) for f in result["findings"]} == {"conforming_use",
+                                                            "definition_violation"}
+    assert {f["kind"] for f in result["findings"]} == {"unverifiable", "suspected_difference"}
 
 
 # ------------------------------------------------------------ intake, pilot
@@ -414,14 +436,24 @@ def test_headline_counts_partition_every_measure_use(tmp_path):
         f"SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'",
     ]
     result = run(tmp_path, _rows(*queries))
-    fn = result["funnel"]
+    shown = result["funnel"]
+    fn = engine_funnel(shown)
     assert fn["measure_uses"] == 4
     assert fn["governed_references"] == 1
-    assert fn["conforming"] == 2 and fn["violations"] == 1 and fn["unverifiable"] == 1
+    # Under the conclusions policy the experimental matches (and contested
+    # uses) are counted INSIDE `unverifiable`; the uses outside the rules are
+    # what remains — still exactly one (the short table name).
+    outside_rules = fn["unverifiable"] - fn["conforming"] - fn["contested"]
+    assert fn["conforming"] == 2 and fn["violations"] == 1 and outside_rules == 1
+    assert shown["unverifiable_by_reason"] == {
+        "execution context": 1, "experimental match (positive verdicts suspended)": 2}
     assert fn["checked"] == 3
     partition = (fn["conforming"] + fn["contested"] + fn["violations"] + fn["candidates"]
-                 + fn["unregistered"] + fn["unverifiable"] + fn["below_threshold"])
+                 + fn["unregistered"] + outside_rules + fn["below_threshold"])
     assert partition == fn["measure_uses"]
+    # The user-facing buckets partition the same uses.
+    assert (shown["suspected_differences"] + shown["candidates"] + shown["unregistered"]
+            + shown["unverifiable"] + shown["below_threshold"]) == shown["measure_uses"]
 
 
 def test_cli_pilot_run_reports_denominators_and_gates_on_violations(tmp_path, capsys):
@@ -439,9 +471,17 @@ def test_cli_pilot_run_reports_denominators_and_gates_on_violations(tmp_path, ca
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "measure uses: 2" in out
-    assert "conforming" in out and "1/2" in out
-    assert "checked = conforming + violations" in out
-    assert "[VIOLATION" in out and "[CONFORMING" in out
+    # The engine's denominators: one of two uses conforms (shown as an
+    # experimental match inside `unverifiable`), one violates (a suspected
+    # difference). The policy replaced the "checked = conforming +
+    # violations" line with the statement that nothing below is a conclusion.
+    assert re.search(r"suspected differences \(named metric\)\s+1/2", out)
+    assert re.search(r"unverifiable\s+1/2 \(50%\)\s+experimental match \(positive verdicts "
+                     r"suspended\) 1", out)
+    assert "(of the unverifiable: 1 matched under the experimental rules" in out
+    assert "positive verdicts are suspended" in out and "nothing below is a conclusion" in out
+    assert "[SUSPECTED" in out and "experimental match, not a conclusion — conforms" in out
+    assert "[VIOLATION" not in out and "[CONFORMING" not in out
     assert "not covered:" in out
     assert main(args + ["--fail-on-alt"]) == 1
 
@@ -457,11 +497,11 @@ def test_contradictory_slice_is_never_a_missing_filter(tmp_path):
     q = (f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders WHERE "
          f"status = 'completed' AND channel = 'web' AND NOT channel = 'web'")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] != "definition_violation"
-    if f["kind"] == "unverifiable":
-        assert codes(f) == ["predicate_unsupported"]
+    assert engine_kind(f) != "definition_violation" and f["kind"] != "suspected_difference"
+    if engine_kind(f) == "unverifiable":
+        assert engine_codes(f) == ["predicate_unsupported"]
     else:
-        assert f["kind"] == "conforming_use" and len(f["variation"]["slices"]) == 2
+        assert engine_kind(f) == "conforming_use" and len(f["variation"]["slices"]) == 2
 
 
 def test_required_filter_moved_into_the_measure_is_not_an_accusation(tmp_path):
@@ -484,7 +524,7 @@ def test_short_metric_view_name_is_a_context_question(tmp_path):
     assert f["kind"] == "unverifiable" and codes(f) == ["context_unresolved"]
     (tmp_path / "s.db").unlink()
     f = only(run(tmp_path, _rows(q, catalog="main", schema="finance")))
-    assert f["kind"] == "conforming_use" and f["governed_reference"] is True
+    assert engine_kind(f) == "conforming_use" and f["governed_reference"] is True
 
 
 def test_rollup_is_an_unsupported_shape_not_an_undeclared_dimension(tmp_path):
@@ -505,11 +545,11 @@ def test_explicit_tag_outranks_the_alias(tmp_path):
     q = (f"-- semantix: metric=net_revenue\nSELECT {GOVERNED} AS rev FROM "
          f"main.finance.orders WHERE status = 'completed' AND country = 'US'")
     f = only(run(tmp_path, _rows(q)))
-    assert f["kind"] == "conforming_use" and f["identity_source"] == "tag"
+    assert engine_kind(f) == "conforming_use" and f["identity_source"] == "tag"
 
 
 def test_asset_map_names_the_metric_of_a_dashboard(tmp_path):
-    q = f"SELECT SUM(amount) AS total FROM main.finance.orders WHERE status = 'completed'"
+    q = "SELECT SUM(amount) AS total FROM main.finance.orders WHERE status = 'completed'"
     root, models = make_pilot(tmp_path, _rows(q, dashboard_id="d42"))
     manifest = yaml.safe_load((root / "pilot.yml").read_text())
     manifest["asset_map"] = {"dashboard:d42": "net_revenue"}
@@ -524,7 +564,8 @@ def test_asset_map_names_the_metric_of_a_dashboard(tmp_path):
                              min_runs=1, pilot=pilot)
     store.close()
     f = only(result)
-    assert f["kind"] == "definition_violation" and f["identity_source"] == "asset_map"
+    assert engine_kind(f) == "definition_violation" and f["identity_source"] == "asset_map"
+    assert f["kind"] == "suspected_difference"
     assert f["assets"] == ["dashboard:d42"]
 
 
@@ -533,11 +574,14 @@ def test_governed_measure_under_another_metrics_name_is_flagged(tmp_path):
     q = ("SELECT MEASURE(net_revenue) AS gross_revenue FROM main.finance.revenue_mv")
     result = run(tmp_path, _rows(q), view_text=view)
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("definition_violation", "gross_revenue")
-    assert codes(f) == ["presented_under_other_name"]
-    assert f["calculation_matches"] == "main.finance.revenue_mv/net_revenue (conforming)"
+    assert (engine_kind(f), f["concept"]) == ("definition_violation", "gross_revenue")
+    assert f["kind"] == "suspected_difference"
+    assert engine_codes(f) == ["presented_under_other_name"]
+    # Named in policy words — never "conforming" on a user-facing finding.
+    assert f["calculation_matches"] == "main.finance.revenue_mv/net_revenue (experimental match)"
     assert f["governed_reference"] is True
-    assert result["funnel"]["violations"] == 1 and result["funnel"]["conforming"] == 0
+    fn = engine_funnel(result["funnel"])
+    assert fn["violations"] == 1 and fn["conforming"] == 0
 
 
 def test_metric_view_outside_a_pilot_is_not_a_governed_reference(tmp_path):
@@ -571,9 +615,11 @@ def test_without_a_pilot_slices_are_unverifiable_and_drops_are_violations(tmp_pa
     dropped = f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders"
     result = monitor_history(store, ";\n".join([sliced, dropped]), registry, D, min_runs=1)
     store.close()
-    by_kind = {f["kind"]: f for f in result["findings"]}
-    assert codes(by_kind["unverifiable"]) == ["dimensions_not_modelled"]
-    assert codes(by_kind["definition_violation"]) == ["required_filter_missing"]
+    by_kind = {engine_kind(f): f for f in result["findings"]}
+    assert sorted(by_kind) == ["definition_violation", "unverifiable"]
+    assert engine_codes(by_kind["unverifiable"]) == ["dimensions_not_modelled"]
+    assert engine_codes(by_kind["definition_violation"]) == ["required_filter_missing"]
+    assert by_kind["definition_violation"]["kind"] == "suspected_difference"
     assert "not verified as of execution time" in by_kind["unverifiable"]["compare_against"]
 
 
@@ -619,9 +665,11 @@ def test_cli_pulls_history_from_a_warehouse_with_named_columns(tmp_path, capsys)
                  "--sql-dir", str(models), "--catalog", str(root / "catalog.yml"),
                  "--db", db, "--min-runs", "1", "--json", str(tmp_path / "f.json")]) == 0
     result = json.loads((tmp_path / "f.json").read_text())
-    kinds = sorted(f["kind"] for f in result["findings"])
+    kinds = sorted(engine_kind(f) for f in result["findings"])
     # Row 1 resolves from its own context; row 2 has none and stays unverifiable.
     assert kinds == ["conforming_use", "unverifiable"]
+    # Under the conclusions policy both are reported as unverifiable.
+    assert sorted(f["kind"] for f in result["findings"]) == ["unverifiable", "unverifiable"]
 
 
 def test_cli_context_assertion_is_explicit(tmp_path, capsys):
@@ -637,9 +685,12 @@ def test_cli_context_assertion_is_explicit(tmp_path, capsys):
             "--default-database", "main", "--default-schema", "finance"]
     capsys.readouterr()
     main(base + ["--json", str(tmp_path / "a.json")])
-    assert json.loads((tmp_path / "a.json").read_text())["findings"][0]["kind"] == "unverifiable"
+    first = json.loads((tmp_path / "a.json").read_text())["findings"][0]
+    # engine_kind: genuinely unverifiable, not an experimental match.
+    assert first["kind"] == "unverifiable" and engine_kind(first) == "unverifiable"
     main(base + ["--assert-context-for-all-executions", "--json", str(tmp_path / "b.json")])
-    assert json.loads((tmp_path / "b.json").read_text())["findings"][0]["kind"] == "conforming_use"
+    assert engine_kind(json.loads((tmp_path / "b.json").read_text())["findings"][0]) == \
+        "conforming_use"
 
 
 # ---------------------------------------------------------- adapter

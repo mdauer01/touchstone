@@ -16,7 +16,7 @@
                        [--dbt <dir> | --sql-dir <dir> | --views <dump.sql>]
                        [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
     semantix bench     [--dialects duckdb,databricks,snowflake,bigquery]
-    semantix oracle    [--full]          # execute every pair the engine would certify equal
+    semantix oracle    [--full]          # execute every pair the experimental rules equate
     semantix catalog   --warehouse duckdb:///wh.db --out catalog.yml
     semantix propose   --db semantix.db --out proposals/ [--format metrics|ossie|uc-metrics]
     semantix monitor   --db semantix.db --history-file history.sql
@@ -179,8 +179,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_bench = sub.add_parser(
         "bench",
-        help="open equivalence benchmark across a SQL-dialect matrix: detection "
-             "rate, known gaps, and the zero-false-certification gate",
+        help="development benchmark of the experimental equality rules across a "
+             "SQL-dialect matrix: detection rate, known gaps, and the zero-false-"
+             "equality gate",
     )
     p_bench.add_argument("--corpus", help="corpus YAML (default: shipped corpus)")
     p_bench.add_argument(
@@ -192,10 +193,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_publish = sub.add_parser(
         "publish",
-        help="write signed receipts into a warehouse's AGENTS.ROOT "
-             "(write-back certification into Agents Schema)",
+        help="write signed receipts, their policy assessments and the verdicts "
+             "projection into a warehouse (AGENTS.ROOT + semantix.verdicts)",
     )
     p_publish.add_argument("--db", default="semantix.db")
+    p_publish.add_argument(
+        "--refresh-policy", dest="refresh_policy", action="store_true",
+        help="do not issue anything: bring rows published EARLIER under the policy "
+             "in force (verdicts mapped, usable_for_reliance = false; receipts left "
+             "unchanged with an assessment row beside each)")
     # Estate sources: when given, every published receipt embeds a LIVE
     # freshness check instead of `unchecked`.
     _add_estate_args(p_publish)
@@ -241,8 +247,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_oracle = sub.add_parser(
         "oracle",
-        help="execute every query pair the engine would certify as equal "
-             "against adversarial DuckDB datasets; exits 1 on any disagreement")
+        help="development check: execute every query pair the experimental rules "
+             "equate against adversarial DuckDB datasets; exits 1 on any disagreement")
     p_oracle.add_argument("--full", action="store_true",
                           help="full cross product (~15k queries, ~40s) instead "
                                "of the one-dimension-at-a-time default")
@@ -283,8 +289,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_mon = sub.add_parser(
         "monitor",
-        help="judge executed SQL against authoritative metric definitions: "
-             "conforming uses, definition violations, and what could not be read")
+        help="compare executed SQL with authoritative metric definitions: suspected "
+             "differences, candidates, and what could not be judged (matches are "
+             "experimental comparisons while positive verdicts are suspended)")
     p_mon.add_argument("--pilot", dest="pilot_dir",
                        help="pilot package directory (pilot.yml): approved metric "
                             "views with definition snapshots and windows, the "
@@ -335,8 +342,10 @@ def main(argv: list[str] | None = None) -> int:
                             "a definition in use (default 2)")
     p_mon.add_argument("--json", dest="json_out", help="write full findings JSON here")
     p_mon.add_argument("--fail-on-alt", dest="fail_on_alt", action="store_true",
-                       help="exit 1 when a definition violation is found (candidates "
-                            "and unverifiable uses never fail the gate)")
+                       help="exit 1 when a suspected difference from an authoritative "
+                            "definition is found (a triage gate: the difference is "
+                            "suspected, not verified; candidates and unverifiable "
+                            "uses never fail it)")
     p_mon.add_argument("--db", default="semantix.db")
 
     args = parser.parse_args(argv)
@@ -502,8 +511,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(f"\n  execution: {ex['measured']} concept(s) measured "
               f"against {ex['seed']} ({ex['engine']})")
         if ex["collisions"]:
-            print(f"    !! {ex['collisions']} canonical equality(ies) FALSIFIED by "
-                  "the data — a certification was withdrawn")
+            print(f"    !! {ex['collisions']} experimental equality(ies) FALSIFIED by "
+                  "the data — an observed discrepancy on the seed data")
         for declined in ex["declined"]:
             print(f"    - not measured: {declined}")
         for err in ex["errors"]:
@@ -535,7 +544,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if args.min_coverage is not None and stats["coverage_pct"] < args.min_coverage:
         print(f"\nFAILED: verifiable-measure coverage {stats['coverage_pct']}% is "
               f"below the required {args.min_coverage}% — most measures in this "
-              f"estate are below proof grade, so its verdicts do not describe it",
+              f"estate are outside the supported grammar, so its results do not "
+              f"describe it",
               file=sys.stderr)
         return 1
     if args.fail_on:
@@ -553,7 +563,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             print(f"\nFAILED: {unread} artifact(s) could not be read, so this scan "
                   "cannot speak for the whole estate", file=sys.stderr)
             return 1
-        bad = {VerdictType.CONTRADICTION}
+        bad = {VerdictType.CONTRADICTION, VerdictType.SUSPECTED_DIVERGENCE}
         if args.fail_on == "any":
             bad |= {VerdictType.ORPHAN_CLAIM, VerdictType.SHADOW_METRIC, VerdictType.UNRESOLVED}
         failing = [v for v in result.verdicts if v.verdict_type in bad]
@@ -584,8 +594,14 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         # A vanished CERTIFIED/ALIASING is a certification LOST, not a
         # problem resolved — one word for both congratulated a typo'd path
         # that read nothing.
-        tag = "LOST    " if v["verdict"] in ("CERTIFIED", "ALIASING") else "RESOLVED"
-        print(f"  {tag} [{v['verdict']:<13}]          {v['concept_label']}")
+        # A problem the experimental rules now find equal is REPLACED by an
+        # experimental equality — not resolved.
+        replaced = v.get("replaced_by_experimental")
+        tag = ("LOST    " if v.get("engine_verdict", v["verdict"]) in ("CERTIFIED", "ALIASING")
+               else "REPLACED" if replaced else "GONE    ")
+        print(f"  {tag} [{v['verdict']:<13}]          {v['concept_label']}"
+              + (f" (now {'/'.join(replaced)} under the experimental rules — not a "
+                 f"conclusion)" if replaced else ""))
     if not diff["new"] and not diff["resolved"]:
         print("  no verdict changes vs baseline")
     print(f"  ({diff['unchanged']} pre-existing verdict(s) unchanged)")
@@ -597,7 +613,7 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         print(f"comment → {out}")
 
     if args.fail_on_new:
-        bad = {VerdictType.CONTRADICTION.value}
+        bad = {VerdictType.CONTRADICTION.value, VerdictType.SUSPECTED_DIVERGENCE.value}
         if args.fail_on_new == "any":
             bad |= {VerdictType.ORPHAN_CLAIM.value, VerdictType.SHADOW_METRIC.value,
                     VerdictType.UNRESOLVED.value}
@@ -727,26 +743,41 @@ def _cmd_verify_receipt(args: argparse.Namespace) -> int:
     freshness = receipt.get("freshness")
     fresh_status = freshness.get("status") if isinstance(freshness, dict) else None
     if verified_as_of:
-        print(f"  status {receipt.get('status')} · verified as of {verified_as_of}"
-              + (f" · freshness {fresh_status}" if fresh_status else ""))
+        from semantix.conclusions import signed_status_label
+
+        print(f"  signed status {signed_status_label(receipt.get('status'))} · scan of "
+              f"{verified_as_of}"
+              + (f" · self-reported freshness {fresh_status}" if fresh_status else ""))
     live = None
+    # Authentic = what the store signed: a pinned key establishes the signer,
+    # the store itself establishes the exact payload. The embedded key alone
+    # is tamper-evidence, not authenticity.
+    authentic = True if args.public_key else None
     estate = _estate_kwargs(args)
+    store = _open_existing(args.db) if (estate is not None or Path(args.db).exists()) \
+        else None
+    if store is not None:
+        authentic = store.issued(receipt)
+        if not authentic:
+            print("  this store did not issue this receipt (payload not found as signed)")
     if estate is not None and isinstance(receipt.get("scan_id"), str):
         from semantix.services.freshness import check_freshness
 
-        store = _open_existing(args.db)
         estate.pop("dialect", None)   # the receipt's scan records its own
-        if store.issued(receipt):
+        if authentic:
             live = check_freshness(store, scan_id=receipt["scan_id"], **estate)
         else:
             live = {"status": "unknown", "scan_id": receipt["scan_id"],
                     "note": "this store did not issue this receipt — its estate "
                             "says nothing about it"}
-        store.close()
         print(f"  live re-check against scan {receipt['scan_id']}: {live.get('status')}"
               + (f" — {live['note']}" if live.get("note") else ""))
-    a = assess_receipt(receipt, live)
+    if store is not None:
+        store.close()
+    a = assess_receipt(receipt, live, signature_authentic=authentic)
     print(f"  reliance: {a.reliance()}")
+    print("  policy assessment (made now; the signed receipt is unchanged): "
+          + json.dumps(a.policy_assessment))
     for warning in a.warnings:
         print(f"  WARNING: {warning}", file=sys.stderr)
     if getattr(args, "require_current", False):
@@ -763,8 +794,19 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
 
 def _cmd_publish(args: argparse.Namespace) -> int:
-    from semantix.services.writeback import publish_receipts
+    from semantix.services.writeback import publish_receipts, refresh_published_policy
 
+    if args.refresh_policy:
+        store = _open_existing(args.db) if Path(args.db).exists() else None
+        try:
+            out = refresh_published_policy(args.warehouse, store)
+        finally:
+            if store is not None:
+                store.close()
+        print(f"refreshed {out['warehouse']}: {out['verdict_rows']} semantix.verdicts "
+              f"row(s) mapped (usable_for_reliance = false), {out['assessments']} "
+              f"assessment row(s) beside unchanged signed receipts")
+        return 0
     store = _open_existing(args.db)
     freshness = None
     estate = _estate_kwargs(args)
@@ -847,7 +889,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         out.write_text(json.dumps(result, indent=2))
         print(f"  json → {out}")
     if result["false_certifications"]:
-        print(f"  FALSE CERTIFICATIONS: {', '.join(result['false_certifications'])} "
+        print(f"  FALSE EQUALITIES: {', '.join(result['false_certifications'])} "
               f"— a verifier cannot ship this", file=sys.stderr)
         return 1
     # "Zero false certifications" over a run that proved nothing is not a
@@ -858,7 +900,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
               f"({len(det['missed'])} missed, {len(nm['unproven'])} unproven)",
               file=sys.stderr)
         return 1
-    print("  false certifications: 0 ✓")
+    print("  false equalities: 0 ✓ (experimental rules; not a certification)")
     return 0
 
 
@@ -1097,13 +1139,21 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, indent=2))
         print(f"  findings JSON: {args.json_out}")
-    # Only VIOLATIONS fail the gate: a candidate is a hypothesis by
-    # construction, and failing CI on a hypothesis is the alert-fatigue path.
-    violations = [f for f in result["findings"] if f["kind"] == "definition_violation"]
-    if args.fail_on_alt and violations:
-        print(f"\nsemantix monitor: FAILED — {len(violations)} definition "
-              f"violation(s) in use", file=sys.stderr)
+    # Only SUSPECTED DIFFERENCES from a named authoritative definition fail
+    # the gate: a candidate is a hypothesis by construction, and failing CI on
+    # an unnamed hypothesis is the alert-fatigue path.
+    suspected = [f for f in result["findings"]
+                 if f["kind"] in ("suspected_difference", "definition_violation")]
+    if args.fail_on_alt and suspected:
+        print(f"\nsemantix monitor: FAILED — {len(suspected)} suspected "
+              f"difference(s) from an authoritative definition (suspected, not "
+              f"verified)", file=sys.stderr)
         return 1
+    if args.fail_on_alt:
+        # Passing says nothing suspected was FOUND — never that uses conform:
+        # a use that matched under the experimental rules is unverifiable.
+        print("\nsemantix monitor: no suspected difference found — not a statement "
+              "that any use conforms (positive verdicts are suspended)", file=sys.stderr)
     return 0
 
 
@@ -1112,9 +1162,10 @@ def _print_monitor(result: dict) -> None:
     print(f"monitor · against scan {result['scan_id']} · authority "
           f"{', '.join(ref['authority_systems']) or 'none'}: {ref['definitions']} "
           f"definition(s) across {ref['concepts']} concept(s)"
-          + (f" ({ref['excluded_below_proof']} below proof grade excluded)"
+          + (f" ({ref['excluded_below_proof']} outside the supported grammar excluded)"
              if ref["excluded_below_proof"] else "")
-          + (f" · contested: {', '.join(ref['contested_concepts'])}"
+          + (f" · authorities suspected to disagree: "
+             f"{', '.join(ref['contested_concepts'])}"
              if ref["contested_concepts"] else ""))
     print(f"comparison: {result['comparison']}")
     if result["toolchain"]["positive_verdicts_withheld"]:
@@ -1170,13 +1221,10 @@ def _print_monitor(result: dict) -> None:
     print(f"measure uses: {n} — every use counted once below; governed references "
           f"counted alongside")
     line("governed references (MEASURE/AGG, approved view)", f["governed_references"])
-    shapes = f["conforming_by_shape"]
-    line("conforming", f["conforming"],
-         f"  exact {shapes['exact']} · raw-table slice {shapes['A']} · "
-         f"metric view {shapes['B']}" if f["conforming"] else "")
-    if f["contested"]:
-        line("contested (authorities disagree)", f["contested"])
-    line("definition violations", f["violations"])
+    print(f"  positive verdicts are {f['positive_verdicts']}: a match is an "
+          f"experimental comparison, a difference is suspected — nothing below is "
+          f"a conclusion")
+    line("suspected differences (named metric)", f["suspected_differences"])
     line("candidates (unnamed near misses)", f["candidates"])
     line("unregistered", f["unregistered"])
     line("unverifiable", f["unverifiable"],
@@ -1184,12 +1232,19 @@ def _print_monitor(result: dict) -> None:
          if f["unverifiable_by_reason"] else "")
     line(f"below recurrence threshold (≥{result['min_runs']} runs; not judged)",
          f["below_threshold"])
-    line("checked = conforming + violations", f["checked"])
+    if f["experimental_contested"]:
+        print(f"  (of the unverifiable: {f['experimental_contested']} matched one side "
+              f"of authoritative definitions suspected to disagree)")
+    if f["experimental_matches"]:
+        shapes = f["experimental_matches_by_shape"]
+        print(f"  (of the unverifiable: {f['experimental_matches']} matched under the "
+              f"experimental rules — exact {shapes['exact']} · raw-table slice "
+              f"{shapes['A']} · metric view {shapes['B']}; not conclusions)")
     print(f"rule set: {result['rule_set']} — not covered: "
           f"{'; '.join(result['excluded_semantics'])}")
     print()
     tags = {"conforming_use": "CONFORMING", "contested_use": "CONTESTED",
-            "definition_violation": "VIOLATION",
+            "definition_violation": "VIOLATION", "suspected_difference": "SUSPECTED",
             "candidate_alt_definition": "CANDIDATE",
             "unregistered_recurring_measure": "UNREGISTERED",
             "unverifiable": "UNVERIFIABLE"}
@@ -1261,13 +1316,15 @@ def _cmd_propose(args: argparse.Namespace) -> int:
                        if c["declaration"] is None and not c["matches_declaration"])
         matched += sum(1 for c in p["candidates"] if c["matches_declaration"])
     print(f"proposals against scan {result['scan_id']}: "
-          f"{kinds['resolution']} contradiction resolution(s), "
+          f"{kinds['resolution']} suspected-divergence resolution(s), "
           f"{kinds['promotion']} shadow promotion(s)"
-          + (f" · {matched} site(s) already match a declaration" if matched else "")
+          + (f" · {matched} site(s) appear to match a declaration (experimental "
+             f"comparison, not a conclusion)" if matched else "")
           + (f" · {refused} candidate(s) could not be emitted (reasons in memo)"
              if refused else "")
-          + (" · round trips verified" if registry is not None else
-             " · round trips NOT verified (no estate sources)"))
+          + (" · round trips re-scanned (consistency check, not verification)"
+             if registry is not None else
+             " · round trips NOT checked (no estate sources)"))
     for path in written["declarations"]:
         print(f"  {path}")
     print(f"  memo: {written['memo']}")
@@ -1291,7 +1348,7 @@ def _cmd_oracle(args: argparse.Namespace) -> int:
         if (m["a"], m["b"]) in seen:
             continue
         seen.add((m["a"], m["b"]))
-        print(f"  FALSE CERTIFICATION [{m['estate']}/{m['dataset']}]\n    {m['a']}\n    {m['b']}\n"
+        print(f"  FALSE EQUALITY [{m['estate']}/{m['dataset']}]\n    {m['a']}\n    {m['b']}\n"
               f"    -> {m['result_a']}  vs  {m['result_b']}")
     print(f"  proof forms ({report.proof_grade} queries): {report.transforms_executed} "
           f"executions of each query's trusted transformed SQL against the query as written")
@@ -1304,7 +1361,7 @@ def _cmd_oracle(args: argparse.Namespace) -> int:
               f"    {m['transformed']}\n"
               f"    -> {m['result_original']}  vs  {m['result_transformed']}")
     if report.ok:
-        print("  no false certifications: every pair the engine equates executed identically, "
+        print("  no false equalities: every pair the experimental rules equate executed identically, "
               "and every proof form executed as its original")
 
     from semantix.oracle import run_conformance_oracle

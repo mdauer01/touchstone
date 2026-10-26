@@ -10,6 +10,10 @@ The order is now fixed: (1) definition evidence for the referenced AND the
 claimed metric, (2) the supported-SQL boundary, (3) the claimed metric,
 (4) the primary finding from those conclusions. A suspected naming
 mismatch is kept as context when an earlier step fails.
+
+Under the conclusions policy (semantix.conclusions) a definition violation
+surfaces as a suspected difference; the tests pin the monitor's own judgment
+through tests/policy.py and the policy-facing kind beside it.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from semantix.services.history import read_history
 from semantix.services.monitor import build_registry, monitor_history
 from semantix.services.pilot import load_pilot
 
+from .policy import engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import CATALOG, MODEL, T_IN, VIEW, codes, run
 from .test_round_ten_fixes import headline_consistent
 
@@ -35,6 +40,8 @@ TWO = VIEW.format(extra="") + "  - name: gross_revenue\n    expr: SUM(amount)\n"
 VIEW_RENAMED = "SELECT MEASURE(net_revenue) AS gross_revenue FROM main.finance.revenue_mv"
 RAW_RENAMED = "SELECT SUM(amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed'"
 OUTSIDE = "2020-01-01T00:00:00Z"
+# What a finding of each engine kind is reported as under the policy.
+SHOWN = {"definition_violation": "suspected_difference"}
 
 
 def one(sql, start_time=T_IN):
@@ -61,15 +68,19 @@ def one(sql, start_time=T_IN):
 def test_wrong_metric_name_on_a_metric_view(tmp_path, sql, start_time, kind, code):
     result = run(tmp_path, one(sql, start_time), view_text=TWO)
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"], codes(f)) == (kind, "gross_revenue", [code])
+    assert (engine_kind(f), f["concept"], engine_codes(f)) == (kind, "gross_revenue", [code])
+    assert (f["kind"], codes(f)) == (SHOWN.get(kind, kind), [code])
     if kind == "unverifiable":
         # The suspicion is kept as context, and no evidence claims more than
         # was established.
         assert f["suspected"][0].startswith("presented as gross_revenue but computed as")
         assert "calculation_matches" not in f
-        assert result["funnel"]["violations"] == 0
+        assert engine_funnel(result["funnel"])["violations"] == 0
     else:
-        assert "(conforming)" in f["calculation_matches"] or "* 2" in f["reasons"][0]["detail"]
+        # The rule outcome is named in policy words: an experimental match.
+        assert "(experimental match)" in f["calculation_matches"] \
+            or "* 2" in f["reasons"][0]["detail"]
+        assert "(conforming)" not in f.get("calculation_matches", "")
     if start_time is None:
         assert result["history"]["executions_without_time"] == 1
     headline_consistent(result)
@@ -85,7 +96,8 @@ def test_wrong_metric_name_on_a_metric_view(tmp_path, sql, start_time, kind, cod
 def test_wrong_metric_name_on_the_raw_table(tmp_path, sql, start_time, kind):
     result = run(tmp_path, one(sql, start_time), view_text=TWO)
     (f,) = result["findings"]
-    assert f["kind"] == kind
+    assert engine_kind(f) == kind
+    assert f["kind"] == SHOWN.get(kind, kind)
     if kind == "definition_violation":
         assert f["calculation_matches"].endswith("revenue_mv/gross_revenue")
     elif "TABLESAMPLE" in sql:
@@ -165,6 +177,7 @@ def test_both_the_referenced_and_the_claimed_definition_must_apply(
 def test_both_definitions_apply_then_the_name_is_judged(tmp_path):
     result = _two_view_pilot(tmp_path, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z")
     (f,) = result["findings"]
-    assert (f["kind"], f["concept"]) == ("definition_violation", "gross_revenue")
-    assert codes(f) == ["presented_under_other_name"]
+    assert (engine_kind(f), f["concept"]) == ("definition_violation", "gross_revenue")
+    assert engine_codes(f) == ["presented_under_other_name"]
+    assert (f["kind"], codes(f)) == ("suspected_difference", ["presented_under_other_name"])
     headline_consistent(result)

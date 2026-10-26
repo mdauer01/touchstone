@@ -4,6 +4,57 @@ A positive verdict (CERTIFIED, ALIASING, monitor `conforming_use`) says two
 definitions compute the same thing. That statement must come from rules whose
 soundness can be argued one at a time, not from a general query optimizer.
 
+## Status: positive verdicts are suspended
+
+Three independent reviews of this policy's first implementation reproduced, by
+execution, about fourteen classes of false certification. It was the ninth
+successive round to find new ones. Some were implementation errors, such as star
+modifiers ignored, CTE scoping, and literal GROUP BY keys read as ordinals. Others were
+errors in the **parse itself**:
+
+- sqlglot gives `%` the precedence of `+`;
+- it binds `IS` / `IS DISTINCT FROM` / `NOT … IN` differently from DuckDB and Spark.
+
+`round_trips` compares sqlglot only with itself, so it cannot see either. A guard that
+works on a misparsed tree may never recognize the dangerous construct, so refusing the
+known classes does not establish that what remains is sound. Until the criteria below
+hold:
+
+- **Equalities are not conclusions.** CERTIFIED, ALIASING and monitor conforming /
+  contested uses are reported as **experimental comparisons**. The engine's result
+  travels under `evidence.experimental` / `experimental` for development; no surface
+  presents it as a conclusion.
+- **Definitive negatives become suspected.** CONTRADICTION and definition violations
+  rest on the same interpretation, so they are **suspected divergences / differences**.
+  Their reasons are unverified observations.
+- **Reliance is decided by one policy** (`semantix.conclusions.reliance`). It gives
+  three separate answers:
+  1. signature authentic: this store issued exactly this payload;
+  2. estate unchanged: a live re-check against the receipt's scan;
+  3. semantic claim usable: under the policy in force.
+
+  Only the third authorizes use, and neither of the first two can establish it. While
+  positive verdicts are suspended it is always no: CLI, MCP, publish, the dbt
+  `certified` gate (which fails closed) and `verify-receipt` (which exits 1, with or
+  without `--require-current`, for current and as-of receipts alike).
+- **Records are not rewritten.** Original signed receipts and stored rows stay as they
+  are, and today's assessment is reported beside them. Stores written earlier are read
+  under the policy (`Store.verdicts_for_scan`). Warehouse tables published earlier are
+  brought under it with `semantix publish --refresh-policy`, which maps the verdicts,
+  sets `usable_for_reliance = false`, and adds an `assessment/<concept>` row beside each
+  unchanged receipt.
+
+**Re-enable criteria.** One clean review or pilot is not enough. All of these must
+hold:
+
+- an explicitly defined supported grammar;
+- a stated justification for every transformation;
+- evidence that parsing matches **each target engine**.
+
+A parser-disagreement detector against DuckDB is one source of evidence about DuckDB
+only. It is not a qualification for any engine, and passing it cannot by itself
+re-enable positive verdicts.
+
 ## Why the optimizer left the certification path
 
 Up to round fifteen, proof grade meant "sqlglot's optimizer produced a
@@ -104,9 +155,11 @@ These are recorded on every positive verdict (`proof.ASSUMPTIONS`):
 - **Old scans.** A scan made under any other policy, including one that predates
   versioning, cannot carry its verdicts forward:
   - `check_freshness` reports it `stale` even when every file hash is unchanged
-    ("rescan to recertify");
-  - a receipt issued from it is `UNRESOLVED`, with the original verdicts marked
-    `superseded`;
+    ("rescan under it");
+  - a receipt issued from it is `UNRESOLVED`. Each entry is mapped under the
+    conclusions policy first and then downgraded (`[downgraded] Experimental
+    comparison …`), with the engine's verdict only under `experimental` /
+    `suspected`;
   - a receipt issued under another policy is never valid for current use.
 - **Old receipts** remain valid signed records of what was said, under the policy
   that said it.

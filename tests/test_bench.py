@@ -128,14 +128,14 @@ def test_false_certification_fails_the_cli_gate(tmp_path, capsys):
 
     assert main(["bench", "--corpus", str(poisoned)]) == 1
     err = capsys.readouterr().err
-    assert "FALSE CERTIFICATIONS: poisoned-pair" in err
+    assert "FALSE EQUALITIES: poisoned-pair" in err
 
 
 def test_cli_bench_reports_and_writes_json(tmp_path, capsys):
     out = tmp_path / "bench.json"
     assert main(["bench", "--json", str(out)]) == 0
     stdout = capsys.readouterr().out
-    assert "false certifications: 0" in stdout
+    assert "false equalities: 0" in stdout
     assert "known gaps: 2 confirmed" in stdout
     assert "dialects: duckdb, databricks, snowflake, bigquery" in stdout
     assert out.exists()

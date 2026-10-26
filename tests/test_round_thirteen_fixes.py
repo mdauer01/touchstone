@@ -16,6 +16,10 @@ check_raw now runs a complete boundary pass — shape, join graph, the
 syntax of every condition whatever columns it touches, dimensions of the
 rest, every grouping term — before any violation is judged. This file
 crosses each violation kind with each boundary condition.
+
+Under the conclusions policy (semantix.conclusions) a definition violation
+surfaces as a suspected difference; the tests below pin the monitor's own
+judgment through tests/policy.py and the policy-facing kind beside it.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from semantix.services.history import read_history
 from semantix.services.monitor import build_registry, monitor_history
 from semantix.services.pilot import load_pilot
 
+from .policy import engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import CATALOG, GOVERNED, _rows, codes, make_pilot
 from .test_round_ten_fixes import headline_consistent
 
@@ -99,9 +104,10 @@ def build(violation: str, boundary: str | None) -> str:
 def test_each_violation_alone_stands(tmp_path, violation):
     result = run(tmp_path, build(violation, None))
     (f,) = result["findings"]
-    assert f["kind"] == "definition_violation"
+    assert engine_kind(f) == "definition_violation"
+    assert f["kind"] == "suspected_difference"          # policy: never an accusation
     assert VIOLATIONS[violation][3] in codes(f)
-    assert result["funnel"]["violations"] == 1
+    assert engine_funnel(result["funnel"])["violations"] == 1
     headline_consistent(result)
 
 
@@ -111,8 +117,9 @@ def test_violation_outside_the_boundary_is_unverifiable(tmp_path, violation, bou
     result = run(tmp_path, build(violation, boundary))
     (f,) = result["findings"]
     assert f["kind"] == "unverifiable", (build(violation, boundary), f)
+    assert engine_kind(f) == "unverifiable", (build(violation, boundary), f)
     assert set(codes(f)) & BOUNDARY_CODES
-    assert result["funnel"]["violations"] == 0
+    assert engine_funnel(result["funnel"])["violations"] == 0
     # The would-be violation is kept as context, except where it is not even
     # decidable: an unsupported condition on the required filter's own column
     # may BE that filter, and one on `channel` constrains the other branch of
@@ -134,7 +141,8 @@ def test_unsupported_condition_inside_an_or_replacing_the_required_filter(tmp_pa
     result = run(tmp_path, sql)
     (f,) = result["findings"]
     assert f["kind"] == "unverifiable" and "predicate_unsupported" in codes(f)
-    assert result["funnel"]["violations"] == 0
+    assert engine_kind(f) == "unverifiable"
+    assert engine_funnel(result["funnel"])["violations"] == 0
     headline_consistent(result)
 
 
@@ -143,8 +151,9 @@ def test_unsupported_condition_on_a_required_column_alone(tmp_path):
     result = run(tmp_path, sql)
     (f,) = result["findings"]
     assert f["kind"] == "unverifiable" and "predicate_unsupported" in codes(f)
+    assert engine_kind(f) == "unverifiable"
     assert any("measure is" in s for s in f["suspected"])
-    assert result["funnel"]["violations"] == 0
+    assert engine_funnel(result["funnel"])["violations"] == 0
     headline_consistent(result)
 
 
@@ -153,5 +162,6 @@ def test_supported_slice_on_a_changed_source_is_still_a_source_violation(tmp_pat
            f"WHERE {REQ} AND country = 'US' GROUP BY channel")
     result = run(tmp_path, sql)
     (f,) = result["findings"]
-    assert f["kind"] == "definition_violation" and codes(f) == ["source_changed"]
+    assert engine_kind(f) == "definition_violation" and engine_codes(f) == ["source_changed"]
+    assert f["kind"] == "suspected_difference" and codes(f) == ["source_changed"]
     headline_consistent(result)

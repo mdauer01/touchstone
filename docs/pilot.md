@@ -137,8 +137,14 @@ generated (`sum_revenue`) when the analyst wrote them.
 
 ## Reading the report
 
-Every measure use lands in exactly one bucket: conforming, contested, violation,
-candidate, unregistered, unverifiable, or below the recurrence threshold. A use's
+**Positive verdicts are suspended** ([proof-policy.md](proof-policy.md)): what the rules
+would call conforming or contested is reported as an *experimental match* (one reason a
+use is unverifiable), and what they would call a violation is a *suspected
+difference*. Nothing in the report is a conclusion.
+
+Every measure use lands in exactly one bucket: suspected difference, candidate,
+unregistered, unverifiable (including experimental matches), or below the recurrence
+threshold. A use's
 bucket is its most severe finding, judged as the metric the query claims to compute
 (its alias, an explicit `-- semantix: metric=` tag, or the asset map); a calculation
 that matches a *different* approved metric is evidence on that finding, not a second
@@ -149,8 +155,7 @@ unverifiable, and anything that would have been a violation — a renamed or tra
 measure, a dropped filter — is kept as `suspected` context, never promoted to a verdict. Findings are merged only when their
 verdicts are identical, so each carries only its own executions. Each bucket is shown as
 a share of all measure uses. Governed references (`MEASURE()` over an
-approved view) are counted alongside, never instead. `checked = conforming +
-violations` is the share the rules could decide. Unverifiable uses are broken down
+approved view) are counted alongside, never instead. Unverifiable uses are broken down
 by reason, which shows where the next bottleneck is:
 
 | Most unverifiable uses are… | The next step is… |
@@ -161,10 +166,11 @@ by reason, which shows where the next bottleneck is:
 | no definition evidence | definition windows that cover the export |
 | below proof grade | catalog coverage, or constructs the core does not model |
 
-## What a conforming verdict does and does not say
+## What an experimental match does and does not say
 
-It says the query matched an authoritative definition exactly, or matched one of the
-shapes listed in rule set `monitor-conformance/1` ([conformance.py](../src/semantix/services/conformance.py)).
+It is not a conclusion while positive verdicts are suspended. It says that, on the tree
+sqlglot parsed, the query matched an authoritative definition exactly, or matched one of
+the shapes listed in rule set `monitor-conformance/1` ([conformance.py](../src/semantix/services/conformance.py)).
 Both observations and definitions are read through the proof grammar of
 [`semantix-proof/2`](proof-policy.md). A select-project-filter CTE or derived table is
 inlined by a stated rule and judged as the single query it is. SQL outside the grammar
@@ -179,8 +185,8 @@ It says nothing beyond that rule set. Excluded from the claim:
 - unsupported dimension expressions
 - Databricks runtime behaviour of `MEASURE()` beyond its declared definition
 
-`semantix oracle` executes every conforming verdict it can generate against the
-definition plus the identified variation. That challenges the rules on its datasets but
+`semantix oracle` executes every match the rules produce for its generated cases against
+the definition plus the identified variation. That challenges the rules on its datasets but
 does not prove them. `MEASURE()` runtime behaviour is checked by
 `tests/test_databricks_integration.py` against a real workspace, which is opt-in via
 `SEMANTIX_DATABRICKS_*` and has not yet been run.

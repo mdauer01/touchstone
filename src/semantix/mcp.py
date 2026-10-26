@@ -2,9 +2,11 @@
 
 The receipt schema was frozen in Phase 0 precisely so this surface could
 exist: an agent about to answer "what was net revenue in March" first calls
-`attest` and learns whether the number it is about to quote rests on a
-CERTIFIED definition or a CONTRADICTION — and ships the receipt with its
-answer. This module puts that check in the agent's answer path today.
+`attest` and learns what is known about the definition behind the number — a
+suspected divergence, an unresolved comparison, the live definition versions
+— and ships the receipt with its answer. While positive verdicts are
+suspended (semantix.conclusions) no receipt authorizes reliance; this module
+says so in the agent's answer path.
 
 Deliberately dependency-free: MCP's stdio transport is newline-delimited
 JSON-RPC 2.0, which the stdlib handles fine. The server is read-only over an
@@ -43,9 +45,10 @@ TOOLS = [
         "attest",
         "Issue a signed semantic receipt for a metric concept. Call this BEFORE "
         "quoting a numeric value for a business metric: the receipt says whether "
-        "the metric's definition is CERTIFIED, CONTRADICTED, or unverifiable, "
-        "which definition versions are live, their physical lineage, and every "
-        "known divergence. Its `freshness` block says whether the estate still "
+        "the metric's definitions are SUSPECTED to diverge or remain unresolved "
+        "(positive verdicts are currently suspended — no receipt certifies a "
+        "definition), which definition versions are live, their physical "
+        "lineage, and every known divergence. Its `freshness` block says whether the estate still "
         "matches what the verdicts were computed from "
         "(fresh/partial/stale/unknown/unchecked — `unchecked` means no estate "
         "sources were configured, so nothing was re-checked) — "
@@ -74,8 +77,9 @@ TOOLS = [
     _tool(
         "concepts",
         "List every concept and verdict from the latest scan — the estate's "
-        "current semantic health. Severity-ranked; CONTRADICTION means competing "
-        "definitions disagree.",
+        "current semantic health. Severity-ranked; SUSPECTED_DIVERGENCE means "
+        "competing definitions appear to disagree (a suspicion from SQL "
+        "interpretation that is not verified). Positive verdicts are suspended.",
         {}, [],
     ),
     _tool(
@@ -94,13 +98,15 @@ TOOLS = [
     ),
     _tool(
         "verify_receipt",
-        "Verify a semantic receipt before relying on it. Returns `valid` (signature "
-        "holds AND the receipt is valid as the kind of statement it makes), "
-        "`describes` (`current` or `as_of`), `historically_valid` (a true record of "
-        "its instant) and `current_use` (the definition may be relied on NOW — only "
-        "for a current receipt whose freshness re-check found the estate unchanged; "
-        "never for an as-of receipt). Quote a metric as current only if "
-        "`current_use` is true.",
+        "Verify a semantic receipt before relying on it. Returns three separate "
+        "answers — `signature_authentic` (this server's store issued exactly this "
+        "receipt), `estate_unchanged` (a live re-check against the receipt's scan "
+        "found every source unchanged) and `semantic_claim_usable` (the claim may "
+        "be relied on under the policy in force) — plus `current_use`, true only "
+        "when all three are. While positive verdicts are suspended "
+        "`semantic_claim_usable` and `current_use` are always false: authenticity "
+        "and an unchanged estate never make a claim usable. Quote a metric as "
+        "verified only if `current_use` is true.",
         {"receipt": {"type": "object", "description": "the receipt JSON object"},
          "public_key": {"type": "string", "description": "optional pinned signer key (base64url)"}},
         ["receipt"],
@@ -241,7 +247,8 @@ class McpServer:
         # validity into `current_use`, so a stale as-of receipt told agents
         # `current_use: true` beside a warning saying it described the past.
         live = self._live_freshness(args["receipt"])
-        a = assess_receipt(args["receipt"], live)
+        authentic = self.store.issued(args["receipt"])
+        a = assess_receipt(args["receipt"], live, signature_authentic=authentic)
         if live is not None:
             result["live_freshness"] = {k: live.get(k) for k in
                                         ("status", "checked_at", "scan_id", "note")}
@@ -249,9 +256,14 @@ class McpServer:
             "describes": a.describes,
             "instant": a.instant,
             "historically_valid": a.historical,
+            "signature_authentic": a.signature_authentic,
+            "estate_unchanged": a.estate_unchanged,
+            "semantic_claim_usable": a.semantic_claim_usable,
             "current_use": a.current_use,
             "trusted": a.valid_for_stated_use,
             "reliance": a.reliance(),
+            # Made now, beside the signed receipt — which is never rewritten.
+            "policy_assessment": a.policy_assessment,
         })
         if a.warnings:
             result["warnings"] = list(a.warnings)

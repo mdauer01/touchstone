@@ -21,7 +21,7 @@ failed attest (degradation ladder, as everywhere).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import base64
 import json
@@ -145,15 +145,16 @@ def verify_receipt_dict(receipt_dict: dict[str, Any],
 
 @dataclass(frozen=True)
 class ReceiptAssessment:
-    """Two separate decisions about a signature-valid receipt.
+    """Separate decisions about a receipt, never one boolean.
 
-    `historical`: the receipt is a valid attestation about the instant it
-    describes. `current_use`: the definition may be relied on for the estate
-    as it is NOW. They were one boolean, so a historical receipt that was
-    valid for its instant was reported to agents as `current_use: true` and
-    printed "valid for CURRENT use — the estate was re-checked and matches"
-    when nothing had been re-checked. A receipt about a past instant is
-    never current, whatever its freshness says.
+    `historical`: the receipt is a valid record of the instant it describes.
+    Reliance NOW is three further answers (semantix.conclusions.reliance):
+    `signature_authentic` (it is what the store signed), `estate_unchanged`
+    (a live re-check against the receipt's own scan found every source
+    unchanged) and `semantic_claim_usable` (the claim may be relied on under
+    the policy in force). `current_use` needs all three, and neither of the
+    first two can establish the third: round sixteen showed a fresh live
+    check yielded `current_use: true` whatever the receipt's status said.
     """
 
     describes: str                 # "current" or "as_of"
@@ -162,42 +163,102 @@ class ReceiptAssessment:
     current_use: bool
     warnings: tuple[str, ...] = ()
     rechecked_at: str | None = None   # when the live estate check ran, if one did
+    signature_authentic: bool | None = None
+    estate_unchanged: bool | None = None
+    semantic_claim_usable: bool = False
+    policy_assessment: dict = field(default_factory=dict)
 
     @property
     def valid_for_stated_use(self) -> bool:
         """Valid as the KIND of statement the receipt makes: a current receipt
-        must be current-use valid; an as-of receipt must be historically valid."""
-        return self.current_use if self.describes == "current" else self.historical
+        must be current-use valid; an as-of receipt must be an authentic,
+        historically valid record WHOSE CLAIM is usable. Round seventeen's
+        audit found the as-of branch returned `historical` alone, so an as-of
+        CERTIFIED receipt — even one this store denied issuing — passed
+        verify-receipt and MCP `valid` while positive verdicts were suspended."""
+        if self.describes == "current":
+            return self.current_use
+        return bool(self.historical and self.signature_authentic is not False
+                    and self.semantic_claim_usable)
 
     def reliance(self) -> str:
         """One human line naming what this receipt may be used for."""
+        def yn(v):
+            return "not checked" if v is None else ("yes" if v else "no")
+        answers = (f"signature authentic: {yn(self.signature_authentic)} · estate "
+                   f"unchanged: {yn(self.estate_unchanged)} · claim usable: "
+                   f"{yn(self.semantic_claim_usable)}")
+        if not self.historical:
+            return f"NOT a valid attestation — {'; '.join(self.warnings)} ({answers})"
         if self.describes == "as_of":
-            if not self.historical:
-                return "NOT a valid attestation — " + "; ".join(self.warnings)
-            return (f"historical receipt for {self.instant}: valid for that instant "
-                    f"only, not a statement about the current estate")
+            return (f"historical receipt for {self.instant}: a record of what was "
+                    f"said about that instant only, not a statement about the current "
+                    f"estate, and its claim is "
+                    f"{'usable' if self.semantic_claim_usable else 'NOT usable'} under "
+                    f"the policy in force ({answers})")
         if self.current_use:
             return (f"valid for CURRENT use: the estate was re-checked at "
-                    f"{self.rechecked_at} against this receipt's scan and matches")
-        if not self.historical:
-            return "NOT a valid attestation — " + "; ".join(self.warnings)
-        return (f"historical attestation as of {self.instant} only: not valid for "
-                f"current use until re-attested with every estate source")
+                    f"{self.rechecked_at} against this receipt's scan and matches "
+                    f"({answers})")
+        return (f"historical record as of {self.instant}: NOT valid for current use "
+                f"({answers})")
 
 
-def assess_receipt(receipt: dict, live: dict | None = None) -> ReceiptAssessment:
-    """Both decisions for a SIGNATURE-VALID receipt, in one place so every
-    verification surface (CLI attest, verify-receipt, the MCP tool) applies
-    the same rules. Never raises: malformed fields are a refusal with a
-    reason, on exactly the arbitrary-JSON input class verification is for.
+def assess_receipt(receipt: dict, live: dict | None = None, *,
+                   signature_authentic: bool | None = True) -> ReceiptAssessment:
+    """Every decision about a receipt, in one place so every verification
+    surface (CLI attest, verify-receipt, the MCP tool) applies the same rules.
+    Never raises: malformed fields are a refusal with a reason, on exactly the
+    arbitrary-JSON input class verification is for.
 
+    `signature_authentic`: the caller's verification of the signature (and,
+    with a store at hand, that the store issued exactly this payload).
     `live` is a freshness block computed NOW against the receipt's own scan
     (services.freshness.check_freshness(scan_id=receipt["scan_id"], …)).
-    Current reliance needs it: the receipt's embedded freshness says what
-    was true when it was ISSUED, and a receipt issued fresh stayed "current"
-    after the model it certified was edited. Offline verification
-    establishes signature integrity and historical validity only.
+    Offline verification establishes signature integrity and historical
+    validity only. Whatever both say, the CLAIM must be usable under the
+    policy in force (semantix.conclusions) before anything is current.
     """
+    from semantix.conclusions import POSITIVE_VERDICTS, reliance
+
+    base = _estate_assessment(receipt, live)
+    estate = None
+    if base.describes == "current" and isinstance(live, dict):
+        status = live.get("status")
+        drift = live.get("estate_drift") or {}
+        drifted = any(drift.get(k) for k in ("changed", "added", "removed"))
+        bound = live.get("scan_id") in (None, receipt.get("scan_id"))
+        if base.current_use:
+            estate = True
+        # "No" only when a check against this scan SHOWED a change; a check
+        # that was not run (`unchecked`), could not answer, was not bound to
+        # this scan, or was refused on policy is "not checked".
+        elif bound and not live.get("proof_policy") and (
+                status == "stale" or (status == "partial" and drifted)):
+            estate = False
+    r = reliance(receipt.get("status") if isinstance(receipt.get("status"), str) else None,
+                 signature_authentic=signature_authentic, estate_unchanged=estate)
+    if signature_authentic is False and base.historical:
+        # A payload this store never signed is not a record of anything it said.
+        base = ReceiptAssessment(base.describes, base.instant, False, False, (
+            *base.warnings, "this store did not issue this receipt — it is not a record "
+                            "of anything the store said"), base.rechecked_at)
+    current = base.describes == "current" and base.historical and r.current_use
+    warnings = tuple(dict.fromkeys((*base.warnings, *(
+        reason for reason in r.reasons
+        if base.describes == "current" or "not a claim" in reason or "suspended" in reason))))
+    return ReceiptAssessment(
+        base.describes, base.instant, base.historical, current, warnings,
+        base.rechecked_at, signature_authentic, estate, r.semantic_claim_usable,
+        {**r.as_dict(), "current_use": current,
+         "policy": {"positive_verdicts": POSITIVE_VERDICTS},
+         "note": "assessed now under the policy in force; the signed receipt is "
+                 "unchanged"})
+
+
+def _estate_assessment(receipt: dict, live: dict | None = None) -> ReceiptAssessment:
+    """Historical validity and whether the ESTATE is shown unchanged now —
+    the part of reliance that does not depend on what the receipt claims."""
     is_as_of = bool(receipt.get("as_of"))
     describes = "as_of" if is_as_of else "current"
     instant = receipt.get("as_of") if is_as_of else receipt.get("verified_as_of")
@@ -216,19 +277,26 @@ def assess_receipt(receipt: dict, live: dict | None = None) -> ReceiptAssessment
         (freshness or {}).get(k) for k in ("changed", "added", "removed"))
 
     if is_as_of:
-        # A receipt ABOUT a past instant is valid for that instant and never
-        # for current use. Current-estate freshness is disclosure only.
+        # A receipt ABOUT a past instant is a record of that instant and never
+        # for current use. Its freshness block is what the receipt itself said
+        # when issued — self-reported, not a check made now.
+        if _after(instant, receipt.get("issued_at")):
+            return ReceiptAssessment(describes, instant, False, False, (
+                f"this receipt describes {instant}, after it was issued "
+                f"({receipt.get('issued_at')}) — it records nothing observed",))
         if fresh_status == "stale" or (fresh_status == "partial" and drifted):
-            note = f"the CURRENT estate has changed since (freshness `{fresh_status}`)"
+            note = (f"its own freshness block (self-reported at issuance) says the "
+                    f"estate had changed by then (`{fresh_status}`)")
         elif fresh_status == "unknown":
-            note = "freshness of the CURRENT estate could not be determined"
+            note = "its own freshness block says freshness could not be determined"
         elif fresh_status == "fresh":
-            note = ("the current estate still matches, but attest without --as-of "
-                    "for a current answer")
+            note = ("its own freshness block (self-reported at issuance, not re-checked "
+                    "now) said the estate matched then; attest without --as-of for a "
+                    "current answer")
         else:
             note = "it says nothing about the current estate"
         return ReceiptAssessment(describes, instant, True, False, (
-            f"this receipt describes {instant}; it is valid for that instant only "
+            f"this receipt describes {instant}; it is a record of that instant only "
             f"and not for current use — {note}",))
 
     # A CURRENT receipt is a true record of verified_as_of either way; it may
@@ -266,8 +334,27 @@ def assess_receipt(receipt: dict, live: dict | None = None) -> ReceiptAssessment
     return ReceiptAssessment(describes, instant, True, False, (warning,))
 
 
+def _after(instant, issued) -> bool:
+    """Whether `instant` is strictly later than `issued` (ISO-8601). Unparseable
+    values are not evidence either way."""
+    from datetime import datetime
+
+    def parse(v):
+        if not isinstance(v, str):
+            return None
+        try:
+            t = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return t if t.tzinfo else None
+
+    a, b = parse(instant), parse(issued)
+    return bool(a and b and a > b)
+
+
 def _assess_live(receipt: dict, describes: str, instant, live: dict) -> ReceiptAssessment:
-    """Current reliance from a live re-check bound to the receipt's scan."""
+    """Whether a live re-check bound to the receipt's scan shows the estate
+    unchanged (the `current_use` field here means only that)."""
     rechecked = live.get("checked_at") if isinstance(live, dict) else None
     if not isinstance(live, dict) or live.get("scan_id") != receipt.get("scan_id"):
         return ReceiptAssessment(describes, instant, True, False, (
