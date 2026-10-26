@@ -1,0 +1,46 @@
+family: temp_views
+split: dev
+items:
+  - id: temp-01
+    metric: net_revenue
+    session:
+      - CREATE TEMP VIEW o AS SELECT * FROM main.finance.orders WHERE amount > 0
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM o WHERE status = 'completed'
+    label: population_drift
+    rationale: the temp view read here keeps only orders with a positive amount
+  - id: temp-02
+    metric: net_revenue
+    session:
+      - CREATE TEMP VIEW o AS SELECT * FROM main.finance.orders
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM o WHERE status = 'completed'
+    label: permitted_variation
+    rationale: the temp view is a pass-through of the source
+  - id: temp-03
+    metric: net_revenue
+    session:
+      - USE CATALOG dev
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM finance.orders WHERE status = 'completed'
+    label: source_drift
+    rationale: after USE CATALOG dev the short name reads dev.finance.orders, not the governed source
+  - id: temp-04
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM orders WHERE status = 'completed'
+    label: insufficient_evidence
+    rationale: a one-part name with no session context shown; which orders table it reads is not established
+  - id: temp-05
+    metric: net_revenue
+    session:
+      - USE CATALOG main
+      - USE SCHEMA finance
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM orders WHERE status = 'completed' AND channel = 'web'
+    label: permitted_variation
+    rationale: the session resolves orders to main.finance.orders; a declared-dimension slice
+  - id: temp-06
+    metric: gross_revenue
+    session:
+      - CREATE OR REPLACE TEMP VIEW orders AS SELECT order_id, amount * 100 AS amount, status, channel FROM main.finance.orders
+      - USE CATALOG main
+      - USE SCHEMA finance
+    sql: SELECT SUM(amount) AS gross_revenue FROM orders WHERE status = 'completed'
+    label: formula_drift
+    rationale: the session's temp view named orders shadows the table and scales amounts by 100

@@ -1,0 +1,38 @@
+family: renamed_metrics
+split: test
+items:
+  - id: renamed-01
+    metric: gross_revenue
+    sql: SELECT SUM(amount) AS gross_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: permitted_variation
+    rationale: exactly gross revenue's definition under its own name
+  - id: renamed-02
+    metric: gross_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS gross_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: identity_mismatch
+    rationale: net revenue's definition presented as gross revenue
+  - id: renamed-03
+    metric: net_revenue
+    sql: SELECT SUM(amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: identity_mismatch
+    rationale: gross revenue's definition presented as net revenue
+  - id: renamed-04
+    metric: gross_revenue
+    sql: SELECT MEASURE(net_revenue) AS gross_revenue FROM main.finance.revenue_mv
+    label: identity_mismatch
+    rationale: the governed net revenue measure presented under the gross revenue name
+  - id: renamed-05
+    metric: net_revenue
+    sql: SELECT MEASURE(net_revenue) AS net_revenue FROM main.finance.revenue_mv WHERE country = 'US'
+    label: permitted_variation
+    rationale: the governed measure through the metric view, sliced by a declared dimension
+  - id: renamed-06
+    metric: net_revenue
+    sql: SELECT MEASURE(net_revenue) * 2 AS net_revenue FROM main.finance.revenue_mv
+    label: formula_drift
+    rationale: the governed measure doubled
+  - id: renamed-07
+    metric: net_revenue
+    sql: SELECT channel, MEASURE(net_revenue) AS net_rev FROM main.finance.revenue_mv GROUP BY channel
+    label: permitted_variation
+    rationale: the governed measure grouped by a declared dimension; the short output alias names the same metric

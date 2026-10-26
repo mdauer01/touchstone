@@ -1,0 +1,43 @@
+family: staging_ctes
+split: dev
+items:
+  - id: ctes-01
+    metric: net_revenue
+    sql: WITH c AS (SELECT * FROM main.finance.orders WHERE status = 'completed') SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM c
+    label: permitted_variation
+    rationale: the required filter applied in a select-project-filter staging step
+  - id: ctes-02
+    metric: net_revenue
+    sql: WITH c AS (SELECT * FROM main.finance.orders) SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM c WHERE status = 'completed' AND country = 'DE'
+    label: permitted_variation
+    rationale: a pass-through staging step; required filter and a declared-dimension slice outside it
+  - id: ctes-03
+    metric: net_revenue
+    sql: WITH c AS (SELECT amount, refund_amount, status FROM main.finance.orders WHERE status = 'completed') SELECT SUM(amount) AS net_revenue FROM c
+    label: identity_mismatch
+    rationale: "SUM(amount) over completed orders is gross_revenue's definition presented as net_revenue — labeled identity_mismatch in renamed-03; consistency decides (adjudicated: blind pass)"
+  - id: ctes-04
+    metric: net_revenue
+    sql: WITH c AS (SELECT refund_amount AS amount, amount AS refund_amount, status FROM main.finance.orders) SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM c WHERE status = 'completed'
+    label: formula_drift
+    rationale: the staging step swaps the columns, so this computes refunds minus amounts
+  - id: ctes-05
+    metric: net_revenue
+    sql: WITH c AS (SELECT CAST(amount AS DOUBLE) AS amount, refund_amount, status FROM main.finance.orders) SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM c WHERE status = 'completed'
+    label: permitted_variation
+    rationale: amount is already DOUBLE, so the cast cannot change a value
+  - id: ctes-06
+    metric: net_revenue
+    sql: WITH c AS (SELECT * FROM main.finance.orders WHERE amount > 0) SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM c WHERE status = 'completed'
+    label: population_drift
+    rationale: the staging step restricts rows on amount, not a declared dimension
+  - id: ctes-07
+    metric: net_revenue
+    sql: WITH c AS (SELECT amount * 2 AS amount, refund_amount, status FROM main.finance.orders) SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM c WHERE status = 'completed'
+    label: formula_drift
+    rationale: amounts are doubled in the staging step
+  - id: ctes-08
+    metric: gross_revenue
+    sql: WITH s AS (SELECT amount, status, channel FROM main.finance.orders), t AS (SELECT * FROM s WHERE status = 'completed') SELECT channel, SUM(amount) AS gross_revenue FROM t GROUP BY channel
+    label: permitted_variation
+    rationale: a chain of select-project-filter steps; grouped by the declared dimension channel

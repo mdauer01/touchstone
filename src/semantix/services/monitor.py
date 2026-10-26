@@ -122,6 +122,10 @@ _SAMPLE = 10                 # attribution lists are capped in the output
 # monitor run, set by monitor_history.
 _NOW: contextvars.ContextVar[str] = contextvars.ContextVar("semantix_monitor_now",
                                                            default="")
+# The run an observation is being made from, when the caller asked for
+# evidence records (monitor_history(export=True)); None otherwise.
+_RUN: contextvars.ContextVar[dict | None] = contextvars.ContextVar("semantix_monitor_run",
+                                                                  default=None)
 _NO_TIME = "<no start time>"
 _BAD_TIME = "<unreadable start time>"
 
@@ -178,6 +182,9 @@ class _Observed:
     measure: str | None = None
     output: str | None = None
     view_outcome: Outcome | None = None
+    # Each run this observation was made from (export only): the original
+    # statement, the execution's fields, the session events before it.
+    runs: list = field(default_factory=list)
     # Columns whose declared type makes literal comparison engine-specific
     # (a collation, fixed-length CHAR): no replaced/broadened decision on them.
     literal_undecided: frozenset = frozenset()
@@ -202,6 +209,9 @@ class _Observed:
                 target.add(value)
         if ex.statement_id and len(self.execution_ids) < _SAMPLE:
             self.execution_ids.append(ex.statement_id)
+        run = _RUN.get()
+        if run is not None:
+            self.runs.append(run)
 
 
 def build_registry(catalog: dict, artifacts: list, dialect: str,
@@ -237,6 +247,7 @@ def monitor_history(
     context: dict | None = None,
     assert_context: bool = False,
     asset_map: dict[str, str] | None = None,
+    export: bool = False,
 ) -> dict:
     """Findings from executed SQL, judged against authoritative definitions.
 
@@ -245,6 +256,10 @@ def monitor_history(
     services.pilot.Pilot) supplies approved metric views, their definition
     windows, and any asserted context; without one, `context` applies to
     history rows only when `assert_context` says it covers every execution.
+
+    `export` adds `comparisons`: one semantix-comparison/1 evidence record
+    per run and governed metric (semantix.assess.record), for the advisory
+    classifier. Findings, funnel and exit codes are the same either way.
     """
     from semantix.services.pilot import precise_ts
 
@@ -360,6 +375,8 @@ def monitor_history(
             if rebuilt:
                 counts["session_reconstructed"] += 1
             explicit = _statement_tag(stmt) or row_identity
+            if export:
+                _RUN.set(_run_record(ex, stmt, dialect, events, ri, si, q_catalog, q_schema))
             qualify_tables(stmt, q_catalog, q_schema, depth)
             if measure_calls(stmt):
                 if any(outside_measure_refs(a) for a in stmt.find_all(exp.AggFunc)):
@@ -417,6 +434,7 @@ def monitor_history(
     for obs in observed.values():
         if recurrence[obs.base_key] < min_runs:
             funnel.add_below(obs)
+    _RUN.set(None)
     findings = _aggregate(judged)
     findings.sort(key=lambda f: (-f["severity"], -f["uses"], f["kind"], f["concept"] or ""))
     bases = {o.base_key for o in observed.values()}
@@ -463,7 +481,90 @@ def monitor_history(
         "funnel": funnel.as_dict(),
         "findings": findings,
         "recorded": False,  # v1: read-only — nothing written to the store
+        **({"comparisons": _comparisons(judged, by_concept, pilot, history_registry,
+                                         dialect)} if export else {}),
     }
+
+
+# ------------------------------------------------------- evidence records
+
+def _run_record(ex: Execution, stmt: exp.Expression, dialect: str, events, ri: int, si: int,
+                catalog: str | None, schema: str | None) -> dict:
+    """What one run contributes to an evidence record, captured BEFORE the
+    tree is qualified: the statement as it ran and the session before it."""
+    earlier = [e.what for e in events
+               if (e.row, e.index) < (ri, si)
+               and (e.row == ri or (e.session is not None and e.session == ex.session_id))]
+    return {"execution": {"id": ex.statement_id, "start_time": ex.start_time,
+                          "session_id": ex.session_id, "user": ex.executed_by,
+                          "client": ex.client_application, "asset": ex.asset,
+                          "statement": stmt.meta.get("source_text") or stmt.sql(dialect=dialect),
+                          "dialect": dialect},
+            "session_evidence": {"context": {"catalog": catalog, "schema": schema}
+                                 if (catalog or schema) else None,
+                                 "events": earlier}}
+
+
+_IDENTITY_SOURCES = {"alias", "tag", "asset", "output", "query_tag"}
+
+
+def _comparisons(judged, by_concept, pilot, registry: SchemaRegistry, dialect: str) -> list:
+    from semantix.assess.record import FORMAT, OBSERVATIONS_NOTE, record_id, validate
+
+    specs = {(v.name, s.name.lower()): (v, s)
+             for v in (pilot.views if pilot is not None else []) for s in v.specs}
+    out, seen = [], set()
+    for f, obs in judged:
+        concept = f.get("concept")
+        defs = by_concept.get(concept) if concept else None
+        if not defs:
+            continue      # nothing authoritative to compare with
+        for run in obs.runs:
+            ts = run["execution"]["start_time"]
+            auth = next((a for a in defs if a.applies_at(ts)), defs[0])
+            key = (run["execution"]["id"], run["execution"]["statement"], auth.label)
+            if key in seen:
+                continue
+            seen.add(key)
+            view, spec = specs.get((auth.view, (auth.measure or "").lower()), (None, None))
+            snapshot = view.snapshot.read_text(encoding="utf-8") if view is not None else None
+            names = f.get("names_used") or sorted(obs.names)
+            source = f.get("identity_source")
+            record = {
+                "format": FORMAT,
+                "record_id": record_id(run["execution"]["statement"],
+                                       run["execution"]["id"], auth.label),
+                "execution": run["execution"],
+                "claimed_metric": {"name": names[0] if names else None, "identity_evidence": [
+                    {"source": source if source in _IDENTITY_SOURCES else "none",
+                     "value": n} for n in names] or [{"source": "none", "value": None}]},
+                "definition": {
+                    "system": auth.system, "view": auth.view, "name": auth.measure or auth.name,
+                    "expr": (spec.expr if spec is not None and spec.expr
+                             else auth.core.measure_expr),
+                    "source": auth.base_relation,
+                    "required_filters": (list(spec.filters) if spec is not None
+                                         else list(auth.core.filters)),
+                    "dimensions": [f"{d.name} = {d.expr}" for d in (auth.dimensions or [])],
+                    "snapshot_text": snapshot,
+                    "snapshot_sha256": view.sha256 if view is not None else None,
+                    "applies": {"from": auth.applies_from, "to": auth.applies_to}},
+                "schemas": {r: registry.column_types(r) for r in sorted(obs.relations)
+                            if registry.column_types(r)},
+                "session_evidence": run["session_evidence"],
+                "unverified_observations": {
+                    "note": OBSERVATIONS_NOTE, "finding_kind": f["kind"],
+                    "reasons": list(f.get("reasons") or []),
+                    "suspected": list(f.get("suspected") or []),
+                    "variation": f.get("variation"),
+                    "calculation_matches": f.get("calculation_matches"),
+                    "experimental": f.get("experimental")},
+            }
+            errors = validate(record)
+            if errors:   # never hand a classifier a malformed record
+                raise ValueError(f"comparison record does not validate: {errors}")
+            out.append(record)
+    return out
 
 
 # ------------------------------------------------------------ observation

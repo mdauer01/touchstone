@@ -1,0 +1,33 @@
+family: window_ranks
+split: dev
+items:
+  - id: windows-01
+    metric: net_revenue
+    sql: SELECT country, SUM(amount) - SUM(refund_amount) AS net_revenue, RANK() OVER (ORDER BY SUM(amount) - SUM(refund_amount) DESC) AS r FROM main.finance.orders WHERE status = 'completed' GROUP BY country
+    label: permitted_variation
+    rationale: net revenue per declared dimension, plus a rank column; each group's value is unchanged
+  - id: windows-02
+    metric: net_revenue
+    sql: SELECT order_id, SUM(amount) OVER () - SUM(refund_amount) OVER () AS net_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: grain_drift
+    rationale: the total is repeated once per order row, not returned at the metric's grain
+  - id: windows-03
+    metric: net_revenue
+    sql: SELECT DATE_TRUNC('MONTH', order_date) AS month, SUM(SUM(amount) - SUM(refund_amount)) OVER (ORDER BY DATE_TRUNC('MONTH', order_date)) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY 1
+    label: formula_drift
+    rationale: a running (cumulative) total presented as monthly net revenue
+  - id: windows-04
+    metric: net_revenue
+    sql: SELECT country, (SUM(amount) - SUM(refund_amount)) / SUM(SUM(amount) - SUM(refund_amount)) OVER () AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY country
+    label: formula_drift
+    rationale: each country's share of the total, not its net revenue
+  - id: windows-05
+    metric: net_revenue
+    sql: SELECT country, SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY country QUALIFY RANK() OVER (ORDER BY SUM(amount) - SUM(refund_amount) DESC) <= 3
+    label: permitted_variation
+    rationale: the top three countries; each shown value is that country's net revenue
+  - id: windows-06
+    metric: gross_revenue
+    sql: SELECT channel, SUM(amount) AS gross_revenue, SUM(amount) - LAG(SUM(amount)) OVER (ORDER BY channel) AS delta FROM main.finance.orders WHERE status = 'completed' GROUP BY channel
+    label: permitted_variation
+    rationale: gross revenue per declared dimension; the extra delta column does not change it

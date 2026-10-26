@@ -1,0 +1,28 @@
+family: dimension_joins
+split: test
+items:
+  - id: joins-01
+    metric: net_revenue
+    sql: SELECT SUM(o.amount) - SUM(o.refund_amount) AS net_revenue FROM main.finance.orders o JOIN main.finance.customers c ON o.customer_id = c.customer_id WHERE o.status = 'completed' AND c.segment = 'smb'
+    label: population_drift
+    rationale: rows are restricted on customer segment, which is not a declared dimension
+  - id: joins-02
+    metric: net_revenue
+    sql: SELECT c.region, SUM(o.amount) - SUM(o.refund_amount) AS net_revenue FROM main.finance.orders o LEFT JOIN main.finance.customers c ON o.customer_id = c.customer_id WHERE o.status = 'completed' GROUP BY c.region
+    label: grain_drift
+    rationale: grouped by customer region, not a declared dimension
+  - id: joins-03
+    metric: net_revenue
+    sql: SELECT SUM(o.amount) - SUM(o.refund_amount) AS net_revenue FROM main.finance.orders o JOIN main.finance.order_items i ON o.order_id = i.order_id WHERE o.status = 'completed'
+    label: source_drift
+    rationale: joining order lines repeats each order once per line, multiplying amounts
+  - id: joins-04
+    metric: net_revenue
+    sql: SELECT SUM(o.amount) - SUM(o.refund_amount) AS net_revenue FROM main.finance.orders o JOIN main.finance.customers c ON o.customer_id = c.customer_id WHERE o.status = 'completed'
+    label: insufficient_evidence
+    rationale: the inner join drops orders without a matching customer and repeats orders if customer_id is not unique; neither integrity nor uniqueness is stated
+  - id: joins-05
+    metric: gross_revenue
+    sql: SELECT o.country, SUM(o.amount) AS gross_revenue FROM main.finance.orders o WHERE o.status = 'completed' AND o.customer_id IN (SELECT customer_id FROM main.finance.customers WHERE segment = 'enterprise') GROUP BY o.country
+    label: population_drift
+    rationale: rows are restricted to enterprise customers through a subquery; segment is not a declared dimension

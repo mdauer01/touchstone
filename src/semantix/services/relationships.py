@@ -192,6 +192,9 @@ def parse_statement_list(text: str, dialect: str) -> list[exp.Expression | None]
             continue
         if parsed is None or isinstance(parsed, exp.Semicolon):
             continue
+        # The text as it ran, for evidence records (assess.record): the tree
+        # is qualified in place later, and a re-render is not always faithful.
+        parsed.meta["source_text"] = chunk.strip()
         statements.append(parsed)
     return statements
 

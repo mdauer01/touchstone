@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://semantix.dev/schemas/semantix-comparison-1.json",
+  "title": "semantix-comparison/1",
+  "description": "One metric use: what ran, the authoritative definition it is compared with, and — only as explicitly unverified observations — what semantix extracted. The original statement and the definition come first; nothing semantix concluded is stated as fact.",
+  "type": "object",
+  "required": ["format", "record_id", "execution", "claimed_metric", "definition", "schemas"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {"const": "semantix-comparison/1"},
+    "record_id": {"type": "string", "minLength": 1},
+    "execution": {
+      "type": "object",
+      "required": ["statement", "dialect"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": ["string", "null"]},
+        "start_time": {"type": ["string", "null"]},
+        "session_id": {"type": ["string", "null"]},
+        "user": {"type": ["string", "null"]},
+        "client": {"type": ["string", "null"]},
+        "asset": {"type": ["string", "null"]},
+        "statement": {"type": "string", "minLength": 1, "description": "the original statement text, as it ran"},
+        "dialect": {"type": "string"}
+      }
+    },
+    "claimed_metric": {
+      "type": "object",
+      "required": ["name", "identity_evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": ["string", "null"]},
+        "identity_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "source": {"enum": ["alias", "tag", "asset", "output", "query_tag", "none"]},
+              "value": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "definition": {
+      "type": "object",
+      "required": ["name", "expr", "source", "required_filters", "dimensions"],
+      "additionalProperties": false,
+      "properties": {
+        "system": {"type": ["string", "null"]},
+        "view": {"type": ["string", "null"]},
+        "name": {"type": "string"},
+        "expr": {"type": "string", "description": "the governed measure as declared"},
+        "source": {"type": ["string", "null"], "description": "the relation the definition reads"},
+        "required_filters": {"type": "array", "items": {"type": "string"}},
+        "dimensions": {"type": "array", "items": {"type": "string"}},
+        "snapshot_text": {"type": ["string", "null"], "description": "the raw definition as snapshotted"},
+        "snapshot_sha256": {"type": ["string", "null"]},
+        "applies": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {"from": {"type": ["string", "null"]}, "to": {"type": ["string", "null"]}}
+        }
+      }
+    },
+    "schemas": {
+      "type": "object",
+      "description": "relation -> {column -> declared type} for each relation the statement reads",
+      "additionalProperties": {"type": "object", "additionalProperties": {"type": "string"}}
+    },
+    "session_evidence": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "context": {"type": ["object", "null"]},
+        "events": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "unverified_observations": {
+      "type": ["object", "null"],
+      "description": "semantix's extracted differences, refusal reasons and suspected items — UNVERIFIED; omitted for the ablation",
+      "required": ["note"],
+      "additionalProperties": false,
+      "properties": {
+        "note": {"type": "string"},
+        "finding_kind": {"type": ["string", "null"]},
+        "reasons": {"type": "array", "items": {"type": "object"}},
+        "suspected": {"type": "array", "items": {"type": "string"}},
+        "variation": {"type": ["object", "null"]},
+        "calculation_matches": {"type": ["string", "null"]},
+        "experimental": {"type": ["object", "null"]}
+      }
+    },
+    "controlled_comparison": {
+      "type": ["object", "null"],
+      "description": "an execution comparison under the same slices, grouping, data snapshot and settings; a difference is an observed discrepancy that still needs interpretation",
+      "required": ["governed_sql", "snapshot", "settings", "observed_discrepancy"],
+      "additionalProperties": false,
+      "properties": {
+        "governed_sql": {"type": "string"},
+        "snapshot": {"type": "string"},
+        "settings": {"type": "object"},
+        "observed_discrepancy": {"type": ["boolean", "null"]},
+        "detail": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

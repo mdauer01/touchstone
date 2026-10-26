@@ -1,0 +1,53 @@
+family: slices
+split: dev
+items:
+  - id: slices-01
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND country = 'US'
+    label: permitted_variation
+    rationale: the required filter holds; the extra filter is on the declared dimension country
+  - id: slices-02
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND channel IN ('web', 'app')
+    label: permitted_variation
+    rationale: a slice on the declared dimension channel
+  - id: slices-03
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE country = 'US'
+    label: population_drift
+    rationale: the required filter status = 'completed' is dropped
+  - id: slices-04
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status IN ('completed', 'pending')
+    label: population_drift
+    rationale: the required filter is broadened to pending orders
+  - id: slices-05
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND amount > 0
+    label: population_drift
+    rationale: rows are restricted on amount, which is not a declared dimension
+  - id: slices-06
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(discount) AS net_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: formula_drift
+    rationale: subtracts discounts instead of refunds
+  - id: slices-07
+    metric: net_revenue
+    sql: SELECT SUM(amount - refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: formula_drift
+    rationale: "the policy's formula rule decides it: SUM(amount - refund_amount) is different arithmetic, and refund_amount is stated nullable; the authored label read the nullability clause where the formula clause already applies (adjudicated: blind pass)"
+  - id: slices-08
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND NOT country = 'US'
+    label: permitted_variation
+    rationale: a negated slice on the declared dimension country
+  - id: slices-09
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' OR channel = 'web'
+    label: population_drift
+    rationale: the required filter is weakened through OR; non-completed web orders are counted
+  - id: slices-10
+    metric: gross_revenue
+    sql: SELECT SUM(amount) AS gross_revenue FROM main.finance.orders WHERE channel = 'store' AND status = 'completed'
+    label: permitted_variation
+    rationale: gross revenue sliced by the declared dimension channel; conjunct order is irrelevant

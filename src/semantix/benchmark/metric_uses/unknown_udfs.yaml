@@ -1,0 +1,28 @@
+family: unknown_udfs
+split: test
+items:
+  - id: udf-01
+    metric: net_revenue
+    sql: SELECT fx_convert(SUM(amount) - SUM(refund_amount), 'EUR') AS net_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: insufficient_evidence
+    rationale: an unknown function applied to the governed value; what it does is not in the evidence
+  - id: udf-02
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND is_test_order(order_id) = FALSE
+    label: population_drift
+    rationale: "whatever the unknown function does, it restricts rows on order_id, a column that is not a declared dimension; the filter rule decides before the unknown-function clause (adjudicated: blind pass)"
+  - id: udf-03
+    metric: net_revenue
+    sql: SELECT initcap_custom(country) AS country_label, SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY 1
+    label: grain_drift
+    rationale: "grouping by anything other than a declared dimension exactly as declared changes the grain; an unknown function of country is not country (as week is not month, time-05) (adjudicated: blind pass)"
+  - id: udf-04
+    metric: gross_revenue
+    sql: SELECT channel, SUM(amount) * 1.19 AS gross_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY channel
+    label: formula_drift
+    rationale: no unknown function here — a known factor (19% added) changes every nonzero value
+  - id: udf-05
+    metric: net_revenue
+    sql: SELECT SUM(normalize_amount(amount)) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed'
+    label: insufficient_evidence
+    rationale: an unknown function on each amount inside the aggregate

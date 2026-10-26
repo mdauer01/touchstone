@@ -1,0 +1,30 @@
+# Disagreements between the authored labels and the blind pass, with the decision and
+# why. Item labels in the family files are the decisions.
+pass: blind-1
+agreement: 56 of 60 items
+decisions:
+- id: slices-07
+  authored: insufficient_evidence
+  blind: formula_drift
+  decision: formula_drift
+  why: 'the policy''s formula rule decides it: SUM(amount - refund_amount) is different arithmetic, and
+    refund_amount is stated nullable; the authored label read the nullability clause where the formula
+    clause already applies'
+- id: ctes-03
+  authored: formula_drift
+  blind: identity_mismatch
+  decision: identity_mismatch
+  why: "SUM(amount) over completed orders is gross_revenue's definition presented as net_revenue \u2014\
+    \ labeled identity_mismatch in renamed-03; consistency decides"
+- id: udf-02
+  authored: insufficient_evidence
+  blind: population_drift
+  decision: population_drift
+  why: whatever the unknown function does, it restricts rows on order_id, a column that is not a declared
+    dimension; the filter rule decides before the unknown-function clause
+- id: udf-03
+  authored: insufficient_evidence
+  blind: grain_drift
+  decision: grain_drift
+  why: grouping by anything other than a declared dimension exactly as declared changes the grain; an
+    unknown function of country is not country (as week is not month, time-05)

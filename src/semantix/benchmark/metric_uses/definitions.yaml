@@ -1,0 +1,54 @@
+# The authoritative definitions every item is compared with (README.md).
+# `view` is the metric-view snapshot as a pilot package would carry it.
+system: uc_metrics
+view_name: main.finance.revenue_mv
+view: |
+  version: 1.1
+  source: main.finance.orders
+  filter: status = 'completed'
+  dimensions:
+    - name: country
+      expr: country
+    - name: channel
+      expr: channel
+    - name: order_date
+      expr: order_date
+    - name: month
+      expr: DATE_TRUNC('MONTH', order_date)
+  measures:
+    - name: net_revenue
+      expr: SUM(amount) - SUM(refund_amount)
+    - name: gross_revenue
+      expr: SUM(amount)
+applies:
+  from: "2026-09-01T00:00:00Z"
+  to: null
+catalog:
+  main.finance.orders:
+    order_id: BIGINT
+    customer_id: BIGINT
+    amount: DOUBLE
+    refund_amount: DOUBLE
+    discount: DOUBLE
+    status: STRING
+    country: STRING
+    channel: STRING
+    order_date: DATE
+  main.finance.customers:
+    customer_id: BIGINT
+    segment: STRING
+    region: STRING
+  main.finance.order_items:
+    order_id: BIGINT
+    sku: STRING
+    qty: INT
+  dev.finance.orders:
+    order_id: BIGINT
+    customer_id: BIGINT
+    amount: DOUBLE
+    refund_amount: DOUBLE
+    discount: DOUBLE
+    status: STRING
+    country: STRING
+    channel: STRING
+    order_date: DATE

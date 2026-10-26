@@ -342,12 +342,42 @@ def main(argv: list[str] | None = None) -> int:
                        help="occurrences before a recurring measure counts as "
                             "a definition in use (default 2)")
     p_mon.add_argument("--json", dest="json_out", help="write full findings JSON here")
+    p_mon.add_argument("--export-comparisons", dest="export_comparisons",
+                       help="write one semantix-comparison/1 evidence record per metric use "
+                            "here (JSON lines) for the advisory classifier: the statement "
+                            "and the definition first, semantix's reading as unverified "
+                            "observations")
     p_mon.add_argument("--fail-on-alt", dest="fail_on_alt", action="store_true",
                        help="exit 1 when a suspected difference from an authoritative "
                             "definition is found (a triage gate: the difference is "
                             "suspected, not verified; candidates and unverifiable "
                             "uses never fail it)")
     p_mon.add_argument("--db", default="semantix.db")
+
+    p_assess = sub.add_parser(
+        "assess",
+        help="development: evaluate an ADVISORY drift classifier against independently "
+             "labeled metric uses (never changes a finding or an exit code)")
+    assess_sub = p_assess.add_subparsers(dest="assess_command", required=True)
+    p_ab = assess_sub.add_parser(
+        "benchmark",
+        help="score a provider on the metric-use dataset: missed drift, false alerts, "
+             "abstention, calibration, cost and latency (the fake provider measures "
+             "nothing — the report says so)")
+    p_ab.add_argument("--provider", default="fake",
+                      choices=["fake", "api", "databricks", "snowflake"],
+                      help="assessment backend; only `fake` runs in this release")
+    p_ab.add_argument("--model", help="model name for a model-backed provider")
+    p_ab.add_argument("--endpoint", help="serving endpoint or warehouse — never a secret")
+    p_ab.add_argument("--seed", default="", help="seed for the fake provider")
+    p_ab.add_argument("--split", default="test", choices=["dev", "test", "all"],
+                      help="split by query family; tune on dev, report test")
+    p_ab.add_argument("--with-observations", dest="with_observations", action="store_true",
+                      help="run the monitor over the dataset and add semantix's unverified "
+                           "observations: enables the ablation and the semantix-alone "
+                           "baseline")
+    p_ab.add_argument("--dataset", help="dataset directory (default: the shipped one)")
+    p_ab.add_argument("--json", dest="json_out", help="write the full report JSON here")
 
     args = parser.parse_args(argv)
     handler = {
@@ -369,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
         "catalog": _cmd_catalog,
         "oracle": _cmd_oracle,
         "propose": _cmd_propose,
+        "assess": _cmd_assess,
     }[args.command]
     try:
         import duckdb
@@ -1056,6 +1087,55 @@ def _print_graph(rows: list[dict]) -> None:
               + detail)
 
 
+def _cmd_assess(args: argparse.Namespace) -> int:
+    from semantix.assess.providers import ProviderConfig, get_provider
+    from semantix.assess.runner import load_dataset, observations_from_monitor, run_benchmark
+
+    try:
+        provider = get_provider(ProviderConfig(args.provider, model=args.model,
+                                               endpoint=args.endpoint,
+                                               options={"seed": args.seed}))
+    except NotImplementedError as e:
+        print(f"semantix assess: {e}", file=sys.stderr)
+        return 2
+    dataset = load_dataset(args.dataset)
+    observations = (observations_from_monitor(dataset, args.split)
+                    if args.with_observations else None)
+    report = run_benchmark(provider, dataset=dataset, split=args.split,
+                           observations=observations)
+    print(f"assess benchmark · {report['dataset']} · split {report['split']} · "
+          f"{report['items']} item(s) over {len(report['families'])} famil"
+          f"{'y' if len(report['families']) == 1 else 'ies'} · provider {report['provider']}"
+          + (f" ({report['model']})" if report["model"] else ""))
+    if not report["performance_measured"]:
+        print(f"  NOTE: {report['note']}")
+    print(f"  {report['advisory_only']}")
+
+    def line(label: str, m: dict) -> None:
+        def rate(x):
+            return "n/a" if x["rate"] is None else f"{x['count']}/{x['of']} ({x['rate']:.0%})"
+        ece = m["calibration"]["ece"]
+        print(f"  {label:<34} missed drift {rate(m['missed_drift'])} · false alerts "
+              f"{rate(m['false_alerts'])} · abstained {m['abstention']['count']}/{m['n']}"
+              + (f" · ECE {ece:.3f}" if ece is not None else ""))
+    tag = "" if report["performance_measured"] else " [not a measurement]"
+    for arm, result in report["arms"].items():
+        line(arm.replace("_", " ") + tag, result["overall"])
+    for name, value in report["baselines"].items():
+        if isinstance(value, dict):
+            line(f"baseline: {name.replace('_', ' ')}", value)
+        else:
+            print(f"  baseline: {name.replace('_', ' ')} — {value}")
+    if args.json_out:
+        from semantix.assess.runner import to_json
+
+        out = Path(args.json_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(to_json(report))
+        print(f"  report JSON: {out}")
+    return 0
+
+
 def _cmd_monitor(args: argparse.Namespace) -> int:
     from semantix.adapters.catalog import load_catalog
     from semantix.services.history import from_records, read_history
@@ -1143,8 +1223,15 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     result = monitor_history(store, intake, registry, dialect, min_runs=args.min_runs,
                              authority_systems=authority, pilot=pilot,
                              context=context, assert_context=args.assert_context,
-                             asset_map=asset_map)
+                             asset_map=asset_map,
+                             export=bool(getattr(args, "export_comparisons", None)))
     _print_monitor(result)
+    if getattr(args, "export_comparisons", None):
+        records = result.pop("comparisons")
+        out = Path(args.export_comparisons)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        print(f"  comparisons: {len(records)} semantix-comparison/1 record(s) → {out}")
     if args.json_out:
         out = Path(args.json_out)
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,43 @@
+family: time_windows
+split: test
+items:
+  - id: time-01
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND order_date >= DATE '2026-01-01'
+    label: permitted_variation
+    rationale: a time window on the declared dimension order_date
+  - id: time-02
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND order_date BETWEEN DATE '2026-01-01' AND DATE '2026-03-31'
+    label: permitted_variation
+    rationale: a closed quarter window on order_date
+  - id: time-03
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND DATE_TRUNC('MONTH', order_date) = DATE '2026-02-01'
+    label: permitted_variation
+    rationale: a slice on the declared dimension month
+  - id: time-04
+    metric: net_revenue
+    sql: SELECT DATE_TRUNC('MONTH', order_date) AS month, SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY 1
+    label: permitted_variation
+    rationale: grouped by the declared dimension month
+  - id: time-05
+    metric: net_revenue
+    sql: SELECT DATE_TRUNC('WEEK', order_date) AS week, SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY 1
+    label: grain_drift
+    rationale: week is not a declared dimension; the policy permits only declared groupings
+  - id: time-06
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' AND order_date >= CURRENT_DATE - INTERVAL 30 DAY
+    label: permitted_variation
+    rationale: a rolling window on order_date
+  - id: time-07
+    metric: gross_revenue
+    sql: SELECT order_date, SUM(amount) AS gross_revenue FROM main.finance.orders WHERE status = 'completed' AND order_date >= DATE '2026-10-01' GROUP BY order_date
+    label: permitted_variation
+    rationale: daily gross revenue over a window, both on the declared dimension order_date
+  - id: time-08
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE order_date >= DATE '2026-01-01'
+    label: population_drift
+    rationale: a time window, but the required filter status = 'completed' is missing

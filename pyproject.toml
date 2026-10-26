@@ -39,4 +39,5 @@ line-length = 100
 target-version = "py310"
 
 [tool.setuptools.package-data]
-semantix = ["benchmark/*.yaml"]
+semantix = ["benchmark/*.yaml", "benchmark/metric_uses/*.yaml", "benchmark/metric_uses/*.md",
+            "assess/schema.json", "assess/criteria/*.yaml"]

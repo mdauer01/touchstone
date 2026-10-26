@@ -1,0 +1,28 @@
+family: top_n
+split: test
+items:
+  - id: topn-01
+    metric: net_revenue
+    sql: SELECT country, SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY country ORDER BY net_revenue DESC LIMIT 5
+    label: permitted_variation
+    rationale: the five largest countries; each value is that country's net revenue
+  - id: topn-02
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM (SELECT * FROM main.finance.orders WHERE status = 'completed' ORDER BY amount DESC LIMIT 100) t
+    label: population_drift
+    rationale: only the hundred largest orders are counted
+  - id: topn-03
+    metric: net_revenue
+    sql: SELECT SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' LIMIT 10
+    label: permitted_variation
+    rationale: an ungrouped aggregate returns one row; the LIMIT changes nothing
+  - id: topn-04
+    metric: net_revenue
+    sql: SELECT customer_id, SUM(amount) - SUM(refund_amount) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY customer_id ORDER BY 2 DESC LIMIT 10
+    label: grain_drift
+    rationale: grouped by customer_id, not a declared dimension
+  - id: topn-05
+    metric: gross_revenue
+    sql: SELECT channel, SUM(amount) AS gross_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY channel ORDER BY channel LIMIT 3 OFFSET 1
+    label: permitted_variation
+    rationale: a page of per-channel values; each shown value is unchanged
