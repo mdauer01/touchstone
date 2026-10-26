@@ -12,7 +12,7 @@ whole engine inert on Snowflake, Databricks and BigQuery.
 import pytest
 
 from semantix.cli import main
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import CanonLevel
 from semantix.store import Store, normalize_ts, utcnow
@@ -47,6 +47,14 @@ def test_a_mixed_arity_estate_binds_both_ways():
                 "select region, sum(amount) as m from landing.events group by 1"):
         canon = canonicalize_sql(sql, registry.sqlglot_schema("snowflake"), "snowflake")
         assert canon.level == CanonLevel.OPTIMIZED, f"{sql}: {canon.error}"
+    # The proof path binds the names the catalog states and refuses the
+    # short one, whose table depends on the session's defaults.
+    assert canonicalize("select region, sum(amount) as m from prod.landing.events "
+                        "group by 1", registry, "snowflake").level == CanonLevel.SUPPORTED
+    short = canonicalize("select region, sum(amount) as m from landing.events group by 1",
+                         registry, "snowflake")
+    assert short.level != CanonLevel.SUPPORTED
+    assert any("depends on the session" in g for g in short.gaps), short.gaps
 
 
 def test_registering_models_does_not_break_binding():

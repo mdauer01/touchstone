@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer import optimize
+from sqlglot.optimizer.annotate_types import annotate_types
 from sqlglot.optimizer.pushdown_projections import pushdown_projections
 from sqlglot.optimizer.qualify import qualify
 
@@ -47,6 +48,8 @@ class CanonResult:
     # completeness gate can never see them in the optimized AST. Merged into
     # the fingerprint's gaps by extract_fingerprints.
     gaps: tuple[str, ...] = ()
+    # The proof policy's rules that produced this form (SUPPORTED only).
+    rules: tuple[str, ...] = ()
 
     @property
     def usable(self) -> bool:
@@ -195,8 +198,50 @@ def _has_inner_order(parsed: exp.Expression) -> bool:
     )
 
 
+def canonicalize(sql: str, registry, dialect: str) -> CanonResult:
+    """The canonical form every fingerprint is built from.
+
+    Proof path first (extraction.proof): inside the supported grammar the
+    result is SUPPORTED, produced only by the policy's stated rules. Outside
+    it, the general optimizer still supplies a form — useful for diffs,
+    candidate matching and blame — at a HYPOTHESIS level, with the reason it
+    is not proof carried as a gap. Nothing on that path can certify, alias
+    or conform, and nothing on it is stated as a definitive difference."""
+    from semantix.extraction.proof import (GRAMMAR_GAP, IDENTITY_GAP, certify,
+                                           parenthesize, round_trips, strip_parens)
+
+    proof = certify(sql, registry, dialect)
+    refusal = proof.reason
+    if proof.supported:
+        try:
+            ast = parenthesize(_normalize_symmetric(strip_parens(proof.ast), dialect))
+        except Exception as e:  # noqa: BLE001 — never certify a half-normalized form
+            ast, refusal = None, f"normalization failed: {e}"
+        if ast is not None and not round_trips(ast, dialect):
+            ast, refusal = None, "the canonical text does not parse back to the same tree"
+        if ast is not None:
+            try:
+                # Type INFERENCE only (no rewrite): registered models keep their
+                # output column types, which the catalog of downstream reads uses.
+                annotate_types(ast, schema=registry.sqlglot_schema(dialect), dialect=dialect)
+            except Exception:  # noqa: BLE001 — types are informational here
+                pass
+            return CanonResult(ast, CanonLevel.SUPPORTED, None, (),
+                               tuple(dict.fromkeys((*proof.rules, "commutative",
+                                                    "not_equality", "parens"))))
+    hypothesis = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    prefix = IDENTITY_GAP if proof.kind == "identity" and refusal == proof.reason \
+        else GRAMMAR_GAP
+    return CanonResult(hypothesis.ast, hypothesis.level, hypothesis.error,
+                       (*hypothesis.gaps, f"{prefix}: {refusal}"))
+
+
 def canonicalize_sql(sql: str, schema, dialect: str) -> CanonResult:
-    """`schema` is a raw nested dict or a prebuilt sqlglot MappingSchema;
+    """The general optimizer's canonical form — a HYPOTHESIS, never proof.
+    Used for model registration (names, types, lineage), relationship
+    mining, and as canonicalize()'s fallback outside the proof grammar.
+
+    `schema` is a raw nested dict or a prebuilt sqlglot MappingSchema;
     the registry hands over the latter so it is normalized once per scan
     rather than once per model."""
     try:

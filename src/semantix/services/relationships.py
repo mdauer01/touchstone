@@ -117,6 +117,15 @@ def mine_sql_text(
 
 def _parse_statements(text: str, dialect: str) -> tuple[list[exp.Expression], int]:
     """(parsed statements, unparseable statement count) for a history blob.
+    See parse_statement_list, which keeps each unparseable statement's
+    position."""
+    listed = parse_statement_list(text, dialect)
+    return [s for s in listed if s is not None], sum(1 for s in listed if s is None)
+
+
+def parse_statement_list(text: str, dialect: str) -> list[exp.Expression | None]:
+    """Every statement in a history blob, in order; None for one that does
+    not parse, so what came before what is never lost.
 
     Statements are split on semicolons OUTSIDE strings and comments, using
     the dialect's tokenizer, and each is parsed on its own. The previous
@@ -126,35 +135,50 @@ def _parse_statements(text: str, dialect: str) -> tuple[list[exp.Expression], in
     "non-query statement", and a SELECT embedded in an INSERT's string
     literal was counted as an EXECUTION. Counts here are per statement the
     operator actually ran.
+
+    A comment on the SAME line after a statement's semicolon belongs to that
+    statement (`SELECT …; -- semantix: metric=gross_revenue`): attached to the
+    next one, it named the wrong query.
     """
     from sqlglot.tokens import TokenType
 
     try:
         tokens = sqlglot.tokenize(text, read=dialect)
     except Exception:  # noqa: BLE001 — a blob the tokenizer rejects outright
-        return _parse_whole(text, dialect)
+        whole, bad = _parse_whole(text, dialect)
+        return [*whole, *([None] * bad)]
     chunks: list[str] = []
     start = 0
     for tok in tokens:
         if tok.token_type == TokenType.SEMICOLON:
-            chunks.append(text[start:tok.start])
-            start = tok.end + 1
+            if tok.start < start:
+                continue   # consumed with a trailing comment
+            chunk = text[start:tok.start]
+            after = tok.end + 1
+            eol = text.find("\n", after)
+            line = text[after: eol if eol >= 0 else len(text)]
+            tail = line.strip()
+            if tail and (tail.startswith("--") or (tail.startswith("/*") and tail.endswith("*/")
+                                                  and "*/" not in tail[2:-2])):
+                chunk = f"{chunk} {tail}"
+                after = eol if eol >= 0 else len(text)
+            chunks.append(chunk)
+            start = after
     chunks.append(text[start:])
 
-    statements: list[exp.Expression] = []
-    skipped = 0
+    statements: list[exp.Expression | None] = []
     for chunk in chunks:
         if not _has_code(chunk, dialect):
             continue  # whitespace or comments only — nothing was executed
         try:
             parsed = sqlglot.parse_one(chunk, read=dialect)
         except Exception:  # noqa: BLE001
-            skipped += 1
+            statements.append(None)
             continue
         if parsed is None or isinstance(parsed, exp.Semicolon):
             continue
         statements.append(parsed)
-    return statements, skipped
+    return statements
 
 
 def _has_code(chunk: str, dialect: str) -> bool:

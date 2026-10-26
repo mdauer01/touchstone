@@ -9,7 +9,7 @@ from __future__ import annotations
 
 
 from semantix.engine import run_scan
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, Fingerprint, Provenance, SemanticCore, VerdictType
@@ -21,7 +21,7 @@ CATALOG = {"raw.orders": {"customer_id": "INT", "amount": "DOUBLE",
 
 def _core(sql: str, dialect: str, catalog=CATALOG):
     registry = SchemaRegistry(catalog)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     fps = extract_fingerprints(canon, "db.main.m", Provenance("t", "m"), dialect, registry)
     assert len(fps) == 1, (canon.level, canon.error)
     return fps[0]
@@ -93,9 +93,13 @@ def test_pin_placeholder_never_leaks_into_cores(tmp_path):
     assert not any("_." in fp.canonical_sql for fp in result.fingerprints)
     assert not any(n.startswith("_.") for fp in result.fingerprints for n in fp.core.join_nodes)
     by_rel = {fp.relation.rsplit(".", 1)[-1]: fp for fp in result.fingerprints}
-    # The explicitly qualified one is proof grade; the short ones depend on
-    # the session and say so, so nothing certifies across them.
-    assert by_rel["m3"].canon_level in PROOF_LEVELS
+    # The short ones depend on the session and say so. The explicitly
+    # qualified one names PROD.raw.orders, which the two-part catalog does not
+    # describe: under semantix-proof/2 its columns are not borrowed from
+    # `raw.orders` (that would assume they are one table), so it is refused
+    # with the reason. Nothing certifies across them.
+    assert by_rel["m3"].canon_level not in PROOF_LEVELS
+    assert any("lists only raw.orders" in g for g in by_rel["m3"].gaps), by_rel["m3"].gaps
     for short in ("m1", "m2"):
         assert by_rel[short].canon_level not in PROOF_LEVELS
         assert any("depends on the session" in g for g in by_rel[short].gaps)

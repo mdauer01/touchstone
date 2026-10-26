@@ -234,6 +234,8 @@ def test_join_backed_shadow_is_refused_with_reason(tmp_path):
     proposals = build_proposals(store, concept="regional_revenue")
     store.close()
     (p,) = proposals["proposals"]
-    (cand,) = p["candidates"]
-    assert cand["declaration"] is None
-    assert any("join graph" in r for r in cand["refused"])
+    # Joins are outside the proof grammar (semantix-proof/2): the joined
+    # definition is not proof grade, so nothing is proposed FROM it — it is
+    # counted as excluded, never emitted as a declaration.
+    assert p["candidates"] == []
+    assert p["excluded_below_proof"] == 1

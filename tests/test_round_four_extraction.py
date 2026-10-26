@@ -16,7 +16,7 @@ without a test here re-opens a false-certification path.
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, Provenance
@@ -33,7 +33,7 @@ CATALOG = {
 def core(sql, dialect="duckdb"):
     """(hash, canon_level, gaps) for the first measure in `sql`."""
     registry = SchemaRegistry(CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     fps = extract_fingerprints(canon, "analytics.m", Provenance("t", "t"),
                                dialect, registry)
     if not fps:
@@ -183,14 +183,24 @@ def test_ordinary_sql_is_still_proof_grade():
     for sql in [
         "select sum(amount) as m from raw.orders where status = 'completed'",
         "select customer_id, sum(amount) as m from raw.orders group by 1",
-        "select sum(o.amount) as m from raw.orders o join raw.refunds r on o.order_id = r.order_id",
         "with s as (select * from raw.orders) select sum(amount) as m from s",
         "select customer_id, sum(amount) as m from raw.orders group by 1 having sum(amount) > 1",
-        "select customer_id, sum(amount) as m from raw.orders group by 1 order by 2 desc limit 10",
+        "select customer_id, sum(amount) as m from raw.orders group by 1 order by 2 desc",
     ]:
         _, level, gaps = core(sql)
         assert level in PROOF_LEVELS, f"{sql!r} -> {level} {gaps}"
         assert gaps == (), f"{sql!r} -> {gaps}"
+    # Joins and ordered LIMIT left the proof grammar in semantix-proof/2:
+    # refused by name — coverage backlog, not proof.
+    for sql, construct in [
+        ("select sum(o.amount) as m from raw.orders o join raw.refunds r "
+         "on o.order_id = r.order_id", "uses a join"),
+        ("select customer_id, sum(amount) as m from raw.orders group by 1 "
+         "order by 2 desc limit 10", "LIMIT"),
+    ]:
+        _, level, gaps = core(sql)
+        assert level not in PROOF_LEVELS
+        assert any("outside the supported grammar" in g and construct in g for g in gaps), gaps
 
 
 # ------------------------------------------------------- CTE body digests

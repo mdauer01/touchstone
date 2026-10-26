@@ -43,6 +43,7 @@ from semantix.models import (
 # or punctuation, so a concept the resolver had clustered could not be found
 # again at attest time — yielding a SIGNED receipt with an empty
 # definition_version and empty lineage.
+from semantix.extraction.proof import POLICY_ID
 from semantix.services.resolution import normalize_name
 
 SCHEMA = """
@@ -1296,6 +1297,19 @@ class Store:
                 f"evidence describes it (last observation {now})"
             ]
 
+        # Verdicts computed under another proof policy are not this policy's
+        # verdicts. semantix-proof/2 withdrew the optimizer from proof: an
+        # unchanged estate scanned before it must not carry its old
+        # certification — or any other verdict — into a newly signed receipt.
+        policy = scan_policy(scan)
+        policy_changed = policy != POLICY_ID
+        if policy_changed:
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                f"computed under proof policy {policy or 'before semantix-proof/2'}; "
+                f"the policy in force is {POLICY_ID} — rescan to recertify"
+            ]
+
         # A receipt whose OWN freshness block reports a definition removed, or
         # the estate drifted, cannot also assert a clean certification. One
         # signed document said "this definition is live at issue time" and
@@ -1342,8 +1356,10 @@ class Store:
         for v in sorted(verdicts, key=lambda v: -v["severity"]):
             entry = {"verdict": v["verdict"], "severity": v["severity"],
                      "summary": v["summary"]}
-            if status != primary["verdict"] and v["verdict"] in (
-                    VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+            if (v.get("evidence") or {}).get("proof"):
+                entry["proof"] = v["evidence"]["proof"]
+            if status != primary["verdict"] and (policy_changed or v["verdict"] in (
+                    VerdictType.CERTIFIED.value, VerdictType.ALIASING.value)):
                 entry = {**entry, "verdict": status,
                          "superseded": v["verdict"],
                          "summary": f"[downgraded] {v['summary']}"}
@@ -1373,6 +1389,7 @@ class Store:
                 "note": "estate not re-checked at attest time — pass estate "
                         "sources to attest to enable the freshness check",
             },
+            proof_policy=policy,
         )
         # Sign before persisting so the stored payload IS the certificate.
         from semantix.signing import sign_receipt
@@ -1390,6 +1407,15 @@ class Store:
         )
         self._conn.commit()
         return receipt
+
+
+def scan_policy(scan: dict) -> str | None:
+    """The proof policy a finished scan's verdicts were computed under; None
+    for a scan that predates policy versioning."""
+    try:
+        return (json.loads(scan.get("stats_json") or "{}") or {}).get("proof_policy")
+    except (TypeError, ValueError):
+        return None
 
 
 def _artifact_key(object_key: str) -> str:

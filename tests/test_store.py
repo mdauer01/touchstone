@@ -35,7 +35,7 @@ def make_fp(expr: str, name: str = "net_revenue", site: str = "model.acme.growth
         core=core,
         relation="analytics.growth_net_revenue",
         dialect="duckdb",
-        canon_level="optimized",
+        canon_level="supported",
         canonical_sql="SELECT ...",
         provenance=Provenance(system="dbt", object_id=site),
     )

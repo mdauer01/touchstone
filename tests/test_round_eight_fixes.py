@@ -16,7 +16,7 @@ import sqlglot
 from sqlglot import exp
 
 from semantix.engine import run_scan
-from semantix.extraction.canonicalize import _resolve_group_ordinals, canonicalize_sql
+from semantix.extraction.canonicalize import _resolve_group_ordinals, canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.extraction.sqlutil import split_group
@@ -61,8 +61,17 @@ def test_prod_and_dev_never_certify_as_one_table(tmp_path):
     assert VerdictType.CERTIFIED not in _kinds(result, "m")
 
 
+FULL_CATALOG = ("prod:\n  raw:\n    orders:\n      amount: DOUBLE\n"
+                "dev:\n  raw:\n    orders:\n      amount: DOUBLE\n")
+
+
 def test_execution_context_resolves_the_short_declaration(tmp_path):
-    result, store = run_scan(**_estate(tmp_path, PROD_DEV, SHORT_CATALOG, DECLARED_M,
+    """With the catalog at the estate's depth, the short declaration resolves
+    through the supplied context to prod.raw.orders — and dev's model then
+    provably reads another table. (Over the two-part catalog, dev.raw.orders
+    has no columns of its own; semantix-proof/2 does not borrow raw.orders'
+    for it, so that variant is unresolved rather than a contradiction.)"""
+    result, store = run_scan(**_estate(tmp_path, PROD_DEV, FULL_CATALOG, DECLARED_M,
                                        default_database="prod"))
     store.close()
     (v,) = [v for v in result.verdicts if v.concept_label == "m"]
@@ -70,11 +79,19 @@ def test_execution_context_resolves_the_short_declaration(tmp_path):
     assert "dev.raw.orders" in v.summary
 
 
+def test_short_catalog_without_its_own_columns_is_unresolved(tmp_path):
+    result, store = run_scan(**_estate(tmp_path, PROD_DEV, SHORT_CATALOG, DECLARED_M,
+                                       default_database="prod"))
+    store.close()
+    kinds = _kinds(result, "m")
+    assert VerdictType.CERTIFIED not in kinds and VerdictType.CONTRADICTION not in kinds
+
+
 # ------------------------------------- finding 2 + oracle: arithmetic structure
 
 def _core(sql: str):
     registry = SchemaRegistry({"db.main.t": {"a": "DOUBLE", "b": "DOUBLE", "c": "DOUBLE"}})
-    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    canon = canonicalize(sql, registry, "duckdb")
     (fp,) = extract_fingerprints(canon, "db.main.m", Provenance("t", "m"), "duckdb", registry)
     assert fp.canon_level in PROOF_LEVELS
     return fp.core.hash()

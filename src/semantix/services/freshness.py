@@ -31,7 +31,8 @@ from semantix.adapters.base import spec_content_text
 from semantix.adapters.dbt import load_dbt
 from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
-from semantix.store import Store, utcnow
+from semantix.extraction.proof import POLICY_ID
+from semantix.store import Store, scan_policy, utcnow
 
 
 def _sha(text: str) -> str:
@@ -148,6 +149,20 @@ def check_freshness(
         "verified_as_of": scan["started_at"],
         "checked_at": checked_at,
     }
+
+    # Unchanged sources do not make old verdicts current when the proof
+    # policy that produced them is no longer in force: matching file hashes
+    # say the INPUT is the same, not that this policy reaches the same
+    # verdicts from it.
+    policy = scan_policy(scan)
+    if policy != POLICY_ID:
+        return {**base, "status": "stale",
+                "proof_policy": {"scan": policy, "current": POLICY_ID},
+                "estate_drift": {"changed": [], "added": [], "removed": []},
+                "unchecked_systems": [],
+                "note": f"the scan's verdicts were computed under proof policy "
+                        f"{policy or 'before semantix-proof/2'}; the policy in force "
+                        f"is {POLICY_ID} — rescan to recertify"}
 
     snapshot = store.scan_snapshot(scan["scan_id"])
     if not snapshot:

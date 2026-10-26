@@ -24,11 +24,11 @@ from semantix.adapters.catalog import load_catalog
 from semantix.adapters.sql_dir import load_sql_dir
 from semantix.cli import main
 from semantix.engine import run_scan
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.mcp import McpServer
-from semantix.models import Provenance, VerdictType
+from semantix.models import PROOF_LEVELS, Provenance, VerdictType
 from semantix.services.monitor import build_registry, monitor_history
 
 from .test_monitor_conformance import GOVERNED, VIEW, _rows, codes, run
@@ -45,7 +45,7 @@ CATALOG_YML = "raw:\n  orders:\n    amount: DOUBLE\n    refund: DOUBLE\n    coun
 def _fp(sql, name="revenue"):
     registry = SchemaRegistry(CAT)
     registry.set_estate_depth(["raw.orders"])
-    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    canon = canonicalize(sql, registry, "duckdb")
     (fp,) = [f for f in extract_fingerprints(canon, "x", Provenance("q", "x"), "duckdb",
                                              registry) if f.concept_candidate == name]
     return fp
@@ -86,7 +86,7 @@ def test_ordering_through_another_projection_is_part_of_the_core(a, b):
 def test_alias_inside_an_order_by_expression_withholds_proof_grade():
     fp = _fp("SELECT SUM(amount) AS revenue, SUM(refund) AS k FROM raw.orders "
              "GROUP BY country ORDER BY k + 1 LIMIT 1")
-    assert fp.canon_level == "incomplete"
+    assert fp.canon_level not in PROOF_LEVELS
     assert any("projection alias inside an expression" in g for g in fp.gaps)
 
 
@@ -147,8 +147,10 @@ def test_monitor_does_not_call_the_changed_query_conforming(tmp_path, authoritat
     result = monitor_history(store, observed + ";\n", registry, "duckdb", min_runs=1,
                              authority_systems={"sql"})
     store.close()
-    revenue = [f for f in result["findings"] if f["concept"] == "revenue"]
-    assert revenue and all(f["kind"] != "conforming_use" for f in revenue)
+    # Ordered LIMIT and plain DISTINCT are outside the proof grammar, so the
+    # model is no authority; nothing can conform to it.
+    assert result["findings"]
+    assert all(f["kind"] != "conforming_use" for f in result["findings"])
     assert result["funnel"]["conforming"] == 0
 
 

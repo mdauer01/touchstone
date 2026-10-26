@@ -129,7 +129,7 @@ by reason, which shows where the next bottleneck is:
 | Most unverifiable uses are… | The next step is… |
 | --- | --- |
 | execution context | per-row catalog/schema in the export, or an honest assertion |
-| unsupported shape | widening the rule set (joins, CTE-wrapped slices) |
+| unsupported shape | widening the proof grammar or the rule set (joins, LIMIT, windows — see [proof-policy.md](proof-policy.md)) |
 | unsupported dimension | supporting more dimension expressions |
 | no definition evidence | definition windows that cover the export |
 | below proof grade | catalog coverage, or constructs the core does not model |
@@ -138,13 +138,17 @@ by reason, which shows where the next bottleneck is:
 
 It says the query matched an authoritative definition exactly, or matched one of the
 shapes listed in rule set `monitor-conformance/1` ([conformance.py](../src/semantix/services/conformance.py)).
+Both observations and definitions are read through the proof grammar of
+[`semantix-proof/2`](proof-policy.md). A select-project-filter CTE or derived table is
+inlined by a stated rule and judged as the single query it is. SQL outside the grammar
+is unverifiable, and its optimizer reading appears only as `suspected` context.
 It says nothing beyond that rule set. Excluded from the claim:
 
 - joins and joined dimensions
 - window measures
 - LIMIT, HAVING, QUALIFY and DISTINCT
 - TABLESAMPLE and time travel
-- CTEs and subqueries around a variation
+- CTEs that aggregate, and subqueries in expressions
 - unsupported dimension expressions
 - Databricks runtime behaviour of `MEASURE()` beyond its declared definition
 

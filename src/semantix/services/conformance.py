@@ -217,7 +217,8 @@ def raw_shape_problem(stmt: exp.Expression) -> str | None:
 
 
 def check_raw(core: SemanticCore, auth: Authority, dialect: str,
-              shape_problem: str | None, models: set[str] = frozenset()) -> Outcome:
+              shape_problem: str | None, models: set[str] = frozenset(),
+              hypothesis: str | None = None) -> Outcome:
     """Shape A: an observed proof-grade core against one authority.
 
     Two passes, in order, and the first never returns a violation:
@@ -235,8 +236,24 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
     a violation would call missing, and a filter such as `refunds = 0` can
     make a changed measure equal the definition on its rows. Round twelve
     still returned from two branches (a changed source; conditions on
-    required-filter columns) before the boundary was complete."""
-    if core.hash() == auth.core.hash():
+    required-filter columns) before the boundary was complete.
+
+    `hypothesis` (the grammar gap) marks a core that is the general
+    optimizer's reading, not proof: it is a boundary of its own, so the
+    result is always unverifiable, and what pass 2 finds is suspected
+    context worded as the hypothesis it is."""
+    if hypothesis is not None:
+        outcome = _check_raw(core, auth, dialect, shape_problem, models, hypothesis)
+        outcome.suspected = [f"under the optimizer's reading (a hypothesis): {s}"
+                             for s in outcome.suspected]
+        return outcome
+    return _check_raw(core, auth, dialect, shape_problem, models, None)
+
+
+def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
+               shape_problem: str | None, models: set[str],
+               hypothesis: str | None) -> Outcome:
+    if hypothesis is None and core.hash() == auth.core.hash():
         return Outcome("conforming", shape="exact")
     base = auth.base_relation
     if base is None:
@@ -248,7 +265,11 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
     undecided: list[dict] = []
 
     # ---- pass 1: the boundary --------------------------------------------
-    if shape_problem:
+    if hypothesis is not None:
+        # It names the construct the grammar refused; the as-written shape
+        # problem would only repeat it.
+        boundary.append(_reason("shape_unsupported", hypothesis))
+    elif shape_problem:
         boundary.append(_reason("shape_unsupported", f"query {shape_problem}"))
     markers = [f for f in (*core.filters, *auth.core.filters) if f.startswith(_MARKERS)]
     if markers and not shape_problem:   # the shape problem already names it

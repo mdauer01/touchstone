@@ -21,7 +21,7 @@ from semantix.adapters.metrics_yaml import load_metrics
 from semantix.adapters.ossie import load_ossie
 from semantix.adapters.sql_dir import load_sql_dir, load_views_file
 from semantix.adapters.uc_metrics import load_uc_metrics
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import (
@@ -38,6 +38,7 @@ from semantix.services.reconcile import reconcile
 from semantix.services.relationships import same_relation as same_rel
 from semantix.services.resolution import resolve_concepts
 from semantix.store import Store
+from semantix.extraction.proof import POLICY_ID
 from semantix.toolchain import QUALIFIED_SQLGLOT, toolchain_status
 
 
@@ -121,6 +122,9 @@ class ScanResult:
             "verifiable_measures": list(self.verifiable_measures),
             "execution_context": self.execution_context,
             "toolchain": self.toolchain,
+            # The policy the verdicts were computed under: receipts and
+            # freshness refuse to carry a positive verdict across a change.
+            "proof_policy": POLICY_ID,
             "skipped": len(self.skipped),
             "unmeasured": len(self.unmeasured),
             "duplicate_relations": len(self.duplicate_relations),
@@ -210,7 +214,7 @@ def _run_scan(store: Store, dbt_path, metrics_path, catalog_path, dialect,
     dupe_content: dict[str, set[str]] = {rel: set() for rel in dupes}
 
     for artifact in artifacts:
-        canon = canonicalize_sql(artifact.sql, registry.sqlglot_schema(dialect), dialect)
+        canon = canonicalize(artifact.sql, registry, dialect)
         canon_levels[canon.level.value] += 1
         # Keyed later on the artifact's fingerprint CORES when it has any:
         # rendered text carries CTE NAMES, so two vendored copies differing
@@ -633,7 +637,7 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
                 return claim
 
     sql = _synthesize_claim_sql(spec)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     claim.canon_level = canon.level.value
     if not canon.usable or canon.level == CanonLevel.PARSED:
         claim.error = canon.error or "canonicalization below proof grade"
@@ -659,6 +663,7 @@ def build_claim(spec: DeclaredSpec, registry: SchemaRegistry, dialect: str) -> C
     # were provably indistinguishable at proof grade.
     claim.canon_level = fps[0].canon_level
     claim.gaps = fps[0].gaps
+    claim.rules = fps[0].rules
     if fps[0].gaps:
         claim.error = ("declaration uses constructs the semantic core cannot "
                        "represent: " + "; ".join(fps[0].gaps))

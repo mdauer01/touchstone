@@ -9,7 +9,7 @@ import pytest
 
 from semantix.adapters.agents_schema import _lookml_filters
 from semantix.adapters.catalog import load_catalog
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
@@ -24,7 +24,7 @@ CATALOG = {
 
 def core(sql, dialect="duckdb", cat=None):
     registry = SchemaRegistry(cat or CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     fps = extract_fingerprints(canon, "analytics.m", Provenance("t", "t"),
                                dialect, registry)
     if not fps:
@@ -164,6 +164,13 @@ def test_multi_database_estates_bind_both_reference_forms():
         assert canon.level == CanonLevel.OPTIMIZED, f"{sql}: {canon.error}"
         # And the short form binds to the CATALOG relation, never to `_`.
         assert "_." not in canon.ast.sql()
+    # The proof path never lends the short entry's columns to PROD.… or
+    # DEV.… — that would assume both are the catalog's table.
+    for ref in ("PROD.LANDING.RAW_T", "DEV.LANDING.RAW_T"):
+        canon = canonicalize(f"select region, sum(amount) as m from {ref} group by 1",
+                             registry, "snowflake")
+        assert canon.level != CanonLevel.SUPPORTED
+        assert any("lists only landing.raw_t" in g for g in canon.gaps), canon.gaps
 
 
 def test_reaggregation_refusal_survives_spelling_variants():
@@ -242,12 +249,17 @@ def test_partial_no_drift_receipts_are_historical_not_drifted():
     assert not trusted
     assert not any("has drifted" in w for w in warnings)
     assert any("metrics_yaml" in w for w in warnings)
-    fresh = {"status": "CERTIFIED", "scan_id": "scan_1", "freshness": {"status": "fresh"}}
+    fresh = {"status": "CERTIFIED", "scan_id": "scan_1", "freshness": {"status": "fresh"},
+             "proof_policy": "semantix-proof/2"}
     # Issuance freshness alone is historical (round fourteen); a live check
     # bound to the receipt's scan establishes current use.
     assert receipt_trust(fresh)[0] is False
     assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_1"})[0] is True
     assert receipt_trust(fresh, {"status": "fresh", "scan_id": "scan_2"})[0] is False
+    # ...and only under the proof policy in force.
+    legacy = {k: v for k, v in fresh.items() if k != "proof_policy"}
+    trusted, warnings = receipt_trust(legacy, {"status": "fresh", "scan_id": "scan_1"})
+    assert trusted is False and any("rescan and re-attest" in w for w in warnings)
 
 
 def test_stale_with_drift_is_still_distrusted():

@@ -27,7 +27,7 @@ import yaml
 from semantix.adapters.catalog import load_catalog
 from semantix.adapters.sql_dir import load_sql_dir
 from semantix.engine import run_scan
-from semantix.models import VerdictType
+from semantix.models import PROOF_LEVELS, VerdictType
 from semantix.services.history import read_history
 from semantix.services.monitor import build_registry, monitor_history
 from semantix.services.pilot import load_pilot
@@ -51,7 +51,11 @@ def test_distinct_on_alias_key_is_resolved_into_the_core():
     assert sorted(r[0] for r in con.execute(KEYED).fetchall()) == [100.0, 900.0]
     assert [r[0] for r in con.execute(KEYED_MOD).fetchall()] == [900.0]
     a, b = _fp(KEYED), _fp(KEYED_MOD)
-    assert a.canon_level == b.canon_level == "optimized" and not a.gaps
+    # DISTINCT ON is outside semantix-proof/2: refused by name, never proof
+    # grade. The optimizer's reading (a hypothesis, for candidates and diffs)
+    # still resolves the key, so the two do not even look alike.
+    assert a.canon_level not in PROOF_LEVELS and b.canon_level not in PROOF_LEVELS
+    assert a.gaps == ("outside the supported grammar (semantix-proof/2): uses DISTINCT",)
     assert a.core.hash() != b.core.hash()
     assert any("DISTINCT ON (SUM(" in f for f in a.core.filters)
 
@@ -66,7 +70,7 @@ def test_equivalent_distinct_on_spellings_still_hash_equal(spelling):
 
 def test_distinct_on_alias_inside_an_expression_withholds_proof_grade():
     fp = _fp(KEYED.replace("DISTINCT ON (k)", "DISTINCT ON (k + 1)"))
-    assert fp.canon_level == "incomplete"
+    assert fp.canon_level not in PROOF_LEVELS
     assert any("DISTINCT ON" in g and "alias inside an expression" in g for g in fp.gaps)
 
 
@@ -89,8 +93,10 @@ def test_monitor_does_not_call_a_different_distinct_on_key_conforming(tmp_path):
     result = monitor_history(store, KEYED_MOD + ";\n", registry, "duckdb", min_runs=1,
                              authority_systems={"sql"})
     store.close()
-    revenue = [f for f in result["findings"] if f["concept"] == "revenue"]
-    assert revenue and all(f["kind"] != "conforming_use" for f in revenue)
+    # The DISTINCT ON model is outside the proof grammar, so it is no
+    # authority at all; nothing can conform to it.
+    assert result["findings"]
+    assert all(f["kind"] != "conforming_use" for f in result["findings"])
     assert result["funnel"]["conforming"] == 0
     headline_consistent(result)
 

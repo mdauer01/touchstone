@@ -193,6 +193,15 @@ class SchemaRegistry:
     def knows(self, relation: str) -> bool:
         return relation in self._types
 
+    def shorter_spellings(self, relation: str) -> list[str]:
+        """Described relations whose name is a proper suffix of `relation`
+        (`raw.orders` for `prod.raw.orders`). For explaining a refusal only:
+        a suffix is never identity."""
+        parts = tuple(relation.lower().split("."))
+        return sorted(r for r, cols in self._types.items() if cols
+                      and len(r.split(".")) < len(parts)
+                      and parts[-len(r.split(".")):] == tuple(r.lower().split(".")))
+
     def known_models(self) -> set[str]:
         """Relations registered from computed SQL (as opposed to catalog
         tables): reading one of these is reading THROUGH a definition."""

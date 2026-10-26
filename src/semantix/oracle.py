@@ -34,7 +34,7 @@ import math
 from dataclasses import dataclass, field
 from itertools import product
 
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, Provenance
@@ -240,6 +240,64 @@ SPECIALS = [
     "SELECT SUM(amount) AS m FROM orders",
 ]
 
+# The proof path's `inline` rule substitutes select-project-filter CTEs and
+# derived tables into their consumer. Each spelling below is executed against
+# the direct query it claims to equal, and the traps — renamed and SWAPPED
+# columns, a computed projection under a tighter operator, filters on both
+# sides, a chain of two CTEs — must bucket apart from what they do not equal.
+INLINE_VARIANTS = [
+    f"WITH s AS (SELECT * FROM {_O}) SELECT SUM(amount) AS m FROM s WHERE status = 'completed'",
+    f"WITH s AS (SELECT * FROM {_O} WHERE status = 'completed') SELECT SUM(amount) AS m FROM s",
+    f"SELECT SUM(amount) AS m FROM (SELECT * FROM {_O} WHERE status = 'completed') t",
+    f"SELECT SUM(t.amount) AS m FROM (SELECT amount, status FROM {_O}) AS t WHERE t.status = 'completed'",
+    f"WITH s AS (SELECT amount AS amt, refund_amount AS r, status AS st FROM {_O}) "
+    f"SELECT SUM(amt - r) AS m FROM s WHERE st = 'completed'",
+    f"WITH s AS (SELECT amount - refund_amount AS net, status FROM {_O}) "
+    f"SELECT SUM(net) AS m FROM s WHERE status = 'completed'",
+    # swapped names: computes refund - amount
+    f"WITH s AS (SELECT amount AS refund_amount, refund_amount AS amount, status FROM {_O}) "
+    f"SELECT SUM(amount - refund_amount) AS m FROM s WHERE status = 'completed'",
+    # precedence: (a + b) * c, never a + b * c
+    f"WITH s AS (SELECT a + b AS ab, c FROM {_O}) SELECT SUM(ab * c) AS m FROM s",
+    f"SELECT SUM((a + b) * c) AS m FROM {_O}",
+    f"SELECT SUM(a + b * c) AS m FROM {_O}",
+    f"WITH s AS (SELECT a - b AS d, c FROM {_O}) SELECT SUM(c - d) AS m FROM s",
+    f"SELECT SUM(c - (a - b)) AS m FROM {_O}",
+    f"SELECT SUM(c - a - b) AS m FROM {_O}",
+    # NOT over a substituted comparison
+    f"WITH s AS (SELECT amount, status = 'completed' AS done FROM {_O}) "
+    f"SELECT SUM(amount) AS m FROM s WHERE NOT done",
+    f"SELECT SUM(amount) AS m FROM {_O} WHERE NOT status = 'completed'",
+    # filters on both sides, and a chain
+    f"WITH s AS (SELECT * FROM {_O} WHERE amount > 0) "
+    f"SELECT SUM(amount) AS m FROM s WHERE status = 'completed'",
+    f"SELECT SUM(amount) AS m FROM {_O} WHERE amount > 0 AND status = 'completed'",
+    f"WITH s AS (SELECT * FROM {_O} WHERE amount > 0), u AS (SELECT * FROM s WHERE "
+    f"status = 'completed') SELECT SUM(amount) AS m FROM u",
+    # grouping through an inlined projection
+    f"WITH s AS (SELECT channel AS ch, amount FROM {_O}) SELECT ch, SUM(amount) AS m FROM s GROUP BY ch",
+    f"SELECT channel, SUM(amount) AS m FROM {_O} GROUP BY channel",
+    f"WITH s AS (SELECT DATE_TRUNC('month', order_date) AS mo, amount FROM {_O}) "
+    f"SELECT mo, SUM(amount) AS m FROM s GROUP BY 1",
+    # HAVING over an output alias
+    f"SELECT channel, SUM(amount) AS m FROM {_O} GROUP BY channel HAVING m > 60",
+    f"SELECT channel, SUM(amount) AS m FROM {_O} GROUP BY channel HAVING SUM(amount) > 60",
+    # NULL-sensitive expressions are preserved, not simplified
+    f"SELECT SUM(CASE WHEN amount > 0 THEN amount END) AS m FROM {_O}",
+    f"SELECT SUM(amount) AS m FROM {_O} WHERE NOT (amount <= 0)",
+    f"SELECT COUNT(*) AS m FROM {_O} WHERE amount = amount",
+    f"SELECT COUNT(*) AS m FROM {_O}",
+    f"SELECT SUM(amount) AS m FROM {_O} WHERE amount BETWEEN 1 AND 100",
+    f"SELECT SUM(amount) AS m FROM {_O} WHERE NOT amount BETWEEN 1 AND 100",
+    f"SELECT SUM(amount) AS m FROM {_O} WHERE amount < 1 OR amount > 100",
+    # an aggregate only in ORDER BY makes a one-row aggregate (sweep 2, #3)
+    f"SELECT COUNT(*) AS m FROM (SELECT 'all' AS seg FROM {_O} ORDER BY SUM(amount)) t",
+    f"SELECT COUNT(*) AS m FROM {_O}",
+    f"SELECT COUNT(*) AS m FROM (SELECT 1 AS k FROM {_O} HAVING TRUE) t",
+    f"SELECT COUNT(*) AS m FROM {_O} GROUP BY 'x'",
+    f"SELECT COUNT(*) AS m FROM {_O} GROUP BY ()",
+]
+
 MULTIDB_QUERIES = [
     "SELECT SUM(amount) AS m FROM prod.raw.orders",
     "SELECT SUM(amount) AS m FROM dev.raw.orders",
@@ -288,7 +346,7 @@ def generate_queries(full: bool = False) -> list[str]:
         for (gs, gc), m, f in product(GRAINS, ["SUM(amount)", "COUNT(DISTINCT customer_id)", "AVG(amount)"],
                                       ["", "status = 'completed'"]):
             out.append(q(gs, m, f, gc))
-    out += SPECIALS
+    out += SPECIALS + INLINE_VARIANTS
     return list(dict.fromkeys(out))
 
 
@@ -392,10 +450,15 @@ class OracleReport:
     datasets: int = 0
     mismatches: list[dict] = field(default_factory=list)
     self_test_failures: list[dict] = field(default_factory=list)
+    # Every proof-grade query is also executed against its OWN trusted
+    # transformed SQL (the proof form): the rules that produced it are
+    # challenged one query at a time, not only through bucket pairs.
+    transforms_executed: int = 0
+    transform_mismatches: list[dict] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.mismatches and not self.self_test_failures
+        return not (self.mismatches or self.self_test_failures or self.transform_mismatches)
 
 
 def _registry(estate: str, queries: list[str]) -> SchemaRegistry:
@@ -416,26 +479,31 @@ def _registry(estate: str, queries: list[str]) -> SchemaRegistry:
     return registry
 
 
+_TRANSFORMED: dict[str, str] = {}   # original SQL -> its proof form, per run
+
+
 def _buckets(estate: str, queries: list[str]) -> tuple[dict[str, list[str]], int]:
     registry = _registry(estate, queries)
-    schema = registry.sqlglot_schema(DIALECT)
     by_hash: dict[str, list[str]] = {}
     proof = 0
     for i, sql in enumerate(queries):
-        canon = canonicalize_sql(sql, schema, DIALECT)
+        canon = canonicalize(sql, registry, DIALECT)
         fps = extract_fingerprints(canon, "oracle.q", Provenance("oracle", f"q{i}"),
                                    DIALECT, registry)
         if len(fps) != 1 or fps[0].canon_level not in PROOF_LEVELS or fps[0].gaps:
             continue
         proof += 1
         by_hash.setdefault(fps[0].core.hash(), []).append(sql)
+        _TRANSFORMED[sql] = canon.ast.sql(dialect=DIALECT)
     return by_hash, proof
 
 
 def run_oracle(full: bool = False) -> OracleReport:
     report = OracleReport()
     for estate, queries in (("main", generate_queries(full)), ("multidb", MULTIDB_QUERIES)):
+        _TRANSFORMED.clear()
         by_hash, proof = _buckets(estate, queries)
+        transformed = dict(_TRANSFORMED)
         report.queries += len(queries)
         report.proof_grade += proof
         shared = {h: qs for h, qs in by_hash.items() if len(qs) > 1}
@@ -455,6 +523,17 @@ def run_oracle(full: bool = False) -> OracleReport:
                                 "hash": h[:12], "estate": estate, "dataset": dataset,
                                 "a": qs[0], "b": other,
                                 "result_a": first, "result_b": result})
+                for original, proof_form in transformed.items():
+                    report.transforms_executed += 1
+                    r_orig, r_proof = _run(con, original), _run(con, proof_form)
+                    # Exact, errors included: the same error class on both
+                    # sides is agreement (an overflow is a result), while a
+                    # proof form that fails where the original runs is not.
+                    if r_orig != r_proof:
+                        report.transform_mismatches.append({
+                            "estate": estate, "dataset": dataset, "original": original,
+                            "transformed": proof_form, "result_original": r_orig,
+                            "result_transformed": r_proof})
             finally:
                 con.close()
     for estate, a, b in SELF_TEST_PAIRS:
@@ -598,6 +677,17 @@ def _conformance_query(a: dict, grain: list[str], where: list[str], measure: str
     return sql + tail
 
 
+def _via_cte(a: dict, grain: list[str], inner: list[str], outer: list[str],
+             measure: str | None = None, body: str = "*") -> str:
+    """The same observed query, read through a select-project-filter CTE: the
+    proof path inlines it, so conformance must come out as for the direct
+    spelling — and execution checks that it does."""
+    sql = _conformance_query(a, grain, outer, measure)
+    where = (" WHERE " + " AND ".join(f"({w})" for w in inner)) if inner else ""
+    return (f"WITH s AS (SELECT {body} FROM {_O}{where}) "
+            + sql.replace(f"FROM {_O}", "FROM s", 1))
+
+
 def generate_conformance_cases(full: bool = False) -> list[tuple[dict, str, bool]]:
     """(authority, observed SQL, must_not_conform) triples."""
     from itertools import combinations
@@ -616,6 +706,10 @@ def generate_conformance_cases(full: bool = False) -> list[tuple[dict, str, bool
         for grain in grains:
             for combo in combos:
                 cases.append((a, _conformance_query(a, grain, required + combo), False))
+        for grain in grains[:2]:
+            for combo in combos[:4]:
+                cases.append((a, _via_cte(a, grain, required, combo), False))
+                cases.append((a, _via_cte(a, grain, [], required + combo), False))
         # Required filters in other spellings: conform only if canonicalization
         # makes them the declared conjunct; executed either way when they do.
         for r in required:
@@ -664,6 +758,12 @@ def generate_conformance_cases(full: bool = False) -> list[tuple[dict, str, bool
         near.append(_conformance_query(a, ["channel"], required,
                                        tail=f" HAVING {a['expr']} > 0"))
         near.append(_conformance_query(a, [], required, tail=" LIMIT 1"))
+        # Through a CTE: an undeclared condition hidden inside it, and (for
+        # net_revenue) the two measure columns swapped by the CTE's aliases.
+        near.append(_via_cte(a, [], ["refund_amount = 0"], required))
+        if a["name"] == "net_revenue":
+            near.append(_via_cte(a, [], [], required, body="refund_amount AS amount, "
+                                 "amount AS refund_amount, status, channel"))
         near.append(f"SELECT {_qualified(a['expr'], 'o')} AS m "
                     f"FROM {_O} o JOIN {_C} c ON o.customer_id = c.customer_id "
                     f"WHERE " + " AND ".join(f"({_qualified(x, 'o')})" for x in required))
@@ -697,21 +797,33 @@ def run_conformance_oracle(full: bool = False) -> ConformanceReport:
 
     from semantix.services.conformance import check_raw, raw_shape_problem
 
+    from semantix.extraction.proof import is_grammar_gap
+    from semantix.models import CanonLevel
+
     registry, authorities = _conformance_authorities()
     by_name = {a["name"]: auth for a, auth in authorities}
-    schema = registry.sqlglot_schema(DIALECT)
     report = ConformanceReport()
     to_execute: list[tuple[str, str, str]] = []   # (observed, expected, authority)
     for a, sql, must_not in generate_conformance_cases(full):
         report.queries += 1
         auth = by_name[a["name"]]
-        canon = canonicalize_sql(sql, schema, DIALECT)
+        canon = canonicalize(sql, registry, DIALECT)
         fps = extract_fingerprints(canon, "oracle.q", Provenance("oracle", "c"),
                                    DIALECT, registry)
-        if len(fps) != 1 or fps[0].canon_level not in PROOF_LEVELS or fps[0].gaps:
+        if len(fps) != 1:
             continue
-        stmt = sqlglot.parse_one(sql, read=DIALECT)
-        outcome = check_raw(fps[0].core, auth, DIALECT, raw_shape_problem(stmt))
+        fp = fps[0]
+        proof = fp.canon_level in PROOF_LEVELS and not fp.gaps
+        # As the monitor does: a core outside the proof grammar is judged only
+        # as a hypothesis (always inside a boundary); any other gap, not at all.
+        hypothesis = (sorted(fp.gaps)[0] if not proof and fp.gaps
+                      and all(is_grammar_gap(g) for g in fp.gaps) else None)
+        if not proof and hypothesis is None:
+            continue
+        written = (canon.ast if canon.level == CanonLevel.SUPPORTED
+                   else sqlglot.parse_one(sql, read=DIALECT))
+        outcome = check_raw(fp.core, auth, DIALECT, raw_shape_problem(written),
+                            frozenset(), hypothesis)
         if must_not:
             report.near_misses += 1
             if outcome.status == "conforming":

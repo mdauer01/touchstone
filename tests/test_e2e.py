@@ -25,7 +25,12 @@ def test_acme_estate_produces_all_verdict_types(acme, tmp_path):
 
     assert result.artifacts == 7
     assert len(result.fingerprints) == 5
-    assert result.coverage == 100.0
+    # ops_refund_rate joins refunds to orders: outside the proof grammar
+    # (semantix-proof/2), so 4 of 5 definitions are proof grade and the fifth
+    # names its reason.
+    assert result.coverage == 80.0
+    (joined,) = [fp for fp in result.fingerprints if fp.concept_candidate == "refund_rate"]
+    assert joined.gaps == ("outside the supported grammar (semantix-proof/2): uses a join",)
 
     by_concept = {}
     for v in result.verdicts:

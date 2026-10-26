@@ -8,7 +8,7 @@ Every test failed before its fix.
 import pytest
 
 from semantix.adapters.catalog import load_catalog
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, Provenance
@@ -23,7 +23,7 @@ CATALOG = {
 
 def fingerprint(sql: str, catalog=None, dialect="duckdb"):
     registry = SchemaRegistry(catalog or CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     fps = extract_fingerprints(canon, "analytics.m", Provenance("t", "t"), dialect, registry)
     return fps[0] if fps else None
 
@@ -96,7 +96,7 @@ def test_union_models_are_not_silently_dropped():
     registry = SchemaRegistry(CATALOG)
     sql = ("select sum(amount) as m from raw.orders where status = 'completed' "
            "union all select sum(refund_amount) as m from raw.orders")
-    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    canon = canonicalize(sql, registry, "duckdb")
     fps = extract_fingerprints(canon, "analytics.m", Provenance("t", "t"), "duckdb", registry)
     assert fps, "a UNION model produced no fingerprint and no gap"
     assert all(f.canon_level not in PROOF_LEVELS for f in fps), (

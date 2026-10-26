@@ -9,7 +9,7 @@ def _member(member_id, kind, where, core_hash, *, expression="SUM(t0.amount)",
             filters=(), grain=(), joins=("analytics.fct_orders",), lineage=()):
     return {
         "member_id": member_id, "kind": kind, "name": "m", "where": where,
-        "path": None, "canon_level": "optimized", "core_hash": core_hash,
+        "path": None, "canon_level": "supported", "core_hash": core_hash,
         "components": {
             "expression": expression,
             "filters": list(filters),

@@ -22,6 +22,33 @@ def test_every_pair_the_engine_equates_executes_identically():
     assert report.buckets >= 50 and report.pairs_executed >= 500
 
 
+def test_every_proof_form_executes_as_its_original():
+    """semantix-proof/2: each proof-grade query's trusted transformed SQL is
+    run against the query as written, on every dataset — NULLs, duplicates,
+    empty input, float cancellation and overflow, integer extremes."""
+    report = oracle.run_oracle()
+    assert not report.transform_mismatches, report.transform_mismatches[:3]
+    assert report.proof_grade >= 250
+    assert report.transforms_executed >= 250 * len(oracle.DATASETS)
+
+
+def test_the_oracle_catches_a_wrong_proof_form(monkeypatch):
+    """A rule that rewrote meaning must be caught however buckets fall."""
+    real = oracle._buckets
+
+    def poisoned(estate, queries):
+        out = real(estate, queries)
+        if estate == "main":
+            oracle._TRANSFORMED["SELECT SUM(a + b + c) AS m FROM db.main.orders"] = \
+                "SELECT SUM(a + c + b) AS m FROM db.main.orders"
+        return out
+
+    monkeypatch.setattr(oracle, "_buckets", poisoned)
+    report = oracle.run_oracle()
+    assert any(m["original"].startswith("SELECT SUM(a + b + c)")
+               for m in report.transform_mismatches)
+
+
 def test_the_oracle_catches_an_injected_false_certification(monkeypatch):
     """Detection must not depend on the engine's current behaviour: plant the
     round-eight reassociation pair in one bucket and the oracle must flag it."""
@@ -59,8 +86,8 @@ def test_conformance_challenger_catches_a_planted_wrong_verdict(monkeypatch):
 
     real = conformance.check_raw
 
-    def lenient(core, auth, dialect, shape_problem, models=frozenset()):
-        outcome = real(core, auth, dialect, shape_problem, models)
+    def lenient(core, auth, dialect, shape_problem, models=frozenset(), hypothesis=None):
+        outcome = real(core, auth, dialect, shape_problem, models, hypothesis)
         if outcome.reasons and outcome.reasons[0]["code"] == "required_filter_missing":
             return conformance.Outcome("conforming", shape="A")
         return outcome

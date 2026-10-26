@@ -51,8 +51,9 @@ from dataclasses import dataclass, field
 from sqlglot import exp
 
 from semantix.adapters.base import topo_sort
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
+from semantix.extraction.proof import is_grammar_gap
 from semantix.extraction.registry import SchemaRegistry
 from semantix.extraction.sqlutil import table_fqname
 from semantix.models import (
@@ -83,8 +84,9 @@ from semantix.services.history import (
     from_sql_text,
     qualify_tables,
 )
-from semantix.services.relationships import _parse_statements  # same package: one
+from semantix.services.relationships import parse_statement_list  # same package: one
 # statement-splitting behavior for every history consumer, not two drifting ones.
+from semantix.services.session import classify, resolve, written_relations
 from semantix.services.resolution import normalize_name
 from semantix.store import Store
 from semantix.toolchain import toolchain_status
@@ -100,7 +102,8 @@ _SYNTHESIZED = re.compile(
 # Explicit identity: a comment the query's author wrote, or the session's
 # query tag. Either outranks the projection's alias.
 _TAG = re.compile(r"semantix\s*:\s*metric\s*=\s*([A-Za-z_][\w.]*)", re.I)
-_QUERY_TAG = re.compile(r"(?:^|[\s,;{\"'])metric\s*[=:]\s*\"?([A-Za-z_][\w.]*)", re.I)
+# `metric=net_revenue`, `metric: net_revenue`, and JSON `{"metric": "net_revenue"}`.
+_QUERY_TAG = re.compile(r"(?:^|[\s,;{\"'])metric[\"']?\s*[=:]\s*[\"']?([A-Za-z_][\w.]*)", re.I)
 
 SEV_VIOLATION_BASE = 60      # 60 + min(30, uses)
 SEV_CANDIDATE_BASE = 40      # unnamed near miss: a hypothesis
@@ -147,6 +150,10 @@ class _Observed:
     identity: str = "none"          # alias:<name> | tag:<name> | output:<name> | none
     semantic_hash: str = ""
     proof_grade: bool = False
+    # Outside the proof grammar, the optimizer's reading of the query: the
+    # gap that says so. It is judged only for CONTEXT (`suspected`), always
+    # inside a boundary — never conforming, never a violation.
+    hypothesis: str | None = None
     core: SemanticCore | None = None
     components: dict[str, object] = field(default_factory=dict)
     shape_problem: str | None = None
@@ -272,15 +279,31 @@ def monitor_history(
     counts = {"statements": 0, "parsed": 0, "unparseable": 0, "non_query": 0,
               "unreadable": 0, "no_measure": 0, "nested_measure": 0,
               "without_time": 0, "bad_time": 0, "mixed_measures": 0,
-              "outside_window": 0, "after_session_change": 0}
+              "outside_window": 0, "after_session_change": 0,
+              "session_events": 0, "session_reconstructed": 0}
     windowed = pilot is not None and (pilot.window_from or pilot.window_to)
     executions_read = 0
-    for ex in intake.executions:
-        statements, unparseable = _parse_statements(ex.statement_text, dialect)
-        counts["statements"] += len(statements) + unparseable
+    # Session events first, across the WHOLE history: a temp view created in
+    # an earlier execution of the session — or of a session the export does
+    # not identify — can shadow a name read later (services.session).
+    log = intake.format == "sql"
+    parsed_rows = [parse_statement_list(ex.statement_text, dialect)
+                   for ex in intake.executions]
+    events = []
+    for ri, (ex, listed) in enumerate(zip(intake.executions, parsed_rows)):
+        ts_e, _ = _execution_time(ex)
+        for si, st in enumerate(listed):
+            e = classify(st, ri, si, ex.session_id, ts_e)
+            if e is not None:
+                events.append(e)
+    counts["session_events"] = len(events)
+    for ri, (ex, listed) in enumerate(zip(intake.executions, parsed_rows)):
+        statements = [st for st in listed if st is not None]
+        unparseable = len(listed) - len(statements)
+        counts["statements"] += len(listed)
         counts["parsed"] += len(statements)
         counts["unparseable"] += unparseable
-        executions_read += (len(statements) + unparseable) if intake.format == "sql" else 1
+        executions_read += len(listed) if log else 1
         catalog = ex.catalog or asserted[0]
         schema = ex.schema or asserted[1]
         ts, time_state = _execution_time(ex)
@@ -305,19 +328,21 @@ def monitor_history(
         # A query tag or asset belongs to the EXECUTION; it names one metric
         # only when the execution holds one query.
         row_identity = (_row_identity(ex, asset_map or {}) if len(queries) == 1 else None)
-        session_changed = False
-        for stmt in statements:
+        for si, stmt in enumerate(listed):
+            if stmt is None:
+                continue
             if not isinstance(stmt, exp.Query):
                 counts["non_query"] += 1
-                # USE / SET / CREATE [TEMP] VIEW … change what later names
-                # resolve to; nothing after them in this execution has a
-                # relation identity the row's context establishes.
-                session_changed = True
                 continue
-            if session_changed:
+            (q_catalog, q_schema), session_gap, rebuilt = resolve(
+                events, ri, si, ex.session_id, ts, log, written_relations(stmt), depth,
+                (catalog, schema))
+            if session_gap:
                 counts["after_session_change"] += 1
+            if rebuilt:
+                counts["session_reconstructed"] += 1
             explicit = _statement_tag(stmt) or row_identity
-            qualify_tables(stmt, catalog, schema, depth)
+            qualify_tables(stmt, q_catalog, q_schema, depth)
             if measure_calls(stmt):
                 if any(outside_measure_refs(a) for a in stmt.find_all(exp.AggFunc)):
                     # Raw aggregates beside governed ones: the measure
@@ -325,10 +350,10 @@ def monitor_history(
                     # not read — say so rather than drop them silently.
                     counts["mixed_measures"] += 1
                 _observe_view(stmt, ex, approved, evidence, observed, recurrence, dialect,
-                              explicit, session_changed)
+                              explicit, session_gap)
                 continue
             outcome = _observe_core(stmt, ex, history_registry, dialect, evidence,
-                                    explicit, observed, recurrence, session_changed)
+                                    explicit, observed, recurrence, session_gap)
             if outcome:
                 counts[outcome] += 1
 
@@ -394,7 +419,9 @@ def monitor_history(
                     "executions_without_time": counts["without_time"],
                     "executions_with_unreadable_time": counts["bad_time"],
                     "executions_outside_window": counts["outside_window"],
-                    "statements_after_session_change": counts["after_session_change"]},
+                    "session_events": counts["session_events"],
+                    "statements_after_session_change": counts["after_session_change"],
+                    "statements_with_reconstructed_context": counts["session_reconstructed"]},
         "statements": counts["statements"],
         "parsed_statements": counts["parsed"],
         "skipped_statements": counts["unparseable"],
@@ -417,16 +444,20 @@ def monitor_history(
 
 def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
                   dialect: str, evidence, explicit, observed: dict,
-                  recurrence: dict, session_changed: bool = False) -> str | None:
+                  recurrence: dict, session_gap: str | None = None) -> str | None:
     """Shape A intake for one statement. Returns a disclosure counter name
     when the statement yields no measure to judge."""
     written = _written_aliases(stmt)
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
-    shape_problem = raw_shape_problem(stmt)
-    canon = canonicalize_sql(sql_text, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql_text, registry, dialect)
     if canon.level == CanonLevel.FAILED or canon.ast is None:
         return "unreadable"
+    # Inside the proof grammar, CTEs and derived tables were inlined by stated
+    # rules, so the shape is judged on the proof form (one SELECT over one
+    # table); outside it, on the statement as written.
+    shape_problem = raw_shape_problem(
+        canon.ast if canon.level == CanonLevel.SUPPORTED else stmt)
     ast = canon.ast
     cte_names = {c.alias_or_name.lower() for c in ast.find_all(exp.CTE)}
     reads = sorted({
@@ -463,15 +494,19 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
         if reagg:
             gaps.add(f"reads the aggregate output of {', '.join(reagg)} — "
                      f"through-model comparison not made")
-        if session_changed:
-            gaps.add(_SESSION_GAP)
+        if session_gap:
+            gaps.add(session_gap)
         proof = fp.canon_level in PROOF_LEVELS and not gaps
-        base_key = "|".join(["A", core_hash, "proof" if proof else "gapped",
+        hypothesis = None
+        if not proof and gaps and all(is_grammar_gap(g) for g in gaps):
+            hypothesis = sorted(gaps)[0]
+        base_key = "|".join(["A", core_hash, "proof" if proof else
+                             "hypothesis" if hypothesis else "gapped",
                              shape_problem or "", _evidence_key(evidence)])
         key = f"{base_key}|{identity}"
         obs = observed.setdefault(key, _Observed(
             key=key, shape="A", base_key=base_key, identity=identity,
-            semantic_hash=core_hash, proof_grade=proof,
+            semantic_hash=core_hash, proof_grade=proof, hypothesis=hypothesis,
             core=fp.core, components=core_components(fp.core),
             shape_problem=shape_problem, evidence=evidence, explicit=explicit))
         obs.uses += 1
@@ -511,7 +546,7 @@ def _observe_view(stmt: exp.Expression, ex: Execution,
                   approved: dict[str, dict[str, Authority]], evidence,
                   observed: dict, recurrence: dict, dialect: str,
                   explicit: tuple[str, str] | None = None,
-                  session_changed: bool = False) -> None:
+                  session_gap: str | None = None) -> None:
     """Shape B intake: one observation per measure-reference projection."""
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
@@ -521,9 +556,9 @@ def _observe_view(stmt: exp.Expression, ex: Execution,
     # An explicit identity names one metric: applied only to a single use.
     explicit = explicit if len(projections) == 1 else None
     for proj in projections:
-        if session_changed:
+        if session_gap:
             # Which metric view a name reads is itself in question.
-            proj.outcome = unverifiable("context_unresolved", _SESSION_GAP, shape="B")
+            proj.outcome = unverifiable("context_unresolved", session_gap, shape="B")
             proj.governed_reference = False
         signature = json.dumps(proj.outcome.as_dict(), sort_keys=True)
         base_key = "|".join(["B", view or "", proj.measure,
@@ -824,7 +859,7 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
     names = _attributable(obs.names, obs.explicit_aliases)
     base = _base(obs, names)
 
-    if not obs.proof_grade:
+    if not obs.proof_grade and obs.hypothesis is None:
         # An INCOMPLETE core omits constructs — equality or difference over it
         # proves nothing, so it anchors neither an accusation nor a
         # confirmation. Counted, described, left alone.
@@ -919,7 +954,8 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
             f"near {a.label} as snapshotted — not evidenced for the execution time"
             for a in stale_near))}
     if near:
-        judged = [(auth, check_raw(obs.core, auth, dialect, obs.shape_problem, models))
+        judged = [(auth, check_raw(obs.core, auth, dialect, obs.shape_problem, models,
+                                   obs.hypothesis))
                   for auth in near]
         conforming = [(a, o) for a, o in judged if o.status == "conforming"]
         if conforming:
@@ -942,6 +978,13 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
                          f"near {auth.concept}, unnamed — {_reason_text(outcome)}",
                          outcome)]
 
+    if obs.hypothesis is not None:
+        # "Not defined by any authoritative definition" is a statement about
+        # the query's meaning; a hypothesis reading cannot make it.
+        return [_finding(base, "unverifiable", 0, None, "unverifiable", "none",
+                         f"recurring measure outside the supported grammar — no "
+                         f"comparison made ({obs.hypothesis})",
+                         unverifiable("shape_unsupported", obs.hypothesis))]
     if obs.semantic_hash in excluded:
         return [_finding(base, "unverifiable", 0, None, "unverifiable", "none",
                          f"matches the {excluded[obs.semantic_hash]}, which is "
@@ -971,7 +1014,8 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
         return _finding(base, "unverifiable", 0, concept, "unverifiable", identity,
                         f"{concept}: {_reason_text(outcome)}", outcome)
     defs = applicable
-    judged = [(a, check_raw(obs.core, a, dialect, obs.shape_problem, models))
+    judged = [(a, check_raw(obs.core, a, dialect, obs.shape_problem, models,
+                            obs.hypothesis))
               for a in defs]
     conforming = [(a, o) for a, o in judged if o.status == "conforming"]
     if conforming:

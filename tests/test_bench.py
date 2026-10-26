@@ -13,6 +13,22 @@ from semantix.cli import main
 # decision not to model something — never to make a regression pass.
 KNOWN_UNMODELED: set[str] = set()
 
+# Near-misses OUTSIDE the proof grammar (semantix-proof/2): refused by policy
+# with a named reason, never certified — the measured cost of the narrower
+# scope. Supporting one of these constructs moves it to "distinguished"; a
+# case may only be added with the grammar change that refuses it.
+GRAMMAR_REFUSED = {
+    "cross-database-same-short-table": "lists only raw.orders",
+    "cross-join-no-on-clause": "uses a join",
+    "cte-body-invisible": "uses GROUP BY",
+    "grouping-rollup-vs-ungrouped-total": "uses ROLLUP",
+    "grouping-sets-vs-flat": "uses GROUPING SETS",
+    "join-type-inner-vs-left": "uses a join",
+    "limit-is-not-neutral": "uses LIMIT",
+    "rollup-ordinal-order": "uses ROLLUP",
+    "select-distinct-row-dedup": "uses DISTINCT",
+}
+
 
 def test_shipped_corpus_holds_the_gates():
     result = run_bench()
@@ -35,6 +51,20 @@ def test_unproven_near_misses_are_only_the_documented_gaps():
     assert unproven <= KNOWN_UNMODELED, f"undocumented blind spot: {unproven - KNOWN_UNMODELED}"
 
 
+def test_grammar_refusals_are_exactly_the_documented_scope():
+    result = run_bench()
+    assert result["proof_policy"] == "semantix-proof/2"
+    assert set(result["refused"]) == set(GRAMMAR_REFUSED)
+    for name, why in result["refused"].items():
+        assert why.startswith(("outside the supported grammar (semantix-proof/2): ",
+                               "relation identity not established (semantix-proof/2): "))
+        assert GRAMMAR_REFUSED[name] in why, (name, why)
+    # Refusals never count as detection or distinction.
+    assert result["equivalence_detection"]["refused"] == []
+    nm = result["near_misses"]
+    assert nm["distinguished"] + len(nm["refused"]) + len(nm["unproven"]) == nm["of"]
+
+
 def test_matrix_covers_the_cross_platform_claim():
     """The gates must hold per dialect, not just in aggregate — 'system-
     agnostic' is certified, not declared."""
@@ -46,7 +76,8 @@ def test_matrix_covers_the_cross_platform_claim():
         # Every near-miss is either proven different or explicitly unproven —
         # never silently counted as a success.
         nm = r["near_misses"]
-        assert nm["distinguished"] + len(nm["unproven"]) == nm["of"], dialect
+        assert nm["distinguished"] + len(nm["unproven"]) + len(nm["refused"]) == nm["of"], \
+            dialect
 
 
 def test_dialect_restriction():

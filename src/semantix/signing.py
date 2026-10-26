@@ -273,7 +273,16 @@ def _assess_live(receipt: dict, describes: str, instant, live: dict) -> ReceiptA
         return ReceiptAssessment(describes, instant, True, False, (
             "the live estate check was not made against this receipt's scan — "
             "current reliance is not established",), rechecked)
+    from semantix.extraction.proof import POLICY_ID
+
+    issued_under = receipt.get("proof_policy") or "before semantix-proof/2"
+    if receipt.get("proof_policy") != POLICY_ID:
+        return ReceiptAssessment(describes, instant, True, False, (
+            f"issued under proof policy {issued_under}; the policy in force is "
+            f"{POLICY_ID} — rescan and re-attest to rely on it now",), rechecked)
     status = live.get("status")
+    if live.get("proof_policy"):
+        return ReceiptAssessment(describes, instant, True, False, (live["note"],), rechecked)
     if status == "fresh":
         return ReceiptAssessment(describes, instant, True, True, (), rechecked)
     drift = live.get("estate_drift") or {}

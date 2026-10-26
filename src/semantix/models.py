@@ -37,8 +37,13 @@ VERDICT_PRECEDENCE: list[VerdictType] = [
 
 
 class CanonLevel(str, Enum):
-    OPTIMIZED = "optimized"    # fully qualified, inlined, normalized — proof-grade
-    QUALIFIED = "qualified"    # identifiers resolved, no deep rewriting
+    # Inside the supported grammar of the proof policy (extraction.proof):
+    # the ONLY proof grade. Reached through stated transformations alone.
+    SUPPORTED = "supported"
+    # The general optimizer's output. A HYPOTHESIS: an optimizer completing
+    # does not establish that its rewrite preserved the query's meaning.
+    OPTIMIZED = "optimized"
+    QUALIFIED = "qualified"    # identifiers resolved by sqlglot, no proof
     INCOMPLETE = "incomplete"  # canonicalized fine, but the SemanticCore does
                                # not model some construct this query uses
     PARSED = "parsed"          # AST only; canonical equality NOT trustworthy
@@ -55,7 +60,12 @@ class CanonLevel(str, Enum):
 # (CTE bodies, join type, HAVING, LIMIT, grouping sets, SELECT DISTINCT).
 # The rule is therefore inverted: a construct we do not model must PREVENT
 # proof grade, never be silently ignored.
-PROOF_LEVELS = {CanonLevel.OPTIMIZED.value, CanonLevel.QUALIFIED.value}
+#
+# Since policy semantix-proof/2 only SUPPORTED is proof grade: the general
+# optimizer rewrote predicates below an ordered LIMIT, merged outer joins'
+# null-supplying sides, unnested NOT IN, and simplified booleans in ways
+# that are wrong under NULLs — each reproduced as a false certification.
+PROOF_LEVELS = {CanonLevel.SUPPORTED.value}
 
 
 def _short(h: str, n: int = 12) -> str:
@@ -184,6 +194,9 @@ class Fingerprint:
     # (extraction.completeness). Non-empty forces canon_level=INCOMPLETE, so
     # the fingerprint can be reported and diffed but never certified equal.
     gaps: tuple[str, ...] = ()
+    # The proof policy's rules (extraction.proof.RULES) that produced this
+    # form; empty below proof grade. Recorded on positive verdicts.
+    rules: tuple[str, ...] = ()
 
     @staticmethod
     def make_id(core: SemanticCore, concept_candidate: str, relation: str = "",
@@ -236,6 +249,7 @@ class Claim:
     # Mirrors Fingerprint.gaps: a claim carrying gaps is below proof grade and
     # can be reported and diffed but never certified equal to anything.
     gaps: tuple[str, ...] = ()
+    rules: tuple[str, ...] = ()   # as Fingerprint.rules
 
     @staticmethod
     def make_id(name: str, provenance: Provenance, expr_raw: str | None) -> str:
@@ -308,6 +322,10 @@ class Receipt:
     # scanned snapshot when this receipt was issued? Embedded before signing,
     # so "fresh as of T" is itself tamper-evident.
     freshness: dict | None = None
+    # The proof policy (extraction.proof.POLICY_ID) the scan's verdicts were
+    # computed under; None for a scan that predates policy versioning. A
+    # receipt is current only under the policy in force.
+    proof_policy: str | None = None
     # Ed25519 signature block over the canonical payload (signing.py); None
     # until signed, {"alg": None, ...} when no crypto backend exists.
     signature: dict | None = None
@@ -327,5 +345,6 @@ class Receipt:
             "scope": self.scope,
             "verified_as_of": self.verified_as_of,
             "freshness": self.freshness,
+            "proof_policy": self.proof_policy,
             "signature": self.signature,
         }

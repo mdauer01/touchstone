@@ -15,7 +15,7 @@ import shutil
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
@@ -31,7 +31,7 @@ CATALOG = {
 
 def core(sql, dialect="duckdb"):
     registry = SchemaRegistry(CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     fps = extract_fingerprints(canon, "analytics.m", Provenance("t", "t"),
                                dialect, registry)
     if not fps:
@@ -75,15 +75,17 @@ def test_order_sensitive_spellings_are_gated(fn):
     assert any("ORDER BY" in g for g in gaps)
 
 
-def test_ranked_summary_sql_certifies():
-    """A blanket window check fired the gap for ANY window plus ANY inner
-    ORDER BY — mainstream ranked-summary SQL could never certify, with a gap
-    text asserting a consumer that does not exist."""
+def test_ranked_summary_sql_is_refused_with_its_reason():
+    """Round five made ranked-summary SQL certify through the optimizer.
+    Window functions are outside the proof grammar (semantix-proof/2): the
+    refusal must name the construct, not a consumer that does not exist —
+    a coverage backlog item, never a silent pass."""
     _, level, gaps = core(
         "with s as (select customer_id, amount from raw.orders order by customer_id) "
         "select customer_id, sum(amount) as m, rank() over (order by sum(amount) desc) "
         "as rnk from s group by 1")
-    assert level in PROOF_LEVELS, gaps
+    assert level not in PROOF_LEVELS
+    assert any("window function" in g for g in gaps), gaps
 
 
 def test_decorative_inner_order_by_is_neutral():
@@ -141,6 +143,12 @@ def test_short_catalog_entries_bind_fully_qualified_references():
                 "select region, sum(amount) as m from raw.orders_00 group by 1"):
         canon = canonicalize_sql(sql, registry.sqlglot_schema("snowflake"), "snowflake")
         assert canon.level == CanonLevel.OPTIMIZED, f"{sql}: {canon.error}"
+    # The PROOF path does not borrow the short entry's columns for the
+    # three-part name — that would assume they are one table — and says why.
+    full = canonicalize("select region, sum(amount) as m from ANALYTICS.RAW.ORDERS_00 "
+                        "group by 1", registry, "snowflake")
+    assert full.level != CanonLevel.SUPPORTED
+    assert any("lists only raw.orders_00" in g for g in full.gaps), full.gaps
 
 
 # ------------------------------------------------------------------ execution
@@ -162,7 +170,7 @@ def test_union_models_are_never_measured_through_one_branch(acme, tmp_path):
             fingerprint_id=Fingerprint.make_id(core_obj, "revenue") + relation,
             concept_candidate="revenue", core=core_obj, relation=relation,
             dialect="duckdb",
-            canon_level="incomplete" if gaps else "optimized",
+            canon_level="incomplete" if gaps else "supported",
             canonical_sql=sql,
             provenance=Provenance("sql", relation, f"{relation}.sql"),
             gaps=gaps,

@@ -355,13 +355,22 @@ JOIN_CATALOG = {"db.main.orders": {"customer_id": "INT", "amount": "DOUBLE",
 
 
 def _fp(sql: str):
-    from semantix.extraction.canonicalize import canonicalize_sql
+    """Joins are outside the proof grammar (semantix-proof/2), so a joined
+    query is read only as the optimizer's HYPOTHESIS — never proof grade, with
+    the join as its one stated gap. The join normalization below still
+    matters: it feeds diffs, blame and candidate matching."""
+    from semantix.extraction.canonicalize import canonicalize
     from semantix.extraction.fingerprint import extract_fingerprints
     from semantix.models import PROOF_LEVELS, Provenance
     registry = SchemaRegistry(JOIN_CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    canon = canonicalize(sql, registry, "duckdb")
     (fp,) = extract_fingerprints(canon, "db.main.m", Provenance("t", "m"), "duckdb", registry)
-    assert fp.canon_level in PROOF_LEVELS and not fp.gaps, (canon.level, canon.error, fp.gaps)
+    if " JOIN " in sql.upper() or ", db.main" in sql:
+        assert fp.canon_level not in PROOF_LEVELS
+        assert fp.gaps == ("outside the supported grammar (semantix-proof/2): uses a join",), \
+            fp.gaps
+    else:
+        assert fp.canon_level in PROOF_LEVELS and not fp.gaps, (canon.level, fp.gaps)
     return fp
 
 

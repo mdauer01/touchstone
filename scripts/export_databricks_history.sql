@@ -17,6 +17,11 @@
 -- Only assert it when it is true — e.g. every dashboard in the window runs
 -- against one catalog and schema.
 --
+-- EVERY statement type is exported, with its session: a USE, SET or
+-- CREATE TEMP VIEW earlier in a session changes what that session's short
+-- names read, and semantix makes the affected queries unverifiable rather
+-- than guess. Filtering to SELECT would hide exactly those statements.
+--
 -- TIME: start_time is compared with the definition windows in pilot.yml,
 -- which are UTC. Exporting in UTC keeps that comparison honest.
 
@@ -28,11 +33,12 @@ SELECT
   start_time,
   executed_by,
   client_application,
+  session_id,
+  statement_type,
   query_source.dashboard_id   AS dashboard_id,
   query_source.genie_space_id AS genie_space_id
 FROM system.query.history
 WHERE start_time >= TIMESTAMP '2026-10-01 00:00:00'   -- the pilot window.from
   AND start_time <  TIMESTAMP '2026-10-15 00:00:00'   -- the pilot window.to
   AND execution_status = 'FINISHED'
-  AND statement_type = 'SELECT'
 ORDER BY start_time;

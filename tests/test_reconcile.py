@@ -30,7 +30,7 @@ CORE_B = SemanticCore(
 )
 
 
-def fp(name: str, core: SemanticCore, relation: str = "analytics.m1", level: str = "optimized") -> Fingerprint:
+def fp(name: str, core: SemanticCore, relation: str = "analytics.m1", level: str = "supported") -> Fingerprint:
     return Fingerprint(
         fingerprint_id=Fingerprint.make_id(core, name),
         concept_candidate=name,
@@ -52,7 +52,7 @@ def claim(name: str, core: SemanticCore | None, expressible: bool = True) -> Cla
         expr_raw="sum(...)",
         expressible=expressible,
         core=core,
-        canon_level="optimized" if expressible else "failed",
+        canon_level="supported" if expressible else "failed",
     )
 
 

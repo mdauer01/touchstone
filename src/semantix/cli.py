@@ -817,6 +817,13 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     print(f"  near-misses distinguished: {nm['distinguished']}/{nm['of']}"
           + (f" — UNPROVEN (nothing demonstrated): {', '.join(nm['unproven'])}"
              if nm["unproven"] else ""))
+    if result["refused"]:
+        # The scope's cost: pairs outside the proof grammar are refused by
+        # design — counted and named, never scored as detected or distinguished.
+        print(f"  refused by the proof policy ({result['proof_policy']}): "
+              f"{len(det['refused'])} equivalence / {len(nm['refused'])} near-miss run(s)")
+        for name, why in result["refused"].items():
+            print(f"    {name}: {why.split(': ', 1)[-1]}")
     if args.json_out:
         out = Path(args.json_out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1252,8 +1259,19 @@ def _cmd_oracle(args: argparse.Namespace) -> int:
         seen.add((m["a"], m["b"]))
         print(f"  FALSE CERTIFICATION [{m['estate']}/{m['dataset']}]\n    {m['a']}\n    {m['b']}\n"
               f"    -> {m['result_a']}  vs  {m['result_b']}")
+    print(f"  proof forms ({report.proof_grade} queries): {report.transforms_executed} "
+          f"executions of each query's trusted transformed SQL against the query as written")
+    shown_t = set()
+    for m in report.transform_mismatches:
+        if m["original"] in shown_t:
+            continue
+        shown_t.add(m["original"])
+        print(f"  PROOF FORM DIFFERS [{m['estate']}/{m['dataset']}]\n    {m['original']}\n"
+              f"    {m['transformed']}\n"
+              f"    -> {m['result_original']}  vs  {m['result_transformed']}")
     if report.ok:
-        print("  no false certifications: every pair the engine equates executed identically")
+        print("  no false certifications: every pair the engine equates executed identically, "
+              "and every proof form executed as its original")
 
     from semantix.oracle import run_conformance_oracle
 

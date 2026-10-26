@@ -16,7 +16,7 @@ import json
 import pytest
 import yaml
 
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, Provenance
@@ -39,7 +39,7 @@ SEED = ("CREATE SCHEMA raw; CREATE TABLE raw.orders(amount DOUBLE, refund DOUBLE
 def _fp(sql, name="revenue"):
     registry = SchemaRegistry(CAT)
     registry.set_estate_depth(["raw.orders"])
-    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    canon = canonicalize(sql, registry, "duckdb")
     found = [f for f in extract_fingerprints(canon, "x", Provenance("q", "x"), "duckdb",
                                              registry) if f.concept_candidate == name]
     assert found, sql
@@ -363,16 +363,27 @@ def test_executions_outside_the_export_window_are_excluded_and_counted(tmp_path)
     assert result["findings"] == [] and result["funnel"]["measure_uses"] == 0
 
 
-@pytest.mark.parametrize("prefix", [
-    "USE SCHEMA staging; ",
-    "CREATE TEMPORARY VIEW orders AS SELECT * FROM main.finance.orders WHERE country = 'US'; ",
-])
-def test_session_changing_statements_end_relation_identity(tmp_path, prefix):
-    sql = f"{prefix}SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'"
+def test_a_temp_view_ends_relation_identity(tmp_path):
+    sql = ("CREATE TEMPORARY VIEW orders AS SELECT * FROM main.finance.orders "
+           f"WHERE country = 'US'; SELECT {GOVERNED} AS net_revenue FROM orders "
+           f"WHERE status = 'completed'")
     result = run(tmp_path, _rows(sql, catalog="main", schema="finance"))
     (f,) = result["findings"]
     assert f["kind"] == "unverifiable" and codes(f) == ["context_unresolved"]
     assert result["history"]["statements_after_session_change"] == 1
+
+
+def test_a_use_earlier_in_the_execution_is_reconstructed_not_ignored(tmp_path):
+    """Ordered evidence: USE SCHEMA staging precedes the query in the same
+    execution, so `orders` IS main.staging.orders — not the governed table,
+    and not a guess."""
+    sql = (f"USE SCHEMA staging; SELECT {GOVERNED} AS net_revenue FROM orders "
+           f"WHERE status = 'completed'")
+    result = run(tmp_path, _rows(sql, catalog="main", schema="finance"))
+    (f,) = result["findings"]
+    assert f["kind"] == "unverifiable" and f["relations_read"] == ["main.staging.orders"]
+    assert result["history"]["statements_with_reconstructed_context"] == 1
+    assert result["funnel"]["conforming"] == 0 and result["funnel"]["violations"] == 0
 
 
 DISCOUNT = VIEW.format(extra="").replace("filter: status = 'completed'",

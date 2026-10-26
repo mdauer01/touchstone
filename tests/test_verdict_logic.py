@@ -29,7 +29,7 @@ def core(expr: str, filters=()) -> SemanticCore:
 def fp(name: str, c: SemanticCore, relation="analytics.m") -> Fingerprint:
     return Fingerprint(
         fingerprint_id=Fingerprint.make_id(c, name), concept_candidate=name, core=c,
-        relation=relation, dialect="duckdb", canon_level="optimized",
+        relation=relation, dialect="duckdb", canon_level="supported",
         canonical_sql="SELECT ...", provenance=Provenance("dbt", f"model.{relation}"),
     )
 
@@ -38,7 +38,7 @@ def claim(name: str, c: SemanticCore | None, expressible=True) -> Claim:
     return Claim(
         claim_id=Claim.make_id(name, CLAIM_PROV, name), name=name, provenance=CLAIM_PROV,
         model="analytics.fct_orders", expr_raw="sum(...)", expressible=expressible,
-        core=c, canon_level="optimized" if expressible else "failed",
+        core=c, canon_level="supported" if expressible else "failed",
         error=None if expressible else "not machine-expressible",
     )
 

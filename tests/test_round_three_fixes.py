@@ -7,7 +7,7 @@ beside it.
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import PROOF_LEVELS, Fingerprint, Provenance, SemanticCore, VerdictType
@@ -20,7 +20,7 @@ CATALOG = {"raw.orders": {"order_id": "bigint", "status": "varchar",
 
 def fps_for(sql, dialect="duckdb"):
     registry = SchemaRegistry(CATALOG)
-    canon = canonicalize_sql(sql, registry.sqlglot_schema(dialect), dialect)
+    canon = canonicalize(sql, registry, dialect)
     return extract_fingerprints(canon, "analytics.m", Provenance("t", "t"), dialect, registry)
 
 
@@ -61,7 +61,7 @@ def test_alias_rename_inside_a_unioned_cte_is_not_a_contradiction():
 def _fp(name, core, relation):
     return Fingerprint(
         fingerprint_id=Fingerprint.make_id(core, name), concept_candidate=name,
-        core=core, relation=relation, dialect="duckdb", canon_level="optimized",
+        core=core, relation=relation, dialect="duckdb", canon_level="supported",
         canonical_sql="SELECT ...", provenance=Provenance("dbt", f"model.{relation}"),
     )
 

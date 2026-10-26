@@ -205,6 +205,7 @@ def extract_fingerprints(
                 canonical_sql=canonical_sql,
                 provenance=provenance,
                 gaps=fp_gaps,
+                rules=canon.rules if fp_level in PROOF_LEVELS else (),
             )
         )
     return fingerprints

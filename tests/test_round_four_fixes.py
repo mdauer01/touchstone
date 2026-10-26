@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize_sql
+from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.registry import SchemaRegistry
 from semantix.models import Provenance, VerdictType
@@ -142,7 +142,7 @@ def test_a_falsified_certification_is_withdrawn(tmp_path):
         return Fingerprint(
             fingerprint_id=Fingerprint.make_id(core, "revenue"),
             concept_candidate="revenue", core=core, relation=relation,
-            dialect="duckdb", canon_level="optimized", canonical_sql=sql,
+            dialect="duckdb", canon_level="supported", canonical_sql=sql,
             provenance=Provenance("sql", relation, f"{relation}.sql"),
         )
 
@@ -234,7 +234,7 @@ def test_a_deep_cte_graph_extracts_in_bounded_time():
     registry = SchemaRegistry(CATALOG)
     sql = _diamond(16)
     start = time.perf_counter()
-    canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+    canon = canonicalize(sql, registry, "duckdb")
     fps = extract_fingerprints(canon, "analytics.deep", Provenance("t", "t"),
                                "duckdb", registry)
     elapsed = time.perf_counter() - start
@@ -248,7 +248,7 @@ def test_deep_cte_bodies_still_distinguish_different_logic():
     registry = SchemaRegistry(CATALOG)
 
     def core_of(sql):
-        canon = canonicalize_sql(sql, registry.sqlglot_schema("duckdb"), "duckdb")
+        canon = canonicalize(sql, registry, "duckdb")
         fps = extract_fingerprints(canon, "analytics.deep", Provenance("t", "t"),
                                    "duckdb", registry)
         return fps[0].core.hash()

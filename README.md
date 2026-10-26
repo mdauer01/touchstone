@@ -52,17 +52,29 @@ Computed definitions come from dbt manifests, directories of `.sql` files, or
 shipped warehouse driver is DuckDB, so other warehouses are read through exported
 files.
 
-**What a CERTIFIED verdict means.** The definitions' canonical cores are equal at
-proof grade; every construct they use is one the core models; relation identity came
-from names the SQL wrote or from `--default-database` / `--default-schema`; and the
-parser is a qualified sqlglot version. Full statement and limits:
+**What a CERTIFIED verdict means.** Both definitions are inside the proof grammar
+of policy [`semantix-proof/2`](docs/proof-policy.md), and their proof forms are
+equal. A proof form comes from a short list of stated transformations (CTE inlining,
+`*` expansion, conjunct and operand ordering, `BETWEEN`, parentheses …), never from a
+general optimizer. Relation identity came from names the SQL wrote or from
+`--default-database` / `--default-schema`, and the parser is a qualified sqlglot
+version. The verdict records the policy, the rules and the assumptions it rests on.
+For the full statement and its limits, see
 [What a certification guarantees](#what-a-certification-guarantees-stated-narrowly).
 
-**What it refuses rather than guesses.** A construct the core does not model makes a
-definition unverifiable: for example `TABLESAMPLE`, window-measure semantics,
-joined-table references in metric views, bind parameters, or an unqualified
-reference whose database depends on the session. It is reported with the reason and
-never certified.
+**What it refuses rather than guesses.** Everything outside the grammar is
+unverifiable, and the reason names the construct:
+
+- joins, set operations, `LIMIT` / `OFFSET`, `DISTINCT` and window functions;
+- subqueries in expressions, `ROLLUP` / `CUBE` / `GROUPING SETS`;
+- aggregating CTE bodies;
+- unknown functions, `TABLESAMPLE` and bind parameters;
+- a relation the catalog does not describe under the name the SQL resolves to, or
+  an unqualified reference whose database depends on the session.
+
+The general optimizer's reading of such SQL is still used for diffs, blame and
+candidate matching, but only as a hypothesis. It never certifies, aliases or conforms,
+and nothing derived from it is stated as a definitive difference.
 
 **What it does not cover.** Semantics the SQL text does not carry (session time
 zones, collations, user-defined functions), engine runtime behaviour beyond the
@@ -74,8 +86,8 @@ warehouse, and definitions the scan did not read.
 | Check | What it does |
 | --- | --- |
 | `pytest` | The suite, including one regression file per external review round |
-| `semantix bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal |
-| `semantix oracle` | Executes every pair the engine would certify equal against adversarial DuckDB data, compared exactly; then executes every query the monitor's rules call conforming against its definition plus the identified variation |
+| `semantix bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal; pairs outside the proof grammar are listed as refused, with reasons |
+| `semantix oracle` | Executes every pair the engine would certify equal, and every proof-grade query against its own proof form, on adversarial DuckDB data, compared exactly. It then executes every query the monitor's rules call conforming against its definition plus the identified variation |
 
 ## What is implemented
 
@@ -243,7 +255,7 @@ grouped by channel. Some of it is a definition quietly changed. It tells them ap
 | CONFORMING | Exact canonical equality with an authoritative definition, **or** one of the listed shapes: the definition's own measure over its base table, every required filter kept as a top-level AND condition, extra conditions only on *supported declared dimensions*, grouping only by them — or a bare `MEASURE(m)` / `AGG(m)` over an approved metric view, filtered and grouped by its dimensions, in a statement built entirely from an allow-listed set of constructs |
 | VIOLATION | Only for a query inside the supported boundary (outside it, the would-be violation is kept as `suspected` context on an unverifiable use). A true statement about the SQL as written: the measure changed or transformed, a required filter absent / weakened through OR / broadened / replaced, a slice on a column the model does not declare as a dimension, a different source, or a governed measure presented under another metric's name |
 | CANDIDATE | The same measure over the same columns, unnamed, that would be a violation — a hypothesis, ranked lower |
-| UNVERIFIABLE | Everything outside the rules, with the reason: joins, CTEs or joins around a governed calculation, HAVING/LIMIT/DISTINCT, unsupported dimension expressions, a short table name with no evidenced session context, no definition evidenced for the execution time, or a query below proof grade |
+| UNVERIFIABLE | Everything outside the rules, with the reason: SQL outside the proof grammar (joins, LIMIT, DISTINCT, windows, subqueries …), a governed calculation consumed by a CTE or join, HAVING, unsupported dimension expressions, a short table name with no evidenced session context, no definition evidenced for the execution time, or a query below proof grade. A select-project-filter CTE is inlined and judged as the query it is. Outside the grammar, a would-be violation is shown only as `suspected` ("under the optimizer's reading (a hypothesis)") |
 | UNREGISTERED | A recurring measure no authoritative definition covers |
 
 Referencing an approved metric is tracked **separately** from preserving it:
@@ -399,14 +411,16 @@ maintaining YAML that drifts.
 
 ```bash
 .venv/bin/semantix bench
-# equivalence corpus: 32 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 100.0%
-#     duckdb      10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
-#     databricks  10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
-#     snowflake   10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
-#     bigquery    10/10 detected · near-misses 20/20 · coverage 100.0% · false certs 0
+# equivalence corpus: 32 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 78.1%
+#     duckdb      10/10 detected · near-misses 11/20 · coverage 78.1% · false certs 0
+#     ...
 #   equivalence detection: 40/40 (100%)
 #   known gaps: 2 confirmed
-#   near-misses distinguished: 80/80
+#   near-misses distinguished: 44/80
+#   outside the proof grammar (semantix-proof/2), refused: 0 equivalence / 36 near-miss run(s)
+#     join-type-inner-vs-left: uses a join
+#     limit-is-not-neutral: uses LIMIT
+#     ...
 #   false certifications: 0 ✓
 ```
 
@@ -418,10 +432,14 @@ because falsely certifying two different definitions is the failure a verifier c
 survive. The dialect matrix (`--dialects`, default above) is what turns "system-
 agnostic" from a declared property into a certified one — dialect quirks are exactly
 where canonicalizers break, so the corpus must hold everywhere a real estate speaks.
-Honesty rules: a near-miss pair that fails to reach proof grade under a dialect is
-reported as `UNPROVEN`, never as distinguished (a broken prover must not look like a
-passing one), and unknown dialect names are rejected rather than silently run as
-generic SQL.
+Honesty rules:
+
+- A near-miss pair that fails to reach proof grade for any reason other than the
+  grammar is reported as `UNPROVEN`, never as distinguished: a broken prover must not
+  look like a passing one.
+- A pair outside the proof grammar is `refused`, with the construct named. It counts
+  as neither detected nor distinguished; it is the scope's measured cost.
+- Unknown dialect names are rejected rather than silently run as generic SQL.
 
 **Nine of those near-misses exist because they once passed.** An adversarial review of
 this engine on 2026-07-25 found six live false-certification paths — CTE bodies, join
@@ -444,8 +462,8 @@ canonicalizer's own output tests the same imagination that wrote the canonicaliz
 ### The execution oracle
 
 ```bash
-.venv/bin/semantix oracle            # ~340 queries, ~900 executed pairs, <1s
-.venv/bin/semantix oracle --full     # ~15,600 queries, ~92,000 executed pairs, ~40s
+.venv/bin/semantix oracle            # ~380 queries, ~780 pairs + ~2,200 proof-form executions, ~3s
+.venv/bin/semantix oracle --full     # ~15,650 queries, ~51,000 pairs + ~69,000 proof-form executions
 ```
 
 The oracle does not ask the canonicalizer whether it is right. It generates queries
@@ -459,13 +477,27 @@ same short table name. Any two members whose results differ are a false
 certification. Results are compared exactly: integers and decimals as exact values,
 floats as their exact binary values, with no tolerance of any kind; execution is
 single-threaded, so summation order is the scan order. Every query is compared with every other, so cross-family collisions
-surface too, and a self-test requires the datasets to tell apart pairs known to
-differ, so a quiet oracle has demonstrably been able to speak. Run against `ec4baff`
-it reports 45 false certifications covering every class above. On the current code
-it reports none: 0 disagreements across 913 executed pairs by default and 91,785 in
-the full sweep, under exact comparison (exact even beyond the 28 significant digits a
-default decimal context keeps). Its scope is DuckDB execution of DuckDB-dialect SQL; the other
-dialects in the matrix are canonicalized by `bench`, not executed.
+surface too. A self-test requires the datasets to tell apart pairs known to
+differ, so a quiet oracle has demonstrably been able to speak. Run against `ec4baff`,
+it reports 45 false certifications covering every class above.
+
+Under [`semantix-proof/2`](docs/proof-policy.md) it also executes **every proof-grade
+query against its own proof form**, the SQL the stated rules produced from it. Each
+rule is therefore challenged one query at a time, not only through the pairs that
+happen to bucket together. Inlining variants carry traps: swapped and renamed
+columns, a computed projection under a tighter operator, NOT over a substituted
+comparison, and filters on both sides.
+
+On the current code it reports no disagreements under exact comparison, which is
+exact even beyond the 28 significant digits a default decimal context keeps:
+
+| Run | Pair executions | Proof-form executions | Disagreements |
+| --- | --- | --- | --- |
+| Default | ~780 | ~2,200 | 0 |
+| `--full` | ~51,000 | ~69,000 | 0 |
+
+Its scope is DuckDB execution of DuckDB-dialect SQL. The other dialects in the matrix
+are canonicalized by `bench`, not executed.
 
 The same command then challenges the monitor's conformance rules. It generates
 authority × slice × grouping variants plus near misses (required filters dropped,
@@ -475,23 +507,37 @@ executed against the expected query — the authority's measure under its requir
 AND the variation the rules identified — on every dataset, exactly; no near miss may
 conform, and no legitimate variant may be called a violation. On its first run it found
 a real defect: contradictory slices fold a WHERE to `FALSE`, and the rules reported the
-required filter as missing — now unverifiable. Current results: 416 conforming verdicts
-over 3,328 executions by default (7,506 over 60,048 with `--full`), 0 disagreements, 0
-near misses conformed. Agreement on these datasets challenges the rules; it does not
+required filter as missing; that case is now unverifiable. Current results:
+
+| Run | Conforming verdicts | Executions | Disagreements | Near misses conformed |
+| --- | --- | --- | --- | --- |
+| Default | ~480 | ~3,800 | 0 | 0 |
+| `--full` | ~7,750 | ~62,000 | 0 | 0 | Agreement on these datasets challenges the rules; it does not
 prove them, and whether a slice is *permitted* is policy, tested by the acceptance cases.
 `MEASURE()` cannot run in DuckDB; `tests/test_databricks_integration.py` checks it on a
 real workspace when `SEMANTIX_DATABRICKS_*` is set (opt-in, not yet run).
 
 ### What a certification guarantees, stated narrowly
 
-A `CERTIFIED` verdict means: the definitions' canonical cores are equal at proof
-grade; every construct they use is one the core models (anything else is a gap and
-refuses); relation identity came from names the SQL wrote or from execution context
-the operator supplied (`--default-database` / `--default-schema`), never from a
-shared short catalog entry; and the parser was a qualified sqlglot version
-(`semantix/toolchain.py` — an unqualified version withholds certification, and a new
-one qualifies only through `scripts/qualify_sqlglot.sh`, which runs the suite, the
-benchmark and the full oracle). It does not cover semantics the SQL text does not
+A `CERTIFIED` verdict means all of the following:
+
+- Both definitions are inside the proof grammar of [`semantix-proof/2`](docs/proof-policy.md),
+  and their proof forms are equal. Those forms come only from the policy's stated
+  rules, each with its preconditions.
+- No boolean simplification, constant folding, re-association or predicate movement
+  took part.
+- Relation identity came from names the SQL wrote or from execution context the
+  operator supplied (`--default-database` / `--default-schema`). It never came from a
+  shared short catalog entry, whose columns are never borrowed for a longer name.
+- The parser was a qualified sqlglot version (`semantix/toolchain.py`). An
+  unqualified version withholds certification, and a new one qualifies only through
+  `scripts/qualify_sqlglot.sh`, which runs the suite, the benchmark and the full
+  oracle.
+
+The verdict's evidence names the policy, the rules and the assumptions it rests on.
+A scan made under an earlier policy, including one with every file unchanged, is
+reported `stale`, and a receipt issued from it is `UNRESOLVED` until a rescan
+recertifies it. It does not cover semantics the SQL text does not
 carry (session time zones, collations, user-defined functions), engine-specific
 runtime behaviour beyond the DuckDB oracle, or definitions the scan did not reach. A
 receipt answers two separate questions. It is a valid record of the instant it
@@ -560,14 +606,16 @@ prints on a large estate (a first scan can emit one SHADOW_METRIC per
 undeclared measure); every verdict is still stored, in the report, and in
 `--json`.
 
-**Degradation ladder, never hard failure.** optimized → qualified → parsed → failed,
-plus `incomplete` — the completeness gate's verdict on SQL we parsed but cannot
-fully model. Artifacts that can't be fully canonicalized still get recorded; equality
+**Degradation ladder, never hard failure.** `supported` is the only proof level:
+inside the proof grammar, from stated rules. Below it come `optimized` and `qualified`,
+which are the general optimizer's readings (hypotheses, never proof), then `parsed`
+and `failed`. `incomplete` is the completeness gate's verdict on SQL we parsed but
+cannot fully model. Artifacts that can't be fully canonicalized still get recorded; equality
 below proof grade can't certify (`UNRESOLVED`, not a false `CERTIFIED`). The scan
 prints two coverage numbers: how much SQL parsed and qualified, and how many measures
 reached proof grade (each unreadable artifact counts as one unverifiable measure). The
-second is the one to judge readiness by — the §9 target is >85 %; the demo estate hits
-100 %. Coverage used to be the first number alone, which let an estate whose only metric
+second is the one to judge readiness by. The §9 target is >85 %; the demo estate is at
+80 % under `semantix-proof/2`, because one of its five models joins two tables. Coverage used to be the first number alone, which let an estate whose only metric
 used TABLESAMPLE report 100 % while nothing in it could be certified.
 
 In practice `qualified` almost never fires: `qualify()` fails on the same

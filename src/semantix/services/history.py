@@ -26,13 +26,14 @@ from sqlglot import exp
 
 FIELDS = ("statement_id", "statement_text", "start_time", "executed_by",
           "client_application", "catalog", "schema", "query_tag",
-          "dashboard_id", "genie_space_id")
+          "dashboard_id", "genie_space_id", "session_id", "statement_type")
 # Spellings the warehouses' own history tables use for the same facts.
 _ALIASES = {
     "query_id": "statement_id", "query_text": "statement_text",
     "user_name": "executed_by", "executed_as": "executed_by",
     "database_name": "catalog", "schema_name": "schema",
     "current_catalog": "catalog", "current_schema": "schema",
+    "session_key": "session_id", "query_type": "statement_type",
 }
 
 
@@ -48,6 +49,10 @@ class Execution:
     query_tag: str | None = None
     dashboard_id: str | None = None
     genie_space_id: str | None = None
+    # The session that ran it: session state (USE, SET, temp views) from
+    # another execution applies only within one (services.session).
+    session_id: str | None = None
+    statement_type: str | None = None
 
     @property
     def asset(self) -> str | None:
@@ -141,7 +146,9 @@ def from_records(records: list[dict], source: str = "", fmt: str = "records") ->
             catalog=_text(row.get("catalog")), schema=_text(row.get("schema")),
             query_tag=_text(row.get("query_tag")),
             dashboard_id=_text(row.get("dashboard_id")),
-            genie_space_id=_text(row.get("genie_space_id"))))
+            genie_space_id=_text(row.get("genie_space_id")),
+            session_id=_text(row.get("session_id")),
+            statement_type=_text(row.get("statement_type"))))
     intake.ignored_columns = sorted(ignored)
     return intake
 

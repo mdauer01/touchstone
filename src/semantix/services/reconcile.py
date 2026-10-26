@@ -371,14 +371,28 @@ def _copy_evidence(evidence: dict) -> dict:
 
 
 def _verdict(vt: VerdictType, concept: Concept, severity: int, summary: str, evidence: dict) -> Verdict:
+    evidence = _copy_evidence(evidence)
+    if vt in (VerdictType.CERTIFIED, VerdictType.ALIASING):
+        evidence["proof"] = _proof_basis(concept)
     return Verdict(
         verdict_type=vt,
         concept_id=concept.concept_id,
         concept_label=concept.label,
         severity=severity,
         summary=summary,
-        evidence=_copy_evidence(evidence),
+        evidence=evidence,
     )
+
+
+def _proof_basis(concept: Concept) -> dict:
+    """What a POSITIVE verdict rests on: the policy, the rules that produced
+    the proof-grade forms it compared, and the policy's assumptions."""
+    from semantix.extraction.proof import ASSUMPTIONS, POLICY_ID
+
+    members = [*concept.fingerprints, *concept.claims]
+    rules = sorted({r for m in members if m.canon_level in PROOF_LEVELS
+                    for r in (m.rules or ())})
+    return {"policy": POLICY_ID, "rules": rules, "assumptions": list(ASSUMPTIONS)}
 
 
 def _proof_blockers(fps: list[Fingerprint], expressible: list[Claim]) -> str:
