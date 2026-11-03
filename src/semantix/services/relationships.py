@@ -48,7 +48,7 @@ from sqlglot import exp
 
 from semantix.extraction.canonicalize import canonicalize_sql
 from semantix.extraction.registry import SchemaRegistry
-from semantix.extraction.sqlutil import flatten_conjuncts, table_map
+from semantix.extraction.sqlutil import annotate_truncations, flatten_conjuncts, table_map
 from semantix.store import Store, utcnow
 from semantix.warehouse import qident
 
@@ -140,7 +140,13 @@ def _parse_statements(text: str, dialect: str) -> tuple[list[exp.Expression], in
 
 def parse_statement_list(text: str, dialect: str) -> list[exp.Expression | None]:
     """Every statement in a history blob, in order; None for one that does
-    not parse, so what came before what is never lost.
+    not parse (statement_chunks also gives each one's text)."""
+    return [tree for _, tree in statement_chunks(text, dialect)]
+
+
+def statement_chunks(text: str, dialect: str) -> list[tuple[str, exp.Expression | None]]:
+    """(text, tree) for every statement in a history blob, in order; the tree
+    None for one that does not parse, so what came before what is never lost.
 
     Statements are split on semicolons OUTSIDE strings and comments, using
     the dialect's tokenizer, and each is parsed on its own. The previous
@@ -161,7 +167,8 @@ def parse_statement_list(text: str, dialect: str) -> list[exp.Expression | None]
         tokens = sqlglot.tokenize(text, read=dialect)
     except Exception:  # noqa: BLE001 — a blob the tokenizer rejects outright
         whole, bad = _parse_whole(text, dialect)
-        return [*whole, *([None] * bad)]
+        return [(t.meta.get("source_text") or text.strip(), t) for t in whole] + \
+            [(text.strip(), None)] * bad
     chunks: list[str] = []
     start = 0
     for tok in tokens:
@@ -181,21 +188,22 @@ def parse_statement_list(text: str, dialect: str) -> list[exp.Expression | None]
             start = after
     chunks.append(text[start:])
 
-    statements: list[exp.Expression | None] = []
+    statements: list[tuple[str, exp.Expression | None]] = []
     for chunk in chunks:
         if not _has_code(chunk, dialect):
             continue  # whitespace or comments only — nothing was executed
         try:
             parsed = sqlglot.parse_one(chunk, read=dialect)
         except Exception:  # noqa: BLE001
-            statements.append(None)
+            statements.append((chunk.strip(), None))
             continue
         if parsed is None or isinstance(parsed, exp.Semicolon):
             continue
+        annotate_truncations(parsed, chunk, dialect)
         # The text as it ran, for evidence records (assess.record): the tree
         # is qualified in place later, and a re-render is not always faithful.
         parsed.meta["source_text"] = chunk.strip()
-        statements.append(parsed)
+        statements.append((chunk.strip(), parsed))
     return statements
 
 
@@ -213,9 +221,12 @@ def _has_code(chunk: str, dialect: str) -> bool:
 
 def _parse_whole(text: str, dialect: str) -> tuple[list[exp.Expression], int]:
     try:
-        return [s for s in sqlglot.parse(text, read=dialect) if s is not None], 0
+        trees = [s for s in sqlglot.parse(text, read=dialect) if s is not None]
     except Exception:  # noqa: BLE001
         return [], 1
+    for tree in trees:
+        annotate_truncations(tree, text, dialect)
+    return trees, 0
 
 
 def _cte_names(select: exp.Select) -> set[str]:

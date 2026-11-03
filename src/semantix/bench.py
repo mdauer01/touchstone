@@ -22,8 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
-
+from semantix.adapters.loadutil import load_yaml
 from semantix.extraction.canonicalize import canonicalize
 from semantix.extraction.fingerprint import extract_fingerprints
 from semantix.extraction.proof import POLICY_ID, is_policy_gap
@@ -34,7 +33,7 @@ DEFAULT_CORPUS = Path(__file__).parent / "benchmark" / "equivalence.yaml"
 
 
 def load_corpus(path: str | Path | None = None) -> dict[str, Any]:
-    return yaml.safe_load(Path(path or DEFAULT_CORPUS).read_text())
+    return load_yaml(Path(path or DEFAULT_CORPUS))
 
 
 def _flatten_catalog(nested: dict) -> dict[str, dict[str, str]]:

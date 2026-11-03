@@ -27,6 +27,7 @@ fully parsed USE — then the context is reconstructed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from sqlglot import exp
@@ -54,14 +55,19 @@ class SessionEvent:
     names: frozenset[str] | None     # None: every short name
     # A fully parsed USE: (catalog or None, schema or None, schema_known).
     use: tuple[str | None, str | None, bool] | None = None
+    # The statement's own text as it ran (evidence records), when known.
+    text: str | None = None
 
 
 def classify(stmt: exp.Expression | None, row: int, index: int, session: str | None,
-             ts: str | None) -> SessionEvent | None:
+             ts: str | None, text: str | None = None) -> SessionEvent | None:
     """The session event a non-query statement is, or None when it changes
-    nothing a name resolves to. `stmt` None is an unparseable statement."""
+    nothing a name resolves to. `stmt` None is an unparseable statement;
+    `text` is its text, when known."""
+    text = stmt.meta.get("source_text") if stmt is not None else text
+
     def event(what, names=None, use=None):
-        return SessionEvent(row, index, session, ts, what, names, use)
+        return SessionEvent(row, index, session, ts, what, names, use, text)
 
     if stmt is None:
         return event("an unparseable statement")
@@ -210,3 +216,77 @@ def resolve(events: list[SessionEvent], row: int, index: int, session: str | Non
     return context, (f"relation identity depends on the session: {e.what} ({where}) "
                      f"{certainty} this statement and can change what {names} "
                      f"resolve(s) to"), False
+
+
+# ------------------------------------------------------------ export text
+
+# SET keys whose values describe how SQL is EVALUATED (ANSI mode, time zone,
+# shuffle width): exported. Every other SET value — a storage-account key, an
+# S3 secret, a JDBC password set as a conf — is not.
+_SAFE_SET = re.compile(r"^(spark\.sql\.|spark\.databricks\.sql\.|ansi_mode$|timezone$|"
+                       r"time zone$|statement_timeout$)", re.IGNORECASE)
+_SECRETISH = re.compile(r"(key|secret|passw|pwd|token|credential|sas|auth|private|cert|"
+                        r"oauth|bearer)", re.IGNORECASE)
+_SET_RE = re.compile(r"^\s*SET\s+(?P<key>[^=]+?)\s*=\s*(?P<value>.*?)\s*;?\s*$",
+                     re.IGNORECASE | re.DOTALL)
+# Clauses whose string values configure a source or a connection.
+_OPTION_WORDS = frozenset({"OPTIONS", "TBLPROPERTIES", "PROPERTIES", "CREDENTIALS",
+                           "CREDENTIAL", "SERDEPROPERTIES", "DBPROPERTIES"})
+_SECRET_WORDS = frozenset({"IDENTIFIED", "PASSWORD"})
+NOT_EXPORTED = "'[not exported]'"
+
+
+def exportable(text: str, dialect: str) -> str:
+    """A session statement's text as it may leave semantix — into an evidence
+    export and a classifier's prompt. Statements carry credentials: a SET of
+    a storage key, a JDBC password in OPTIONS. Kept: everything that decides
+    what SQL reads and computes; removed: the value of a SET whose key is not
+    a known evaluation setting, and every string inside OPTIONS / properties
+    clauses or after IDENTIFIED BY / PASSWORD. Text that cannot be tokenized
+    is not exported."""
+    import sqlglot
+    from sqlglot.tokens import TokenType
+
+    m = _SET_RE.match(text)
+    if m:
+        key = m.group("key").strip()
+        if _SAFE_SET.match(key) and not _SECRETISH.search(key):
+            return text.strip()
+        return f"SET {key} = [value not exported]"
+    try:
+        tokens = sqlglot.tokenize(text, read=dialect)
+    except Exception:  # noqa: BLE001 — unknown text never leaves verbatim
+        head = text.strip().split(None, 1)[0] if text.strip() else ""
+        return f"{head} … [text not exported: it could not be tokenized]".strip()
+    spans = []
+    depth = 0          # paren depth inside an options clause; 0 = outside
+    after_secret = False
+    for i, tok in enumerate(tokens):
+        word = tok.text.upper()
+        if depth == -1:
+            depth = 1
+            continue
+        if depth:
+            if tok.token_type == TokenType.L_PAREN:
+                depth += 1
+            elif tok.token_type == TokenType.R_PAREN:
+                depth -= 1
+            elif tok.token_type == TokenType.STRING:
+                spans.append(tok)
+            continue
+        if tok.token_type == TokenType.STRING and after_secret:
+            spans.append(tok)
+        after_secret = word in _SECRET_WORDS or (after_secret and word in ("BY", "="))
+        if word in _OPTION_WORDS and i + 1 < len(tokens) \
+                and tokens[i + 1].token_type == TokenType.L_PAREN:
+            depth = -1                         # the next token opens the clause
+    if not spans:
+        return text.strip()
+    out, last = [], 0
+    for tok in spans:
+        start, end = tok.start, tok.end + 1      # the span includes the quotes
+        out.append(text[last:start])
+        out.append(NOT_EXPORTED)
+        last = end
+    out.append(text[last:])
+    return "".join(out).strip()

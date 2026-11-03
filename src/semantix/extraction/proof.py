@@ -48,7 +48,14 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
-from semantix.extraction.sqlutil import flatten_conjuncts, table_fqname
+from semantix.extraction.sqlutil import (
+    call_arguments,
+    canonical_unit,
+    flatten_conjuncts,
+    literal_kind,
+    misread_literal,
+    table_fqname,
+)
 
 POLICY_ID = "semantix-proof/2"
 
@@ -279,6 +286,8 @@ def _check_grammar(node: exp.Expression) -> None:
         _check_chain(node)
     if isinstance(node, exp.Between):
         _check_between(node)
+    if isinstance(node, exp.In) and node.expressions:
+        _check_in_list(node)
     for child in node.iter_expressions():
         _check_grammar(child)
 
@@ -306,23 +315,25 @@ def _check_chain(node: exp.Expression) -> None:
                           "the parser and the engines bind it differently")
 
 
-def _literal_kind(node: exp.Expression) -> str:
-    if isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal) \
-            and not node.this.is_string:
-        return "number"
-    if isinstance(node, exp.Literal):
-        return "string" if node.is_string else "number"
-    return "other"
-
-
 def _check_between(node: exp.Between) -> None:
     """Rule `between` expands to two pairwise comparisons; DuckDB binds
     BETWEEN with ONE common type for all three operands, so bounds of
     different kinds are cast differently (`qty BETWEEN 2.5 AND '2.5'`)."""
-    if _literal_kind(node.args["low"]) != _literal_kind(node.args["high"]):
+    if literal_kind(node.args["low"]) != literal_kind(node.args["high"]):
         raise Refusal("BETWEEN bounds of different kinds (a string beside a number or an "
                       "expression) are typed differently by the engines than by the "
                       "expansion")
+
+
+def _check_in_list(node: exp.In) -> None:
+    """Rule `in` reads a list as pairwise equalities; DuckDB binds the WHOLE
+    list to one type, so items of different kinds compare differently
+    (`country IN ('US', 5)` fails to convert 'US', while the expansion keeps
+    '05', '5' and 'US')."""
+    if len({literal_kind(e) for e in node.expressions}) > 1:
+        raise Refusal("an IN list whose items are of different kinds (a string beside a "
+                      "number or an expression) is typed differently by the engines than "
+                      "by the expansion")
 
 
 # Functions whose unit the parser reads as a KEYWORD when written unquoted,
@@ -337,11 +348,17 @@ _UNIT_WORDS = frozenset({
     "HOUR", "HOURS", "HH", "MINUTE", "MINUTES", "MI", "SECOND", "SECONDS", "SS",
     "MILLISECOND", "MILLISECONDS", "MS", "MICROSECOND", "MICROSECONDS", "US", "EPOCH"})
 _LIKE_WORDS = frozenset({"LIKE", "ILIKE", "RLIKE", "GLOB", "REGEXP"})
+_TRUNC_FUNCTIONS = frozenset({"DATE_TRUNC", "DATETRUNC", "TIMESTAMP_TRUNC", "DATETIME_TRUNC",
+                              "TRUNC"})
 
 
 def _check_tokens(sql: str, dialect: str) -> None:
     """Refusals the parse tree cannot express, read from the original TOKENS."""
     from sqlglot.tokens import TokenType
+
+    misread = misread_literal(sql, dialect)
+    if misread:
+        raise Refusal(misread)
 
     try:
         tokens = sqlglot.tokenize(sql, read=dialect)
@@ -363,34 +380,21 @@ def _check_tokens(sql: str, dialect: str) -> None:
                 raise Refusal(f"uses function-form {word}(); its argument order is read "
                               f"differently by the parser and the engines")
         if word in _UNIT_FUNCTIONS and dialect != "bigquery":
-            for arg in _call_arguments(tokens, i + 1):
+            for arg in call_arguments(tokens, i + 1):
                 if len(arg) == 1 and arg[0].token_type == TokenType.VAR \
                         and arg[0].text.upper() in _UNIT_WORDS:
                     raise Refusal(f"{word}() names its unit unquoted ({arg[0].text}); the "
                                   f"engines read a column of that name, the parser a "
                                   f"keyword")
-
-
-def _call_arguments(tokens, open_index: int) -> list[list]:
-    """The top-level argument token lists of the call opening at `open_index`."""
-    from sqlglot.tokens import TokenType
-
-    args: list[list] = [[]]
-    depth = 0
-    for tok in tokens[open_index:]:
-        if tok.token_type in (TokenType.L_PAREN, TokenType.L_BRACKET):
-            depth += 1
-            if depth == 1:
-                continue
-        elif tok.token_type in (TokenType.R_PAREN, TokenType.R_BRACKET):
-            depth -= 1
-            if depth == 0:
-                break
-        elif tok.token_type == TokenType.COMMA and depth == 1:
-            args.append([])
-            continue
-        args[-1].append(tok)
-    return [a for a in args if a]
+                if word in _TRUNC_FUNCTIONS and len(arg) == 1 \
+                        and arg[0].token_type == TokenType.STRING \
+                        and canonical_unit(arg[0].text, dialect, word) is None:
+                    # The parser rewrites 'W' to WEEK; the engine truncates to
+                    # NULL (or rejects it). A model or query written so is not
+                    # the grain the proof form would name.
+                    raise Refusal(f"{word}() truncates by '{arg[0].text}', a unit {dialect} "
+                                  f"does not accept as written for a grain this rule set "
+                                  f"reads")
 
 
 def _has_aggregate(node: exp.Expression) -> bool:

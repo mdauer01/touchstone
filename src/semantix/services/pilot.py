@@ -40,6 +40,7 @@ from pathlib import Path
 from semantix.adapters.base import DeclaredSpec, spec_content_text
 from semantix.adapters.loadutil import load_yaml
 from semantix.adapters.uc_metrics import load_uc_metrics
+from semantix.extraction.sqlutil import UNITS, canonical_unit
 from semantix.store import Store
 
 _TOP_KEYS = frozenset({"history", "window", "execution_context", "authority",
@@ -47,7 +48,9 @@ _TOP_KEYS = frozenset({"history", "window", "execution_context", "authority",
                        "asset_map"})
 _CONTEXT_KEYS = frozenset({"catalog", "schema", "asserted_for_all_executions"})
 _AUTHORITY_KEYS = frozenset({"system", "metric_views"})
-_VIEW_KEYS = frozenset({"name", "snapshot", "sha256", "applies"})
+_VIEW_KEYS = frozenset({"name", "snapshot", "sha256", "applies", "approved_time_groupings"})
+# Time grains an operator may approve: every grain a truncation can be read as.
+TIME_UNITS = frozenset(UNITS)
 _WINDOW_KEYS = frozenset({"from", "to"})
 COMPARE_MODES = ("as_of_execution", "current")
 
@@ -60,6 +63,17 @@ class PilotView:
     applies_from: str | None
     applies_to: str | None
     specs: list[DeclaredSpec] = field(default_factory=list)
+    # {measure (lower case) or "*": {dimension name: frozenset(DATE_TRUNC units)}}
+    # — time grains approved beyond the declared dimensions (docs/pilot.md).
+    approved_time_groupings: dict = field(default_factory=dict)
+
+    def approvals_for(self, measure: str) -> dict[str, frozenset]:
+        """The approved time groupings for one measure: its own plus "*"."""
+        out: dict[str, set] = {}
+        for key in ("*", measure.lower()):
+            for dim, units in (self.approved_time_groupings.get(key) or {}).items():
+                out.setdefault(dim, set()).update(units)
+        return {d: frozenset(u) for d, u in out.items()}
 
     def applies_at(self, ts: str) -> bool:
         return ((self.applies_from is None or self.applies_from <= ts)
@@ -200,7 +214,9 @@ def load_pilot(directory: str | Path, dialect: str) -> Pilot:
                              f"or inverted window evidences nothing")
         views.append(PilotView(
             name=name, snapshot=snapshot, sha256=actual_sha,
-            applies_from=applies_from, applies_to=applies_to, specs=specs))
+            applies_from=applies_from, applies_to=applies_to, specs=specs,
+            approved_time_groupings=_approved_time_groupings(
+                entry.get("approved_time_groupings"), specs, where, dialect)))
     names = [v.name for v in views]
     if len(set(names)) != len(names):
         raise ValueError("pilot.yml: a metric view is listed twice")
@@ -222,6 +238,61 @@ def load_pilot(directory: str | Path, dialect: str) -> Pilot:
         catalog=_required_path(root, catalog, "catalog") if catalog else None,
         asset_map={str(k): str(v) for k, v in asset_map.items()},
         system=system)
+
+
+def _approved_time_groupings(raw, specs: list[DeclaredSpec], where: str,
+                             dialect: str) -> dict:
+    """Validate `approved_time_groupings`: {measure | "*": {date dimension:
+    [units]}}. A declared date dimension authorizes grouping by itself as
+    declared; every OTHER time grain of it must be approved here, per metric,
+    or a grouping by it is outside the governed model."""
+    if raw is None:
+        return {}
+    where = f"{where}.approved_time_groupings"
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{where}: must map a measure (or \"*\") to "
+                         f"{{dimension: [units]}}")
+    by_name = {s.name.lower(): s for s in specs}
+    out: dict = {}
+    seen_measures = [str(m).lower() for m in raw]
+    if len(set(seen_measures)) != len(seen_measures):
+        raise ValueError(f"{where}: a measure is listed twice (names compare without case)")
+    for measure, dims in raw.items():
+        key = str(measure).lower()
+        if key != "*" and key not in by_name:
+            raise ValueError(f"{where}: {measure!r} is not a measure of this view")
+        if not isinstance(dims, dict) or not dims:
+            raise ValueError(f"{where}.{measure}: must map dimensions to lists of units")
+        targets = [by_name[key]] if key != "*" else list(by_name.values())
+        dim_names = [str(d).lower() for d in dims]
+        if len(set(dim_names)) != len(dim_names):
+            raise ValueError(f"{where}.{measure}: a dimension is listed twice (names compare "
+                             f"without case)")
+        approved: dict = {}
+        for dim, units in dims.items():
+            dname = str(dim).lower()
+            for spec in targets:
+                declared = {d.name.lower(): d for d in spec.dimensions or []}
+                d = declared.get(dname)
+                if d is None or not d.supported or d.column is None or d.truncation:
+                    raise ValueError(
+                        f"{where}.{measure}.{dim}: not a plain declared column dimension "
+                        f"of {spec.name} — a time grain is approved on a declared date "
+                        f"column, not on an expression")
+            if not isinstance(units, list) or not units:
+                raise ValueError(f"{where}.{measure}.{dim}: list the approved units")
+            # A unit is the grain's name, or a spelling the dialect's
+            # DATE_TRUNC accepts for it (`MM` on Databricks).
+            read = {str(u): (str(u).strip().upper() if str(u).strip().upper() in TIME_UNITS
+                             else canonical_unit(str(u).strip(), dialect)) for u in units}
+            unknown = sorted(u for u, grain in read.items() if grain is None)
+            if unknown:
+                raise ValueError(f"{where}.{measure}.{dim}: unknown unit(s) "
+                                 f"{', '.join(unknown)} (one of {', '.join(UNITS)}, or a "
+                                 f"spelling {dialect}'s DATE_TRUNC accepts for one)")
+            approved[dname] = frozenset(read.values())
+        out[key] = approved
+    return out
 
 
 def verify_against_scan(pilot: Pilot, store: Store, scan_id: str) -> None:

@@ -34,6 +34,8 @@ authority:
       snapshot: views/revenue_mv.yaml
       sha256: 3f1c…                        # of the snapshot file — refused on mismatch
       applies: {from: 2026-09-01T00:00:00Z, to: null}
+      approved_time_groupings:            # optional — see "Time groupings" below
+        net_revenue: {order_date: [WEEK]} # a measure (or "*"): {date dimension: [units]}
 compare_against: as_of_execution          # or: current
 snapshots_taken_at: 2026-10-16T09:00:00Z  # optional; shown in `current` mode
 catalog: catalog.yml
@@ -57,6 +59,62 @@ Unknown keys are refused, and so is a window whose `from` is not before its `to`
 The `window` is applied: executions outside it are not judged, and are counted in the
 report (`executions_outside_window`), so an export that does not match its package
 shows itself.
+
+## Time groupings
+
+A declared date dimension authorizes grouping by that dimension **as declared**, not by
+every transformation of it. In the snapshot above, `order_date` and `month` (=
+`DATE_TRUNC('MONTH', order_date)`) are declared, so grouping by either is a permitted
+variation. Grouping by `DATE_TRUNC('WEEK', order_date)` or `DATE_TRUNC('QUARTER', …)`
+is outside the governed model: the use is unverifiable (`grouping_undeclared`) and the
+finding says how to approve it.
+
+When a time grain is governed for a metric, approve it explicitly, per metric:
+
+```yaml
+approved_time_groupings:
+  net_revenue: {order_date: [WEEK, QUARTER]}   # for net_revenue only
+  "*": {order_date: [DAY]}                     # for every measure of this view
+```
+
+- An approval names a measure of the view (or `*`), a plain declared column dimension,
+  and units from YEAR, QUARTER, MONTH, WEEK, DAY, HOUR, MINUTE, SECOND, MILLISECOND and
+  MICROSECOND (or a spelling the dialect's DATE_TRUNC accepts for one, such as `MM`).
+  Anything else is refused at load, and so is a measure or dimension listed twice — in
+  any case, and as an exact duplicate key (every YAML file semantix reads — pilot,
+  catalog, snapshots, the benchmark dataset and criteria — refuses a key written twice
+  in one mapping, which YAML would otherwise silently drop; an explicit key overriding
+  a `<<:` merge is not a duplicate).
+- A unit is read **as written, the way the engine reads it** (case-insensitive, never
+  trimmed). On Databricks, `DATE_TRUNC` accepts `YEAR`/`YYYY`/`YY`, `QUARTER`,
+  `MONTH`/`MM`/`MON`, `WEEK`, `DAY`/`DD`, `HOUR`, `MINUTE`, `SECOND`, `MILLISECOND` and
+  `MICROSECOND`, and `TRUNC(d, unit)` only YEAR to WEEK. Any other spelling (`WEEKS`,
+  `MONTHS`, `QTR`, `W`, `' month '`, `TRUNC(d, 'DD')`) returns NULL — one grand-total
+  group, not the grain — and an unquoted unit names a column, so the statement is
+  unverifiable, never read as the grain, not even when the rest equals the definition.
+  DuckDB accepts its own spellings (`weeks`, `mon`, `yearweek`; not `MM`, `YYYY` or
+  `DD` — and a one-letter `'w'` the parser rewrites, so such a statement is counted
+  unreadable); Snowflake its documented date parts, quoted (`'mm'`, `'wk'`, also in
+  `TRUNC(d, 'month')`); BigQuery its granularities as unquoted keywords
+  (`DATE_TRUNC(d, MONTH)`; its `WEEK` starts on Sunday). A documented unit that is no
+  grain this rule set models (BigQuery `ISOWEEK`, `WEEK(MONDAY)`; DuckDB `decade`), or
+  a parameter (`DATE_TRUNC(:grain, d)`), is refused as exactly that. Another dialect
+  gets only the full unit names, quoted. This holds wherever the truncation is — of a
+  column or of an expression (`DATE_TRUNC('Y', CURRENT_DATE())`) — and on the
+  definition side too: a metric view whose own text uses a unit Databricks rejects has
+  that expression marked unsupported, and a SQL model written so is below proof grade.
+- A truncation of a dimension that is itself a truncation (`DATE_TRUNC('MONTH',
+  order_week)`) is never the declared grain and cannot be approved: a week that starts
+  in September is credited to September.
+- On a query over the metric view, the approval is checked per measure, so one query
+  can be inside the model for one measure and outside it for another. A grain approved
+  on any plain declared dimension of the same column counts.
+- In a **filter**, a truncation of a declared date column is a time window on it, for
+  example `DATE_TRUNC('WEEK', order_date) = DATE '2026-10-05'`. It is a permitted slice
+  and needs no approval.
+- Approvals are recorded in every exported comparison record
+  (`definition.variation_policy`), so a reviewer sees the policy the use was judged
+  under.
 
 ## Steps
 

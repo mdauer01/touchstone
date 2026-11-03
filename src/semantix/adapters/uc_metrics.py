@@ -41,7 +41,12 @@ from sqlglot import exp
 
 from semantix.adapters.base import DeclaredSpec, DimensionSpec, informational_skip as _info
 from semantix.adapters.loadutil import load_yaml
-from semantix.extraction.sqlutil import requalify_columns, truncation_of
+from semantix.extraction.sqlutil import (
+    annotate_truncations,
+    requalify_columns,
+    truncation_of,
+    unaccepted_truncation,
+)
 
 SUPPORTED_VERSIONS = ("1", "1.0", "1.1")
 
@@ -315,6 +320,11 @@ def _read_dimensions(entries: list, source: str, tail: str, join_names: set[str]
         except Exception as e:  # noqa: BLE001 — declared text is arbitrary
             out.append(unsupported(f"could not parse expression: {e}"))
             continue
+        annotate_truncations(node, text, "databricks")
+        problem = unaccepted_truncation(node, "databricks")
+        if problem:
+            out.append(unsupported(f"expression {problem}"))
+            continue
         truncated = truncation_of(node)
         unit, column = (truncated if truncated else (None, node))
         if not isinstance(column, exp.Column):
@@ -390,6 +400,12 @@ def _translate(text: str, tail: str, join_names: set[str], params: set[str],
         node = sqlglot.parse_one(text, read="databricks")
     except Exception as e:  # noqa: BLE001 — declared text is arbitrary
         return None, [f"could not parse expression: {e}"]
+    annotate_truncations(node, text, "databricks")
+    problem = unaccepted_truncation(node, "databricks") if node is not None else None
+    if problem:
+        # The definition's own text: a unit Databricks rejects is not
+        # silently compared as the grain the parser renders it as.
+        return None, [f"expression {problem}"]
     if node is None or isinstance(node, exp.Query):
         return None, ["expression is a full query — expected a scalar expression"]
     # Any placeholder — `:START_DATE` against a lower-case declaration,

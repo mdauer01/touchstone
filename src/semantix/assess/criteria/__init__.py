@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-import yaml
+from semantix.adapters.loadutil import load_yaml
 
 _DIR = Path(__file__).parent
 # The answer in each component that means "differs from the definition".
@@ -33,7 +33,7 @@ class Criteria:
 
 @lru_cache(maxsize=4)
 def load(version: int = 1) -> Criteria:
-    data = yaml.safe_load((_DIR / f"v{version}.yaml").read_text(encoding="utf-8"))
+    data = load_yaml(_DIR / f"v{version}.yaml")
     if data.get("version") != version:
         raise ValueError(f"criteria v{version}: file declares version {data.get('version')}")
     components = data["components"]

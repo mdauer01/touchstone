@@ -62,7 +62,12 @@ from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
 from semantix.extraction.fingerprint import extract_fingerprints, unrecognized_measures
 from semantix.extraction.proof import is_grammar_gap
 from semantix.extraction.registry import SchemaRegistry
-from semantix.extraction.sqlutil import faithful_render, table_fqname
+from semantix.extraction.sqlutil import (
+    faithful_render,
+    misread_literal,
+    table_fqname,
+    unaccepted_truncation,
+)
 from semantix.models import (
     PROOF_LEVELS,
     CanonLevel,
@@ -91,7 +96,7 @@ from semantix.services.history import (
     from_sql_text,
     qualify_tables,
 )
-from semantix.services.relationships import parse_statement_list  # same package: one
+from semantix.services.relationships import statement_chunks  # same package: one
 from semantix.services.resolution import normalize_name
 
 # statement-splitting behavior for every history consumer, not two drifting ones.
@@ -173,6 +178,9 @@ class _Observed:
     core: SemanticCore | None = None
     components: dict[str, object] = field(default_factory=dict)
     shape_problem: str | None = None
+    # Why the statement AS WRITTEN cannot be compared at all (a truncation
+    # unit the engine does not accept): never an exact match.
+    refusal: str | None = None
     evidence: frozenset | None = None   # views whose window covers the run
     explicit: tuple[str, str] | None = None   # (source, name)
     # Aliases the analyst WROTE: identity even when they look synthesized
@@ -188,6 +196,9 @@ class _Observed:
     # Columns whose declared type makes literal comparison engine-specific
     # (a collation, fixed-length CHAR): no replaced/broadened decision on them.
     literal_undecided: frozenset = frozenset()
+    # Declared types of the columns read (lower case) — to tell a narrowing
+    # cast, kept as an observation, from one that cannot change a value.
+    column_types: dict = field(default_factory=dict)
     expression: str | None = None   # the metric-view projection as written
     governed_reference: bool = False
     uses: int = 0
@@ -320,13 +331,15 @@ def monitor_history(
     # an earlier execution of the session — or of a session the export does
     # not identify — can shadow a name read later (services.session).
     log = intake.format == "sql"
-    parsed_rows = [parse_statement_list(ex.statement_text, dialect)
-                   for ex in intake.executions]
+    chunked = [statement_chunks(ex.statement_text, dialect) for ex in intake.executions]
+    parsed_rows = [[tree for _, tree in chunks] for chunks in chunked]
     events = []
-    for ri, (ex, listed) in enumerate(zip(intake.executions, parsed_rows)):
+    for ri, (ex, chunks) in enumerate(zip(intake.executions, chunked)):
         ts_e, _ = _execution_time(ex)
-        for si, st in enumerate(listed):
-            e = classify(st, ri, si, ex.session_id, ts_e)
+        for si, (chunk, st) in enumerate(chunks):
+            # An unparseable statement keeps its text: what it created is
+            # evidence (exported only through session.exportable).
+            e = classify(st, ri, si, ex.session_id, ts_e, text=chunk)
             if e is not None:
                 events.append(e)
     counts["session_events"] = len(events)
@@ -376,7 +389,8 @@ def monitor_history(
                 counts["session_reconstructed"] += 1
             explicit = _statement_tag(stmt) or row_identity
             if export:
-                _RUN.set(_run_record(ex, stmt, dialect, events, ri, si, q_catalog, q_schema))
+                _RUN.set(_run_record(ex, stmt, dialect, events, ri, si, q_catalog, q_schema,
+                                     ts, log, depth))
             qualify_tables(stmt, q_catalog, q_schema, depth)
             if measure_calls(stmt):
                 if any(outside_measure_refs(a) for a in stmt.find_all(exp.AggFunc)):
@@ -385,7 +399,8 @@ def monitor_history(
                     # not read — say so rather than drop them silently.
                     counts["mixed_measures"] += 1
                 _observe_view(stmt, ex, approved, evidence, observed, recurrence, dialect,
-                              explicit, session_gap)
+                              explicit, session_gap,
+                              column_types=history_registry.column_types)
                 continue
             outcome = _observe_core(stmt, ex, history_registry, dialect, evidence,
                                     explicit, observed, recurrence, session_gap)
@@ -488,13 +503,89 @@ def monitor_history(
 
 # ------------------------------------------------------- evidence records
 
+def _how_related(e, ri: int, ex: Execution, ts: str | None, log: bool) -> str:
+    """What is NOT certain about an event that possibly precedes a statement:
+    its session, its order, or both — in the monitor's own words."""
+    if e.row == ri:
+        return "earlier in this log; whether it ran in the same session is not recorded"
+    before = e.ts is not None and ts is not None and e.ts < ts
+    if e.session and ex.session_id:
+        return ("in an earlier execution of this session" if before else
+                "in another execution of this session; whether it ran before this "
+                "statement is not certain")
+    missing = ("neither session is recorded" if not e.session and not ex.session_id else
+               "its session is not recorded" if not e.session else
+               "this statement's session is not recorded")
+    return (f"in an earlier execution; {missing}, so whether it ran in the same session is "
+            f"not certain" if before else
+            f"in another execution; {missing}, and its order relative to this statement is "
+            f"not certain either")
+
+
+_SESSION_EVENTS_MAX = 20
+_SET_ASSIGN = re.compile(r"^\s*SET\s+([^=]+?)\s*=", re.IGNORECASE)
+
+
 def _run_record(ex: Execution, stmt: exp.Expression, dialect: str, events, ri: int, si: int,
-                catalog: str | None, schema: str | None) -> dict:
+                catalog: str | None, schema: str | None, ts: str | None = None,
+                log: bool = False, depth: int = 3) -> dict:
     """What one run contributes to an evidence record, captured BEFORE the
-    tree is qualified: the statement as it ran and the session before it."""
-    earlier = [e.what for e in events
-               if (e.row, e.index) < (ri, si)
-               and (e.row == ri or (e.session is not None and e.session == ex.session_id))]
+    tree is qualified: the statement as it ran and the session before it.
+    "Before" is the rule name resolution itself uses (session.precedes): by
+    time across executions, by position within one — never file row order
+    alone. Each earlier statement is exported as it ran — through
+    session.exportable, which keeps credentials out — not as a summary.
+
+    Exported: the statement's own execution and its identified session, and
+    from executions whose session is not recorded only what can change what
+    its names read (session.affects) — every SET of a session-less history
+    beside every query grew each record without bound. Repeated SETs of a
+    key collapse to the last; past _SESSION_EVENTS_MAX, what decides which
+    relation a name reads is kept before configuration, with a count of what
+    was left out."""
+    from semantix.services.session import affects, exportable, precedes, written_relations
+
+    written = written_relations(stmt)
+    picked = []
+    for e in sorted(events, key=lambda e: (e.ts or "", e.row, e.index)):
+        # The same rule the monitor resolved names with: another identified
+        # session never precedes; an unidentified one only possibly does.
+        order = precedes(e, ri, si, ex.session_id, ts, log)
+        if order is None:
+            continue
+        own = e.row == ri or (e.session and ex.session_id)
+        if not own and not affects(e, written, depth):
+            continue
+        picked.append((e, order))
+    # A session's configuration is the LAST value of each key: a driver's
+    # repeated SETs collapse to one each.
+    last_set: dict[str, int] = {}
+    for n, (e, _) in enumerate(picked):
+        m = _SET_ASSIGN.match(e.text or "")
+        if m:
+            last_set[m.group(1).strip().lower()] = n
+    picked = [(e, o) for n, (e, o) in enumerate(picked)
+              if not (_SET_ASSIGN.match(e.text or "")
+                      and last_set[_SET_ASSIGN.match(e.text).group(1).strip().lower()] != n)]
+    if len(picked) > _SESSION_EVENTS_MAX:
+        # What decides which relation a name reads (USE, CREATE, DROP,
+        # unparseable or unknown statements) is kept before configuration.
+        decisive = [n for n, (e, _) in enumerate(picked) if not _SET_ASSIGN.match(e.text or "")]
+        keep = set(decisive[-_SESSION_EVENTS_MAX:])
+        for n in range(len(picked) - 1, -1, -1):
+            if len(keep) >= _SESSION_EVENTS_MAX:
+                break
+            keep.add(n)
+        dropped = len(picked) - len(keep)
+        picked = [p for n, p in enumerate(picked) if n in keep]
+    else:
+        dropped = 0
+    earlier = [(f"({dropped} earlier statement(s) that may affect this one are not listed)")
+               ] if dropped else []
+    for e, order in picked:
+        text = exportable(e.text, dialect) if e.text else e.what
+        earlier.append(text if order == "certain"
+                       else f"{text} ({_how_related(e, ri, ex, ts, log)})")
     return {"execution": {"id": ex.statement_id, "start_time": ex.start_time,
                           "session_id": ex.session_id, "user": ex.executed_by,
                           "client": ex.client_application, "asset": ex.asset,
@@ -506,6 +597,51 @@ def _run_record(ex: Execution, stmt: exp.Expression, dialect: str, events, ri: i
 
 
 _IDENTITY_SOURCES = {"alias", "tag", "asset", "output", "query_tag"}
+
+
+def _record_schemas(relations, auth: Authority, registry: SchemaRegistry) -> dict:
+    """Declared columns of every relation the use read — a metric view
+    reads its source table, so that is listed too. A relation the catalog
+    does not describe is listed with no columns (unknown), never dropped."""
+    reads = {r.lower() for r in relations}
+    if auth.view and auth.view.lower() in reads and auth.base_relation:
+        reads.add(auth.base_relation.lower())
+    return {r: dict(registry.column_types(r)) for r in sorted(reads)}
+
+
+def _variation_policy(auth: Authority) -> dict:
+    """The rules this monitor judged the use under, stated for a reader who
+    must answer against THEM: declared dimensions, approved time groupings,
+    required filters, and what the rule set does not cover."""
+    dims = [d for d in auth.dimensions or [] if d.supported]
+    approved = [f"DATE_TRUNC('{u}', {dim}) (approved for {auth.measure or auth.name})"
+                for dim, units in sorted((auth.approved_groupings or {}).items())
+                for u in sorted(units)]
+    # What the rule set DECIDES — permitted, a difference, or undecided —
+    # stated as such: an undecided boundary is not a requirement, and a
+    # classifier answering against "must" would call drift what the rules
+    # leave open.
+    text = (f"Rule set {RULE_SET}. PERMITTED: filters on declared dimensions (in a filter, "
+            f"a truncation of a declared date dimension is a time window on it), written as "
+            f"a column compared with constants, IN, BETWEEN with bounds of one kind, or IS "
+            f"NULL; groupings by declared dimensions exactly as declared, or by a time "
+            f"grouping approved for this metric (a declared date dimension does not "
+            f"authorize grouping by every truncation of it). A DIFFERENCE: a required filter "
+            f"that is missing, weakened through OR, broadened or replaced; a filter on a "
+            f"column that is not a declared dimension; a measure that reads other columns or "
+            f"is scaled, offset or negated. UNDECIDED (neither permitted nor a difference): "
+            f"a required filter not stated as a top-level condition; casts, rounding or "
+            f"neutral arithmetic on the measure or its columns; predicates of any other "
+            f"shape; groupings outside the declared and approved ones. Not covered at all: "
+            f"{'; '.join(EXCLUDED)}.")
+    if auth.dimensions is None:
+        text += " This definition's dimensions are not modelled: no slice or grouping is " \
+                "judged."
+    return {"source": f"semantix monitor ({RULE_SET})" + (" + pilot.yml approvals"
+                                                         if approved else ""),
+            "text": text,
+            "permitted_filter_dimensions": [d.name for d in dims],
+            "permitted_groupings": [f"{d.name} = {d.expr}" for d in dims] + approved}
 
 
 def _comparisons(judged, by_concept, pilot, registry: SchemaRegistry, dialect: str) -> list:
@@ -548,10 +684,12 @@ def _comparisons(judged, by_concept, pilot, registry: SchemaRegistry, dialect: s
                     "dimensions": [f"{d.name} = {d.expr}" for d in (auth.dimensions or [])],
                     "snapshot_text": snapshot,
                     "snapshot_sha256": view.sha256 if view is not None else None,
-                    "applies": {"from": auth.applies_from, "to": auth.applies_to}},
-                "schemas": {r: registry.column_types(r) for r in sorted(obs.relations)
-                            if registry.column_types(r)},
-                "session_evidence": run["session_evidence"],
+                    "applies": {"from": auth.applies_from, "to": auth.applies_to},
+                    "variation_policy": _variation_policy(auth)},
+                "schemas": _record_schemas(obs.relations, auth, registry),
+                "session_evidence": {**run["session_evidence"], "unresolved": sorted(
+                    r for r in obs.relations
+                    if len(r.split(".")) < registry.estate_depth())},
                 "unverified_observations": {
                     "note": OBSERVATIONS_NOTE, "finding_kind": f["kind"],
                     "reasons": list(f.get("reasons") or []),
@@ -571,6 +709,20 @@ def _comparisons(judged, by_concept, pilot, registry: SchemaRegistry, dialect: s
 
 _ENGINE_SPECIFIC_TEXT = re.compile(r"\bCOLLATE\b|^\s*(N?CHAR|BPCHAR|CHARACTER)\b(?!\s+VARYING)",
                                    re.IGNORECASE)
+
+
+def _typed_columns(registry: SchemaRegistry, reads) -> dict:
+    """Declared column types for the narrowing-cast observations: by
+    `relation.column` always, and by bare column name only where every
+    relation read agrees — in a join, a same-named column of the other table
+    decided the type of the one the query cast."""
+    qualified: dict[str, str] = {}
+    bare: dict[str, set] = {}
+    for r in reads:
+        for c, t in registry.column_types(r).items():
+            qualified[f"{r}.{c}".lower()] = t
+            bare.setdefault(c.lower(), set()).add(t)
+    return {**{c: next(iter(ts)) for c, ts in bare.items() if len(ts) == 1}, **qualified}
 
 
 def _literal_undecided(registry: SchemaRegistry, reads: list[str]) -> frozenset:
@@ -607,6 +759,11 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
     # table); outside it, on the statement as written.
     shape_problem = raw_shape_problem(
         canon.ast if canon.level == CanonLevel.SUPPORTED else stmt)
+    # Judged on the statement AS WRITTEN: the canonical form re-renders the
+    # parser's unit (DATE_TRUNC('W', d) as the WEEK grain), so a core equal
+    # to the definition's would otherwise pass as an exact match.
+    refusal = unaccepted_truncation(stmt, dialect) or \
+        misread_literal(stmt.meta.get("source_text") or "", dialect)
     ast = canon.ast
     cte_names = {c.alias_or_name.lower() for c in ast.find_all(exp.CTE)}
     reads = sorted({
@@ -674,14 +831,15 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
             hypothesis = sorted(gaps)[0]
         base_key = "|".join(["A", core_hash, "proof" if proof else
                              "hypothesis" if hypothesis else "gapped",
-                             shape_problem or "", _evidence_key(evidence)])
+                             shape_problem or "", refusal or "", _evidence_key(evidence)])
         key = f"{base_key}|{identity}"
         obs = observed.setdefault(key, _Observed(
             key=key, shape="A", base_key=base_key, identity=identity,
             semantic_hash=core_hash, proof_grade=proof, hypothesis=hypothesis,
             core=fp.core, components=core_components(fp.core),
-            shape_problem=shape_problem, evidence=evidence, explicit=explicit,
-            literal_undecided=_literal_undecided(registry, reads)))
+            shape_problem=shape_problem, refusal=refusal, evidence=evidence,
+            explicit=explicit, literal_undecided=_literal_undecided(registry, reads),
+            column_types=_typed_columns(registry, reads)))
         obs.uses += 1
         obs.names.update(f.concept_candidate for f in group)
         obs.explicit_aliases |= {f.concept_candidate.lower() for f in group} & written
@@ -690,7 +848,10 @@ def _observe_core(stmt: exp.Expression, ex: Execution, registry: SchemaRegistry,
         obs.gaps.update(gaps)
         obs.attribute(ex)
         if obs.sample_sql is None:
-            obs.sample_sql = fp.canonical_sql
+            # A statement refused as written is shown as written: its proof
+            # form names the grain the parser read ('W' as WEEK).
+            obs.sample_sql = (stmt.meta.get("source_text") if refusal else None) \
+                or fp.canonical_sql
         if base_key not in counted:
             counted.add(base_key)
             recurrence[base_key] = recurrence.get(base_key, 0) + 1
@@ -719,13 +880,13 @@ def _observe_view(stmt: exp.Expression, ex: Execution,
                   approved: dict[str, dict[str, Authority]], evidence,
                   observed: dict, recurrence: dict, dialect: str,
                   explicit: tuple[str, str] | None = None,
-                  session_gap: str | None = None) -> None:
+                  session_gap: str | None = None, column_types=None) -> None:
     """Shape B intake: one observation per measure-reference projection."""
     sql_text = stmt.sql(dialect=dialect)
     stmt_id = hashlib.sha256(sql_text.encode()).hexdigest()[:12]
     view = metric_view_relation(stmt)
     counted: set[str] = set()
-    projections = check_metric_view(stmt, approved, dialect)
+    projections = check_metric_view(stmt, approved, dialect, column_types)
     # An explicit identity names one metric: applied only to a single use.
     explicit = explicit if len(projections) == 1 else None
     for proj in projections:
@@ -757,7 +918,7 @@ def _observe_view(stmt: exp.Expression, ex: Execution,
         obs.statements.add(stmt_id)
         obs.attribute(ex)
         if obs.sample_sql is None:
-            obs.sample_sql = sql_text
+            obs.sample_sql = stmt.meta.get("source_text") or sql_text
 
 
 def _evidence_key(evidence) -> str:
@@ -832,7 +993,8 @@ def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
                     concept=normalize_name(spec.name), system=spec.system, name=spec.name,
                     core=claim.core, dimensions=spec.dimensions, view=view.name,
                     measure=spec.name.lower(), applies_from=view.applies_from,
-                    applies_to=view.applies_to, where=spec.path))
+                    applies_to=view.applies_to, where=spec.path,
+                    approved_groupings=view.approvals_for(spec.name)))
         # Everything the scan read except the approved definitions themselves
         # is evidence (`also_matches`), never authority.
         approved = {(pilot.system, s.name.lower()) for v in pilot.views for s in v.specs}
@@ -1149,7 +1311,8 @@ def _judge(obs: _Observed, by_hash, by_name, by_concept, computed_by_hash,
             for a in stale_near))}
     if near:
         judged = [(auth, check_raw(obs.core, auth, dialect, obs.shape_problem, models,
-                                   obs.hypothesis, obs.literal_undecided))
+                                   obs.hypothesis, obs.literal_undecided, obs.column_types,
+                                   refusal=obs.refusal))
                   for auth in near]
         conforming = [(a, o) for a, o in judged if o.status == "conforming"]
         if conforming:
@@ -1213,7 +1376,8 @@ def _judge_against(obs: _Observed, base: dict, concept: str, defs: list[Authorit
                         f"{concept}: {_reason_text(outcome)}", outcome)
     defs = applicable
     judged = [(a, check_raw(obs.core, a, dialect, obs.shape_problem, models,
-                            obs.hypothesis, obs.literal_undecided))
+                            obs.hypothesis, obs.literal_undecided, obs.column_types,
+                            refusal=obs.refusal))
               for a in defs]
     conforming = [(a, o) for a, o in judged if o.status == "conforming"]
     if conforming:

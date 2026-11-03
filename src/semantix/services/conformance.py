@@ -62,11 +62,15 @@ from sqlglot import exp
 
 from semantix.adapters.base import DimensionSpec
 from semantix.extraction.sqlutil import (
+    annotate_truncations,
     flatten_conjuncts,
+    literal_kind,
+    misread_literal,
     render,
     split_group,
     table_fqname,
     truncation_of,
+    unaccepted_truncation,
 )
 from semantix.models import SemanticCore
 
@@ -135,6 +139,11 @@ class Authority:
     applies_to: str | None = None
     where: str | None = None
     kind: str = "declared"           # "computed" when an operator names a model system
+    # Time groupings the operator APPROVED for this metric beyond its declared
+    # dimensions: {dimension name: {DATE_TRUNC unit}} (pilot.yml
+    # approved_time_groupings). A declared date dimension alone authorizes
+    # grouping by the dimension as declared — never by every truncation of it.
+    approved_groupings: dict = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -230,7 +239,8 @@ def raw_shape_problem(stmt: exp.Expression) -> str | None:
 def check_raw(core: SemanticCore, auth: Authority, dialect: str,
               shape_problem: str | None, models: set[str] = frozenset(),
               hypothesis: str | None = None,
-              literal_undecided: frozenset = frozenset()) -> Outcome:
+              literal_undecided: frozenset = frozenset(),
+              column_types: dict | None = None, *, refusal: str | None = None) -> Outcome:
     """Shape A: an observed proof-grade core against one authority.
 
     Two passes, in order, and the first never returns a violation:
@@ -253,20 +263,35 @@ def check_raw(core: SemanticCore, auth: Authority, dialect: str,
     `hypothesis` (the grammar gap) marks a core that is the general
     optimizer's reading, not proof: it is a boundary of its own, so the
     result is always unverifiable, and what pass 2 finds is suspected
-    context worded as the hypothesis it is."""
+    context worded as the hypothesis it is.
+
+    `refusal` says why the statement AS WRITTEN cannot be compared (a
+    truncation unit the engine does not accept): a boundary of its own that
+    no exact match bypasses — the core re-renders the parser's reading."""
     if hypothesis is not None:
         outcome = _check_raw(core, auth, dialect, shape_problem, models, hypothesis,
-                             literal_undecided)
+                             literal_undecided, column_types, refusal)
         outcome.suspected = [f"under the optimizer's reading (a hypothesis): {s}"
                              for s in outcome.suspected]
         return outcome
-    return _check_raw(core, auth, dialect, shape_problem, models, None, literal_undecided)
+    return _check_raw(core, auth, dialect, shape_problem, models, None, literal_undecided,
+                      column_types, refusal)
 
 
 def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
                shape_problem: str | None, models: set[str],
                hypothesis: str | None,
-               literal_undecided: frozenset = frozenset()) -> Outcome:
+               literal_undecided: frozenset = frozenset(),
+               column_types: dict | None = None, refusal: str | None = None) -> Outcome:
+    if refusal is not None:
+        # Unverifiable whatever the core says. What the comparison finds
+        # travels as context, as outside any boundary; the variation does
+        # not — it would name a grain the engine does not compute.
+        inner = _check_raw(core, auth, dialect, shape_problem, models, hypothesis,
+                           literal_undecided, column_types)
+        found = [r["detail"] for r in inner.reasons] if inner.status == "violation" else []
+        return Outcome("unverifiable", [_reason("shape_unsupported", f"query {refusal}")],
+                       shape="A", suspected=found + inner.suspected)
     if hypothesis is None and core.hash() == auth.core.hash():
         return Outcome("conforming", shape="exact")
     base = auth.base_relation
@@ -345,7 +370,7 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
                for r in missing}
     consumed = {x for xs in related.values() for x in xs}
 
-    resolver = _RawResolver(auth.dimensions)
+    resolver = _RawResolver(auth.dimensions, auth.approved_groupings)
     slices: list[str] = []
     undeclared: list[tuple[str, set[str]]] = []
     for x in (x for x in extras if x not in consumed):
@@ -370,7 +395,7 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
                                     f"groups by {g} — ROLLUP/CUBE/GROUPING SETS are "
                                     f"not judged in this rule set"))
             continue
-        verdict = _classify_term(node, resolver)
+        verdict = _classify_term(node, resolver, grouping=True)
         if verdict == "dimension":
             grain.append(g)
         elif verdict == "unsupported":
@@ -381,22 +406,32 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
             boundary.append(_reason(resolver.unknown_code(), resolver.unknown_detail(g)))
         else:
             boundary.append(_reason("grouping_undeclared",
-                                    f"groups by {g}, which is not a declared dimension "
+                                    f"groups by {g}, which is not a declared dimension"
+                                    f"{resolver.grouping_hint(_unparen(node))} "
                                     f"— grouping outside the governed model is not "
                                     f"judged in this rule set"))
     variation = {"slices": slices, "grain": grain}
 
     # ---- pass 2: judgment --------------------------------------------------
+    notes: list[str] = []      # observations for review, never verdicts
+    measure_differs = core.measure_expr != auth.core.measure_expr \
+        or tuple(core.source_columns) != tuple(auth.core.source_columns)
+    observed_node = _parse(core.measure_expr, dialect) if measure_differs else None
+    governed_node = _parse(auth.core.measure_expr, dialect) if measure_differs else None
+    if observed_node is not None:
+        # A narrowing cast is kept as an observation for review — on EVERY
+        # path where the measure differs, the source change included: it
+        # CAN change values; whether it changed this result is not decided.
+        # Notes never change a verdict.
+        notes += narrowing_casts(observed_node, column_types or {}, dialect,
+                                 governed=governed_node)
     if source_changed is not None:
         # Measure and filters are compared against a different table's
         # definition only through the source change itself.
-        return _settle(boundary, [source_changed], undecided, variation)
-    if core.measure_expr != auth.core.measure_expr \
-            or tuple(core.source_columns) != tuple(auth.core.source_columns):
+        return _settle(boundary, [source_changed], undecided, variation, notes)
+    if measure_differs:
         transformed = (auth.core.measure_expr in core.measure_expr
                        and core.measure_expr != auth.core.measure_expr)
-        observed_node = _parse(core.measure_expr, dialect)
-        governed_node = _parse(auth.core.measure_expr, dialect)
         def governed(n):
             return n == governed_node
         wrapper = (transformed and observed_node is not None and governed_node is not None
@@ -412,8 +447,9 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
             undecided.append(_reason(
                 "transformation_undecided",
                 f"measure is {core.measure_expr}, the definition "
-                f"{auth.core.measure_expr} with casts or neutral arithmetic on its "
-                f"columns — whether that preserves the value is not decided"))
+                f"{auth.core.measure_expr} with casts, rounding or neutral arithmetic "
+                f"around its columns or aggregates — whether that preserves the value "
+                f"is not decided"))
         elif wrapper and not definite_change(observed_node, governed):
             # CAST(… AS DOUBLE), ROUND, × 1: may preserve the value. Refused
             # honestly; the transformation is context (sweep 2, #41 #57).
@@ -473,20 +509,22 @@ def _check_raw(core: SemanticCore, auth: Authority, dialect: str,
                 f"the measure conditions on {', '.join(sorted(moved))}, a column of "
                 f"the required filters — whether it carries them is not decided"))
 
-    return _settle(boundary, violations, undecided, variation)
+    return _settle(boundary, violations, undecided, variation, notes)
 
 
 def _settle(boundary: list[dict], violations: list[dict], undecided: list[dict],
-            variation: dict) -> Outcome:
-    """Boundary first, then violations, then undecided implications."""
+            variation: dict, notes: list[str] | None = None) -> Outcome:
+    """Boundary first, then violations, then undecided implications. `notes`
+    are observations kept for review (a narrowing cast) — never verdicts."""
+    notes = list(notes or [])
     if boundary:
         return Outcome("unverifiable", boundary + undecided, variation, "A",
-                       suspected=[v["detail"] for v in violations])
+                       suspected=[v["detail"] for v in violations] + notes)
     if violations:
-        return Outcome("violation", violations, variation, "A")
+        return Outcome("violation", violations, variation, "A", suspected=notes)
     if undecided:
-        return Outcome("unverifiable", undecided, variation, "A")
-    return Outcome("conforming", [], variation, "A")
+        return Outcome("unverifiable", undecided, variation, "A", suspected=notes)
+    return Outcome("conforming", [], variation, "A", suspected=notes)
 
 
 def _replacement(r: str, rnode: exp.Expression, related: list[str], extras: list[str],
@@ -630,14 +668,430 @@ def _within(node: exp.Expression, target: exp.Expression) -> bool:
     return False
 
 
+_INTEGRAL_BYTES = {"TINYINT": 1, "BYTE": 1, "INT1": 1, "SMALLINT": 2, "SHORT": 2, "INT2": 2,
+                   "INT": 4, "INTEGER": 4, "INT4": 4, "BIGINT": 8, "LONG": 8, "INT8": 8,
+                   "HUGEINT": 16, "INT128": 16}
+# Decimal digits an integer type holds: EVERY value with `full` digits fits;
+# SOME values with `full + 1` (the type's maximum width) do.
+_INT_FULL_DIGITS = {1: 2, 2: 4, 4: 9, 8: 18, 16: 38}
+_INT_BITS = {1: 7, 2: 15, 4: 31, 8: 63, 16: 127}
+_FLOATS = {"FLOAT": 24, "REAL": 24, "FLOAT4": 24, "DOUBLE": 53, "FLOAT8": 53,
+           "DOUBLE PRECISION": 53}
+# A bare DECIMAL means different things per engine.
+_BARE_DECIMAL = {"databricks": (10, 0), "spark": (10, 0), "duckdb": (18, 3),
+                 "snowflake": (38, 0), "bigquery": (38, 9)}
+# Type names whose width is the DIALECT's: Snowflake's integers are all
+# NUMBER(38,0) and its floats all double; BigQuery's integers are INT64.
+_DIALECT_TYPES = {
+    "snowflake": {**{t: ("decimal", 38, 0) for t in ("INT", "INTEGER", "BIGINT", "SMALLINT",
+                                                      "TINYINT", "BYTEINT")},
+                  **{t: ("float", 53) for t in ("FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "REAL",
+                                                "DOUBLE PRECISION")}},
+    "bigquery": {**{t: ("int", 8) for t in ("INT64", "INT", "INTEGER", "BIGINT", "SMALLINT",
+                                             "TINYINT", "BYTEINT")},
+                 "FLOAT64": ("float", 53)}}
+
+
+def _numeric_type(text: str | None, dialect: str = "databricks"):
+    """('int', bytes) | ('float', mantissa bits) | ('decimal', p, s) | None.
+    None also for a bare DECIMAL whose default precision the dialect does not
+    fix (Postgres: unconstrained)."""
+    if not text:
+        return None
+    t = re.sub(r"\s+", " ", str(text).strip().upper())
+    if t in _DIALECT_TYPES.get(dialect, {}):
+        return _DIALECT_TYPES[dialect][t]
+    m = re.fullmatch(r"(DECIMAL|NUMERIC|DEC|NUMBER)\s*(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?",
+                     t)
+    if m:
+        if m.group(2) is None:
+            default = _BARE_DECIMAL.get(dialect)
+            return ("decimal", *default) if default else None
+        return ("decimal", int(m.group(2)), int(m.group(3) or 0))
+    base = t.split("(")[0].strip()
+    if base in _INTEGRAL_BYTES:
+        return ("int", _INTEGRAL_BYTES[base])
+    if base in _FLOATS:
+        return ("float", _FLOATS[base])
+    return None
+
+
+def _narrows(source, target) -> bool | None:
+    """Whether a cast from `source` to `target` (_numeric_type) can change a
+    value: True, False, or None (not decided)."""
+    if source is None or target is None:
+        return None
+    if source[0] == "float":
+        if target[0] == "float":
+            return target[1] < source[1]
+        return True                           # to an integer or a decimal: rounds
+    if source[0] == "decimal":
+        p, s_ = source[1], source[2]
+        if target[0] == "int":
+            return s_ > 0 or (p - s_) > _INT_FULL_DIGITS[target[1]]
+        if target[0] == "decimal":
+            return target[2] < s_ or (target[1] - target[2]) < (p - s_)
+        # A binary float holds every integer up to 2**mantissa exactly, and
+        # no decimal fraction such as 0.10.
+        return s_ > 0 or 10 ** p - 1 > 2 ** target[1]
+    if source[0] == "int":
+        if target[0] == "int":
+            return target[1] < source[1]
+        if target[0] == "decimal":
+            return (target[1] - target[2]) < _INT_FULL_DIGITS[source[1]] + 1
+        return _INT_BITS[source[1]] > target[1]   # beyond the float's exact integers
+    return None
+
+
+def _render_type(t) -> str:
+    if t is None:
+        return "unknown"
+    if t[0] == "int":
+        return {1: "TINYINT", 2: "SMALLINT", 4: "INT", 8: "BIGINT", 16: "HUGEINT"}[t[1]]
+    if t[0] == "float":
+        return "DOUBLE" if t[1] == 53 else "FLOAT"
+    return f"DECIMAL({t[1]},{t[2]})"
+
+
+def _value_type(node: exp.Expression, column_types: dict, dialect: str,
+                known: dict | None = None):
+    """The numeric type of a value, as far as it can be derived: a declared
+    column, a cast's target, a numeric literal, through ROUND / NEUTRAL
+    arithmetic (`× 1`, `+ 0`) / negation, and the aggregates' result types
+    (SUM of an integer is BIGINT — HUGEINT on DuckDB — of a DECIMAL(p,s)
+    DECIMAL(min(38,p+10),s); COUNT is BIGINT; AVG is DOUBLE or a DECIMAL).
+    `known` gives the type of nodes this function cannot see into (a
+    MEASURE() reference), by their rendering. None when it cannot be."""
+    node = _unparen(node)
+    if known and node.sql(dialect) in known:
+        return known[node.sql(dialect)]
+
+    def rec(n):
+        return _value_type(n, column_types, dialect, known)
+    if isinstance(node, exp.Column):
+        return _numeric_type(_column_type(node, column_types), dialect)
+    if isinstance(node, (exp.Cast, exp.TryCast)):
+        return _numeric_type(node.to.sql(dialect) if node.to is not None else None, dialect)
+    if isinstance(node, exp.Literal):
+        return _literal_type(node)
+    if isinstance(node, exp.Neg):
+        return rec(node.this)
+    if isinstance(node, exp.Round):
+        return _round_type(rec(node.this), node.args.get("decimals"), dialect)
+    if isinstance(node, exp.Count):
+        return ("int", 8)
+    if isinstance(node, (exp.Sum, exp.Avg, exp.Min, exp.Max)):
+        inner = rec(node.this)
+        if inner is None or isinstance(node, (exp.Min, exp.Max)):
+            return inner
+        if isinstance(node, exp.Avg):
+            # DuckDB's AVG of a DECIMAL is a DOUBLE; Spark's a wider DECIMAL.
+            return ("float", 53) if inner[0] != "decimal" or dialect == "duckdb" else \
+                ("decimal", min(38, inner[1] + 4), min(38, inner[2] + 4))
+        if inner[0] == "int":
+            return ("int", 16) if dialect == "duckdb" else ("int", max(8, inner[1]))
+        if inner[0] == "decimal":
+            return ("decimal", min(38, inner[1] + 10), inner[2])
+        return ("float", 53)
+    if isinstance(node, (exp.Add, exp.Sub, exp.Mul, exp.Div)):
+        left, right = _unparen(node.this), _unparen(node.expression)
+        neutral = "1" if isinstance(node, (exp.Mul, exp.Div)) else "0"
+        if isinstance(node, exp.Div):
+            # `/` on integers is a DOUBLE (Spark, DuckDB); on decimals a
+            # rescaled DECIMAL this rule set does not derive.
+            a = rec(left) if _is_number(right, neutral) else None
+            return ("float", 53) if a is not None and a[0] == "int" else \
+                a if a is not None and a[0] == "float" else None
+        # Neutral arithmetic keeps the other operand's type. Otherwise both
+        # operands are typed — a literal too: INT × 0.5 is a DECIMAL, not
+        # an INT — and only the combinations below are derived.
+        if _is_number(right, neutral):
+            return rec(left)
+        if _is_number(left, neutral) and not isinstance(node, exp.Sub):
+            return rec(right)
+        a, b = rec(left), rec(right)
+        if a is None or b is None:
+            return None
+        if dialect == "duckdb":
+            # DuckDB fits a literal to the other operand: an integer literal
+            # takes the smallest integer type that holds it, a numeric
+            # literal beside a FLOAT is a FLOAT.
+            for lit, other, typed in ((left, right, b), (right, left, a)):
+                value = _numeric_value(lit)
+                if value is None or isinstance(_cast_literal(other), exp.Literal):
+                    continue
+                if typed[0] == "float":
+                    return typed
+                if typed[0] == "int" and value == value.to_integral_value():
+                    return ("int", max(typed[1], _smallest_int(value)))
+        if a[0] == b[0] == "int":
+            return ("int", max(a[1], b[1]))
+        if a[0] == b[0] == "float":
+            return ("float", max(a[1], b[1]))
+        if {a[0], b[0]} == {"float", "int"}:
+            return a if a[0] == "float" else b       # FLOAT + INT is a FLOAT
+        if "float" in (a[0], b[0]):
+            return ("float", 53)                     # with a DECIMAL: DOUBLE
+        return None
+    return None
+
+
+def _round_type(inner, decimals: exp.Expression | None, dialect: str):
+    """ROUND keeps an integer or a float; on a DECIMAL(p,s) to d < s places
+    it is a DECIMAL with scale max(d, 0) — DuckDB keeps p, Spark gives
+    p - s + d + 1 (one digit for the carry)."""
+    if inner is None or inner[0] != "decimal":
+        return inner
+    d = 0
+    if decimals is not None:
+        lit = _unparen(decimals)
+        if isinstance(lit, exp.Neg):
+            lit, sign = _unparen(lit.this), -1
+        else:
+            sign = 1
+        if not (isinstance(lit, exp.Literal) and not lit.is_string and lit.name.isdigit()):
+            return None
+        d = sign * int(lit.name)
+    p, s_ = inner[1], inner[2]
+    if d >= s_:
+        return inner
+    scale = max(d, 0)
+    return ("decimal", p, scale) if dialect == "duckdb" else \
+        ("decimal", min(38, p - s_ + scale + 1), scale)
+
+
+def _column_type(node: exp.Column, column_types: dict) -> str | None:
+    """A column's declared type: by its qualified name first (the monitor
+    keys `relation.column`), then by its bare name — which the monitor keeps
+    only where every relation read agrees."""
+    parts = [p.lower() for p in (node.catalog, node.db, node.table, node.name) if p]
+    for i in range(len(parts) - 1):
+        hit = column_types.get(".".join(parts[i:]))
+        if hit is not None:
+            return hit
+    return column_types.get(node.name.lower())
+
+
+def _numeric_value(node: exp.Expression):
+    """The value of a numeric literal, a negated one included; else None."""
+    import decimal
+
+    node = _unparen(node)
+    sign = 1
+    if isinstance(node, exp.Neg):
+        node, sign = _unparen(node.this), -1
+    if not (isinstance(node, exp.Literal) and not node.is_string):
+        return None
+    try:
+        return sign * decimal.Decimal(node.name)
+    except decimal.InvalidOperation:
+        return None
+
+
+def _smallest_int(value) -> int:
+    for width in (1, 2, 4, 8, 16):
+        if -(2 ** _INT_BITS[width]) <= value < 2 ** _INT_BITS[width]:
+            return width
+    return 16
+
+
+def _cast_literal(node: exp.Expression) -> exp.Expression:
+    """The literal under casts to number types (`1.0D` parses as CAST(1.0 AS
+    DOUBLE)); `node` itself otherwise."""
+    node = _unparen(node)
+    while isinstance(node, (exp.Cast, exp.TryCast)) and node.to is not None \
+            and _numeric_type(node.to.sql()) is not None:
+        node = _unparen(node.this)
+    return node
+
+
+def _is_number(node: exp.Expression, value: str) -> bool:
+    import decimal
+
+    node = _cast_literal(node)
+    if not (isinstance(node, exp.Literal) and not node.is_string):
+        return False
+    try:
+        return decimal.Decimal(node.name) == decimal.Decimal(value)
+    except decimal.InvalidOperation:
+        return False
+
+
+def _literal_type(node: exp.Literal):
+    """A numeric literal's type: an integer is INT (BIGINT beyond it), a
+    plain decimal `1.50` is DECIMAL(3,2), an exponent makes it DOUBLE. A
+    string literal has no numeric type."""
+    if node.is_string:
+        return None
+    text = node.name.lstrip("+-")
+    if re.fullmatch(r"\d+", text):
+        return ("int", 4) if int(text) < 2 ** 31 else ("int", 8) if int(text) < 2 ** 63 else None
+    m = re.fullmatch(r"(\d*)\.(\d*)", text)
+    if m:
+        digits = (m.group(1).lstrip("0") or "") + m.group(2)
+        scale = len(m.group(2))
+        return ("decimal", max(len(digits), scale, 1), scale)
+    if re.fullmatch(r"[\d.]+[eE][+-]?\d+", text):
+        return ("float", 53)
+    return None
+
+
+def _written_type(node: exp.Expression, column_types: dict, dialect: str) -> str | None:
+    """The type the SQL or the catalog STATES for a value, as text, when it
+    is not a number type this rule set models (`amount` declared STRING;
+    `CAST(x AS STRING)`; a string literal)."""
+    if isinstance(node, exp.Column):
+        return _column_type(node, column_types)
+    if isinstance(node, (exp.Cast, exp.TryCast)) and node.to is not None:
+        return node.to.sql(dialect)
+    if isinstance(node, exp.Literal) and node.is_string:
+        return "a string literal"
+    return None
+
+
+# Cast targets that are not numbers — casting to them is not narrowing a
+# number, and this rule set says nothing about them.
+_NON_NUMERIC = frozenset({"STRING", "VARCHAR", "CHAR", "TEXT", "DATE", "TIMESTAMP",
+                          "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMPTZ", "TIMESTAMP_TZ",
+                          "DATETIME", "TIME", "BOOLEAN", "BINARY", "INTERVAL", "JSON",
+                          "VARIANT", "ARRAY", "MAP", "STRUCT"})
+
+
+def _constant_preserved(value: exp.Literal, target, negative: bool = False) -> bool | None:
+    """Whether casting the numeric constant `value` (negated when `negative`)
+    to `target` keeps it; None when that is not decided here. Decimal
+    arithmetic runs at a precision no literal exceeds — a DECIMAL(38,18)
+    constant raised InvalidOperation and aborted the whole monitor run. A
+    float keeps a constant whose shortest form reads back the same (0.1 is
+    0.1 as a DOUBLE literal too)."""
+    import decimal
+    import struct
+
+    try:
+        with decimal.localcontext() as ctx:
+            ctx.prec = 400
+            v = decimal.Decimal(value.name)
+            if negative:
+                v = -v
+            if not v.is_finite():
+                return None
+            if target[0] == "int":
+                bound = 2 ** _INT_BITS[target[1]]
+                return v == v.to_integral_value() and -bound <= v < bound
+            if target[0] == "decimal":
+                p, s_ = target[1], target[2]
+                return v == v.quantize(decimal.Decimal(1).scaleb(-s_)) and \
+                    abs(v) < decimal.Decimal(10) ** (p - s_)
+            f = float(v)
+            if f in (float("inf"), float("-inf")):
+                return False                          # beyond a DOUBLE
+            if target[1] == 24:
+                try:
+                    f32 = struct.unpack("f", struct.pack("f", f))[0]
+                except OverflowError:
+                    return False                      # beyond a FLOAT
+                return decimal.Decimal(f"{f32:.7g}") == v
+            return decimal.Decimal(repr(f)) == v
+    except (decimal.InvalidOperation, OverflowError, ValueError, struct.error):
+        return None
+
+
+def _unqualified(node: exp.Expression, dialect: str) -> str:
+    """`node` rendered with its columns unqualified: the optimizer's reading
+    qualifies the columns of a cast the definition writes bare."""
+    copy = node.copy()
+    for col in copy.find_all(exp.Column):
+        for part in ("table", "db", "catalog"):
+            col.set(part, None)
+    return copy.sql(dialect)
+
+
+def narrowing_casts(expr: exp.Expression, column_types: dict, dialect: str,
+                    governed: exp.Expression | None = None,
+                    known: dict | None = None) -> list[str]:
+    """Observations for the casts in `expr` that can change the values they
+    convert, kept for review, each once. A cast to a narrower type CAN change
+    a value; whether it changed THIS result is not decided, and nothing here
+    says it did. No observation for a cast that cannot change a value — a
+    widening, NULL, a boolean, a constant it keeps exactly — nor for casts
+    the `governed` definition itself writes: they are the definition, not
+    something the query did to it. `known` as _value_type."""
+    from collections import Counter
+
+    own = Counter(_unqualified(c, dialect) for c in governed.find_all(exp.Cast, exp.TryCast)) \
+        if governed is not None else Counter()
+    out: list[str] = []
+
+    def note(text: str) -> None:
+        if text not in out:
+            out.append(text)
+    for cast in expr.find_all(exp.Cast, exp.TryCast):
+        try:
+            _note_cast(cast, column_types, dialect, known, own, note)
+        except Exception:  # noqa: BLE001 — an observation never breaks a run
+            continue
+    return out
+
+
+def _note_cast(cast, column_types: dict, dialect: str, known, own, note) -> None:
+    """One cast's observation, if any (narrowing_casts)."""
+    if cast.to is None:
+        return
+    key = _unqualified(cast, dialect)
+    if own[key] > 0:
+        own[key] -= 1
+        return
+    written = cast.to.sql(dialect)
+    target = _numeric_type(written, dialect)
+    inner = _unparen(cast.this)
+    if isinstance(inner, (exp.Null, exp.Boolean)):
+        return
+    if target is None:
+        base = re.sub(r"\s*\(.*$", "", written.strip().upper())
+        if base not in _NON_NUMERIC:
+            note(f"{cast.sql(dialect)}: {written} is a type this rule set does not model "
+                 f"— whether the cast changes values is not decided")
+        return
+    constant = _unparen(inner.this) if isinstance(inner, exp.Neg) else inner
+    if isinstance(constant, exp.Literal) and not constant.is_string:
+        kept = _constant_preserved(constant, target, negative=isinstance(inner, exp.Neg))
+        if kept is False:
+            note(f"{cast.sql(dialect)} changes the constant {inner.sql(dialect)} — "
+                 f"whether that changes this result is not decided")
+        if kept is not None:
+            return
+    source = _value_type(inner, column_types, dialect, known)
+    verdict = _narrows(source, target)
+    what = (f"{inner.name} ({_column_type(inner, column_types)})"
+            if isinstance(inner, exp.Column) else
+            f"the value it casts ({_render_type(source)})")
+    if verdict:
+        note(f"{cast.sql(dialect)} narrows {what} to {written} — it can change "
+             f"values; whether it changes this result is not decided")
+    elif verdict is None:
+        stated = _written_type(inner, column_types, dialect)
+        if stated and _numeric_type(stated, dialect) is None:
+            subject = (f"{inner.name} is declared {stated}" if isinstance(inner, exp.Column)
+                       else f"the value it casts is {stated}")
+            note(f"{cast.sql(dialect)}: {subject}, not a numeric type this rule "
+                 f"set models — whether the cast changes values is not decided")
+        else:
+            note(f"{cast.sql(dialect)}: the type of the value it casts is not "
+                 f"known, so whether the cast narrows it is not decided")
+
+
 def strip_column_wrappers(expr: exp.Expression) -> exp.Expression:
-    """`expr` with every wrapper that MAY preserve a column's value removed:
-    a cast, ROUND, `× 1`, `÷ 1`, `+ 0`, `− 0` (neutral as a DOUBLE too) and
-    double negation around a column. Equality after stripping decides
-    nothing; it only says the difference may be no difference."""
+    """`expr` with every wrapper that MAY preserve a value removed: a cast,
+    ROUND, `× 1`, `÷ 1`, `+ 0`, `− 0` (neutral as a DOUBLE too) and double
+    negation around a column or an aggregate (`CAST(SUM(amount) AS DOUBLE)`).
+    Equality after stripping decides nothing; it only says the difference
+    may be no difference."""
     import decimal
 
     def neutral(lit: exp.Expression, value: int) -> bool:
+        # `1.0D` is CAST(1.0 AS DOUBLE) to the parser: a cast of the neutral
+        # value to a number type is still the neutral value.
+        lit = _cast_literal(lit)
         if not (isinstance(lit, exp.Literal) and not lit.is_string):
             return False
         try:
@@ -645,22 +1099,25 @@ def strip_column_wrappers(expr: exp.Expression) -> exp.Expression:
         except (decimal.InvalidOperation, ValueError):
             return False
 
+    def operand(n: exp.Expression) -> bool:
+        return isinstance(n, (exp.Column, exp.AggFunc))
+
     def strip(node: exp.Expression) -> exp.Expression:
         node = _unparen(node)
         if isinstance(node, (exp.Cast, exp.TryCast, exp.Round)):
             inner = strip(node.this)
-            if isinstance(inner, exp.Column):
+            if operand(inner):
                 return inner
         if isinstance(node, exp.Neg) and isinstance(_unparen(node.this), exp.Neg):
             inner = strip(_unparen(node.this).this)
-            if isinstance(inner, exp.Column):
+            if operand(inner):
                 return inner
         if isinstance(node, (exp.Mul, exp.Div, exp.Add, exp.Sub)):
             unit = 1 if isinstance(node, (exp.Mul, exp.Div)) else 0
             left, right = strip(node.this), strip(node.expression)
-            if isinstance(left, exp.Column) and neutral(_unparen(node.expression), unit):
+            if operand(left) and neutral(_unparen(node.expression), unit):
                 return left
-            if isinstance(node, (exp.Mul, exp.Add)) and isinstance(right, exp.Column) \
+            if isinstance(node, (exp.Mul, exp.Add)) and operand(right) \
                     and neutral(_unparen(node.this), unit):
                 return right
         return node
@@ -830,10 +1287,12 @@ def _with(select: exp.Expression):
 
 def check_metric_view(stmt: exp.Expression,
                       approved: dict[str, dict[str, Authority | None]],
-                      dialect: str) -> list[ViewProjection]:
+                      dialect: str, column_types=None) -> list[ViewProjection]:
     """Shape B, for a statement containing MEASURE(). `approved` maps a
     fully qualified metric view to {measure name: authority}, the authority
-    None when the approved definition could not be read at proof grade."""
+    None when the approved definition could not be read at proof grade.
+    `column_types(relation)` gives a source's declared column types, for the
+    narrowing-cast observations."""
     calls = measure_calls(stmt)
     out: list[ViewProjection] = []
     top = stmt if isinstance(stmt, exp.Select) else None
@@ -888,7 +1347,11 @@ def check_metric_view(stmt: exp.Expression,
             f"is not an approved metric view (approved views are named by a pilot "
             f"package)", shape="B"), governed=False)
     measure_projections = {id(p) for p in top.expressions if measure_calls(p)}
-    problem = _view_construct_problem(top, measure_projections)
+    # As in Shape A, a truncation the engine does not accept as written is no
+    # grain at all — and its rendering would name one ('W' as WEEK).
+    problem = unaccepted_truncation(top, dialect) or \
+        misread_literal(stmt.meta.get("source_text") or "", dialect) or \
+        _view_construct_problem(top, measure_projections)
     if problem:
         return every(lambda m: unverifiable("shape_unsupported", f"query {problem}",
                                             shape="B"))
@@ -902,6 +1365,9 @@ def check_metric_view(stmt: exp.Expression,
     shared: list[dict] = []
     slices: list[str] = []
     grain: list[str] = []
+    # Groupings that truncate a dimension to a grain of its own: permitted
+    # per MEASURE, only when approved for that metric.
+    time_groupings: list[tuple[str, tuple[str, ...] | None, str]] = []
     projections = list(top.expressions)
     plain: list[exp.Expression] = []
     for proj in projections:
@@ -952,6 +1418,9 @@ def check_metric_view(stmt: exp.Expression,
                 shared.append(_reason("shape_unsupported", "groups by a measure"))
             elif _classify_term(t, resolver) == "dimension":
                 grain.append(t.sql(dialect))
+                tg = resolver.time_grouping(_unparen(t))
+                if tg is not None:
+                    time_groupings.append((t.sql(dialect), *tg))
             else:
                 shared.append(_reason("dimension_unsupported",
                                       f"groups by {t.sql(dialect)}, not a supported "
@@ -975,10 +1444,13 @@ def check_metric_view(stmt: exp.Expression,
             # any one of them.
             fn, arg = measure_ref(calls_here[0])
             first = arg.name.lower() if isinstance(arg, exp.Column) else "?"
-            out.append(ViewProjection(first, output, unverifiable(
-                "derived_expression",
-                f"{output or written} = {written} combines governed measures; whether it "
-                f"equals any one definition is not decided", shape="B"),
+            out.append(ViewProjection(first, output, Outcome(
+                "unverifiable", [_reason(
+                    "derived_expression",
+                    f"{output or written} = {written} combines governed measures; whether it "
+                    f"equals any one definition is not decided")], shape="B",
+                suspected=_measure_cast_notes(inner, calls_here, view, column_types,
+                                              dialect)),
                 expression=written))
             continue
 
@@ -1008,9 +1480,24 @@ def check_metric_view(stmt: exp.Expression,
             # is settled BEFORE the projection's formula is judged: a
             # transformed projection returned early and never saw it, so an
             # unsupported filter became a violation.
-            if shared:
-                emit(m, Outcome("unverifiable", list(shared), variation, "B",
-                                suspected=[transformation] if transformation else []))
+            notes = [] if bare else _measure_cast_notes(inner, [call], view, column_types,
+                                                        dialect)
+            approved = view[m].approved_groupings or {}
+            own = [_reason("grouping_undeclared",
+                           f"groups by {sql}: grouping by {unit} is not a declared dimension "
+                           f"of {view_relation}"
+                           + (" — it truncates a dimension that is itself a truncation, "
+                              "which no approval makes a declared grain" if dims is None else
+                              f" and is not approved for {m} — approve it on "
+                              f"{' or '.join(dims)} in pilot.yml approved_time_groupings if "
+                              f"it is a governed grain"
+                              if dims else " (no plain date dimension to approve it on)"))
+                   for sql, dims, unit in time_groupings
+                   if dims is None or not any(unit in approved.get(d, ()) for d in dims)]
+            if shared or own:
+                emit(m, Outcome("unverifiable", [*shared, *own], variation, "B",
+                                suspected=([transformation] if transformation else [])
+                                + notes))
                 continue
             if transformation and presented_as_governed \
                     and wrapper_only(inner, lambda n: n is call) \
@@ -1019,15 +1506,40 @@ def check_metric_view(stmt: exp.Expression,
                     "transformation_undecided",
                     f"presented as {m} but computed as {written} — whether the "
                     f"transformation preserves the value is not decided")],
-                    variation, "B", suspected=[transformation]))
+                    variation, "B", suspected=[transformation, *notes]))
             elif transformation and presented_as_governed:
                 emit(m, Outcome("violation", [_reason(
-                    "transformed_governed_measure", transformation)], variation, "B"))
+                    "transformed_governed_measure", transformation)], variation, "B",
+                    suspected=notes))
             elif transformation:
-                emit(m, unverifiable("derived_expression", transformation, shape="B"))
+                emit(m, Outcome("unverifiable", [_reason("derived_expression", transformation)],
+                                shape="B", suspected=notes))
             else:
                 emit(m, Outcome("conforming", [], variation, "B"))
     return out
+
+
+def _measure_cast_notes(inner: exp.Expression, calls: list[exp.Expression], view: dict,
+                        column_types, dialect: str) -> list[str]:
+    """Narrowing-cast observations for a projection over MEASURE() calls:
+    each reference has the type of its governed expression, over the view's
+    source columns."""
+    if inner.find(exp.Cast, exp.TryCast) is None:
+        return []
+    known: dict = {}
+    types: dict = {}
+    for call in calls:
+        _, arg = measure_ref(call)
+        auth = view.get(arg.name.lower()) if isinstance(arg, exp.Column) else None
+        if auth is None:
+            continue
+        source = auth.base_relation
+        types = ({c.lower(): t for c, t in column_types(source).items()}
+                 if column_types is not None and source else {})
+        governed = _parse(auth.core.measure_expr, dialect)
+        if governed is not None:
+            known[call.sql(dialect)] = _value_type(governed, types, dialect)
+    return narrowing_casts(inner, types, dialect, known=known)
 
 
 # --------------------------------------------------------------- resolvers
@@ -1054,9 +1566,21 @@ class _Resolver:
 
 
 class _RawResolver(_Resolver):
-    """Dimensions by the base-table column they read."""
+    """Dimensions by the base-table column they read.
 
-    def term(self, node: exp.Expression) -> str | None:
+    A truncation of a declared date column means two different things. In a
+    FILTER it is a time window on that column (`DATE_TRUNC('WEEK', d) =
+    DATE '…'` selects a contiguous range of d), which the declared dimension
+    permits. In a GROUPING it is a new grain: permitted only when that
+    truncation IS a declared dimension, or the operator approved it for this
+    metric (`approved`). Round seventeen's benchmark found every unit of a
+    bare declared date column accepted as a grouping."""
+
+    def __init__(self, dims: list[DimensionSpec] | None, approved: dict | None = None):
+        super().__init__(dims)
+        self.approved = approved or {}
+
+    def term(self, node: exp.Expression, grouping: bool = False) -> str | None:
         """'dimension' | 'unsupported' | None (not a dimension)."""
         if self.dims is None:
             return None
@@ -1065,6 +1589,15 @@ class _RawResolver(_Resolver):
             unit, col = trunc
             name = col.name.lower()
             matches = [d for d in self.dims if d.column == name]
+            if grouping:
+                if any(d.supported and d.truncation == unit for d in matches):
+                    return "dimension"
+                if any(d.supported and d.truncation is None
+                       and unit in self.approved.get(d.name.lower(), ()) for d in matches):
+                    return "dimension"
+                if any(d.supported for d in matches):
+                    return None    # a declared column, an undeclared grain
+                return "unsupported" if matches or self._unsupported_reads(name) else None
             if any(d.supported and (d.truncation in (None, unit)) for d in matches):
                 return "dimension"
             return "unsupported" if matches or self._unsupported_reads(name) else None
@@ -1080,6 +1613,20 @@ class _RawResolver(_Resolver):
         return any(not d.supported and d.expr and column in d.expr.lower()
                    for d in self.dims or [])
 
+    def grouping_hint(self, node: exp.Expression) -> str:
+        trunc = truncation_of(node)
+        if trunc is None:
+            return ""
+        unit, col = trunc
+        bare = [d for d in self.dims or []
+                if d.column == col.name.lower() and d.truncation is None and d.supported]
+        if not bare:
+            return ""
+        names = " or ".join(d.name for d in bare)
+        return (f" ({names} is a declared dimension, but grouping it by {unit} is "
+                f"neither a declared dimension nor approved for this metric — approve it "
+                f"in pilot.yml approved_time_groupings if it is a governed grain)")
+
     def hint(self, cols: set[str]) -> str:
         named = [d for d in self.dims or [] if d.name in cols and d.column and d.column not in cols]
         if named:
@@ -1094,9 +1641,12 @@ class _RawResolver(_Resolver):
 
 
 class _ViewResolver(_Resolver):
-    """Dimensions by NAME — how a query over the metric view refers to them."""
+    """Dimensions by NAME — how a query over the metric view refers to them.
+    In a grouping, a truncation of a dimension is a new grain unless it is the
+    dimension's own truncation (a no-op) — whether it is approved depends on
+    the metric, so `time_grouping` reports it for a per-measure decision."""
 
-    def term(self, node: exp.Expression) -> str | None:
+    def term(self, node: exp.Expression, grouping: bool = False) -> str | None:
         if self.dims is None:
             return None
         trunc = truncation_of(node)
@@ -1109,6 +1659,36 @@ class _ViewResolver(_Resolver):
             return "dimension"
         return "unsupported" if matches else None
 
+    def time_grouping(self, node: exp.Expression) -> tuple[tuple[str, ...] | None, str] | None:
+        """(the plain dimensions an approval may name, unit) when `node`
+        truncates a supported dimension to a grain NO declared dimension has;
+        None when it is declared (its own truncation, or another dimension
+        declared as exactly that truncation of the same column — `month` =
+        DATE_TRUNC('MONTH', order_date)). An approval on ANY plain declared
+        dimension of the column approves the grain; none when the column has
+        no plain declared dimension to approve it on."""
+        trunc = truncation_of(node)
+        if trunc is None or self.dims is None:
+            return None
+        unit, col = trunc
+        named = next((d for d in self.dims if d.name == col.name.lower() and d.supported),
+                     None)
+        if named is None:
+            return None
+        if named.truncation == unit:
+            return None                      # its own truncation again: a no-op
+        if named.truncation is not None:
+            # A grain of a grain: MONTH of a WEEK dimension credits a week
+            # that starts in September to September — not the declared month,
+            # and nothing an approval on the base column describes.
+            return None, unit
+        if any(d.supported and d.column == named.column and d.truncation == unit
+               for d in self.dims):
+            return None
+        plain = tuple(d.name.lower() for d in self.dims if d.supported
+                      and d.column == named.column and d.truncation is None)
+        return plain, unit
+
 
 @dataclass
 class _Predicate:
@@ -1118,10 +1698,11 @@ class _Predicate:
     detail: str = ""
 
 
-def _classify_term(node: exp.Expression | None, resolver: _Resolver) -> str | None:
+def _classify_term(node: exp.Expression | None, resolver: _Resolver,
+                   grouping: bool = False) -> str | None:
     if node is None:
         return None
-    return resolver.term(_unparen(node))
+    return resolver.term(_unparen(node), grouping=grouping)
 
 
 def _classify_predicate(node: exp.Expression, resolver: _Resolver) -> _Predicate:
@@ -1174,12 +1755,18 @@ def _shape(node: exp.Expression, is_dim) -> bool:
         left, right = node.left, node.right
         return (is_dim(left) and _is_const(right)) or (is_dim(right) and _is_const(left))
     if isinstance(node, exp.In):
+        # Items of one kind only, as for BETWEEN: the engines bind the list to
+        # one type (`country IN ('US', 5)`).
         return (is_dim(node.this) and not node.args.get("query")
                 and not node.args.get("unnest") and bool(node.expressions)
-                and all(_is_const(e) for e in node.expressions))
+                and all(_is_const(e) for e in node.expressions)
+                and len({literal_kind(e) for e in node.expressions}) == 1)
     if isinstance(node, exp.Between):
-        return (is_dim(node.this) and _is_const(node.args.get("low"))
-                and _is_const(node.args.get("high")))
+        # Bounds of one kind only — the policy's boundary, and the proof
+        # grammar's: Shape B read `d BETWEEN DATE '…' AND '…'` as a slice.
+        low, high = node.args.get("low"), node.args.get("high")
+        return (is_dim(node.this) and _is_const(low) and _is_const(high)
+                and literal_kind(low) == literal_kind(high))
     if isinstance(node, exp.Is):
         return is_dim(node.this) and isinstance(node.expression, exp.Null)
     return False
@@ -1189,9 +1776,11 @@ def _shape(node: exp.Expression, is_dim) -> bool:
 
 def _parse(text: str, dialect: str) -> exp.Expression | None:
     try:
-        return sqlglot.parse_one(text, read=dialect)
+        node = sqlglot.parse_one(text, read=dialect)
     except Exception:  # noqa: BLE001 — a rendered condition should re-read
         return None
+    annotate_truncations(node, text, dialect)
+    return node
 
 
 def _is_false(node: exp.Expression) -> bool:
