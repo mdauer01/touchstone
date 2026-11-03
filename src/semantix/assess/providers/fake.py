@@ -19,6 +19,7 @@ class FakeProvider:
     name = "fake"
     model = None
     measures_performance = False
+    confidence_source = "synthetic (fake backend — a hash, not a judgment)"
 
     def __init__(self, seed: str = ""):
         self.seed = seed

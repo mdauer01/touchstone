@@ -339,11 +339,15 @@ observations. A separate advisory classifier answers versioned per-component que
 about those records, and fixed code aggregates the answers into `suspected_drift`,
 `insufficient_evidence` or `likely_permitted`.
 
-`semantix assess benchmark` scores a provider against 60 independently labeled metric
-uses, split by query family. This release ships only a deterministic fake backend, so
-**classification performance is unmeasured**, and the report says so. The Databricks
-(`ai_query`), Snowflake (`AI_COMPLETE`) and direct-API backends are interfaces until
-credentials exist. Assessments never change a finding or an exit code. See
+`semantix assess benchmark` scores a provider against 60 labeled metric uses, split
+by query family. The labels are model-authored and model-reviewed; a blind human
+review is still to come (`semantix assess review-sheet`). Two backends run:
+- a deterministic fake, which measures nothing, and the report says so;
+- **Databricks** (`ai_query` on a SQL warehouse), tested against mocked responses and
+  not yet run against a workspace.
+
+**Classification performance is therefore still unmeasured.** Snowflake `AI_COMPLETE`
+and a direct API come next. Assessments never change a finding or an exit code. See
 `docs/assess.md`.
 
 ### Agents Schema: claims in, receipts out

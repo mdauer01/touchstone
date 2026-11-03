@@ -9,11 +9,23 @@ and none of them is a drift label.
 ## How labels were written
 
 Every label comes from **the business definition and policy below and the SQL text**,
-never from semantix's output. A second, blind pass labeled every item again
-(`blind_labels.yaml`). It was made by a separate agent that was given only this policy,
-the definitions and the SQL: no labels, no rationales, no semantix output. It agreed on
-56 of 60 items. Each of the four disagreements is recorded in `adjudication.yaml` with
-the decision and why. In all four, the written policy decided for the blind label.
+never from semantix's output.
+
+**The labels are model-authored and model-reviewed.** A model wrote them. A separate
+model then labeled every item blind (`blind_labels.yaml`), given only this policy, the
+definitions and the SQL: no labels, rationales or semantix output. It agreed on 56 of
+60 items. The four disagreements are recorded in `adjudication.yaml`, with the decision
+and why; the written policy decided all four for the blind label.
+
+Agreement between two model passes is **not** independent validation. No human has
+reviewed these labels yet. The four adjudications and the grouping policy (`time-05`,
+`udf-03`, and every `GROUP BY` of a date truncation) need it most. To run a blind human
+review:
+
+```bash
+semantix assess review-sheet --out sheet.csv     # no labels, no rationales; priorities flagged
+semantix assess compare-labels sheet.csv         # agreement and every disagreement; changes nothing
+```
 
 ## The business definitions
 
@@ -33,6 +45,10 @@ discount DOUBLE, status, country, channel, order_date DATE)`,
 `customers(customer_id, segment, region)`, and `order_items(order_id, sku, qty)`.
 `refund_amount` is nullable. Key uniqueness and referential integrity are **not**
 stated.
+
+These facts are also stored in `definitions.yaml` as `stated_facts`, beside the catalog
+and the policy. Every record carries them, and so does the human review guide (with the
+metric view's name), so the model and the human reviewer judge from the same evidence.
 
 ## The policy (what is a permitted variation)
 

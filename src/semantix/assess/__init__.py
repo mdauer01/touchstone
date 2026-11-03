@@ -12,12 +12,14 @@ apart from the engine:
 * `criteria` — versioned questions, one narrow question per component
   (identity, formula, population, grain, source), each with an `unknown`
   answer, and the FIXED code that aggregates answers into an advisory label;
-* `providers` — the interface a backend implements (Databricks `ai_query`,
-  Snowflake `AI_COMPLETE`, a direct API) and a deterministic `fake` for
-  tests. Concrete backends arrive in a later delivery;
-* `runner` — evaluation against independently labeled metric uses
-  (`semantix/benchmark/metric_uses`): missed drift, false alerts, abstention,
-  calibration, cost and latency.
+* `providers` — the interface a backend implements, a deterministic `fake`
+  for tests, and Databricks (`ai_query` on a SQL warehouse); Snowflake
+  `AI_COMPLETE` and a direct API come later;
+* `runner` — evaluation against labeled metric uses
+  (`semantix/benchmark/metric_uses`; model-authored and model-reviewed labels,
+  no human review yet): drift flagged / labeled permitted / undecided /
+  failed, the same for permitted uses, abstention, calibration, cost and
+  latency.
 
 Two things this package never does: it never changes a finding's kind,
 funnel bucket or exit code, and it never reports classification performance

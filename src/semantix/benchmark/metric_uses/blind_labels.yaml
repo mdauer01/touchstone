@@ -1,4 +1,4 @@
-# The independent blind labeling pass (round seventeen): every item, labeled by a
+# The blind second labeling pass (round seventeen) — a MODEL pass: every item, labeled by a
 # separate agent given ONLY the business definitions, the policy and the SQL — no
 # dataset labels or rationales, no semantix output, no repository access. Verbatim
 # labels; disagreements with the authored labels are decided in adjudication.yaml.

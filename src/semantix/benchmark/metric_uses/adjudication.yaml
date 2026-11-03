@@ -1,6 +1,13 @@
 # Disagreements between the authored labels and the blind pass, with the decision and
-# why. Item labels in the family files are the decisions.
+# why. Item labels in the family files are the decisions. Both passes were made by
+# MODELS: this is model-authored, model-reviewed labeling, not independent validation.
+# A blind human review (`semantix assess review-sheet`) is still to come.
 pass: blind-1
+label_provenance:
+  authored_by: model
+  reviewed_by: model (blind pass blind-1 — 56 of 60 agreed, 4 adjudicated by the written policy)
+  human_review: none yet
+  note: agreement between two model passes is not independent validation
 agreement: 56 of 60 items
 decisions:
 - id: slices-07

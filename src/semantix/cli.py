@@ -356,19 +356,25 @@ def main(argv: list[str] | None = None) -> int:
 
     p_assess = sub.add_parser(
         "assess",
-        help="development: evaluate an ADVISORY drift classifier against independently "
-             "labeled metric uses (never changes a finding or an exit code)")
+        help="development: evaluate an ADVISORY drift classifier against labeled metric "
+             "uses (model-authored and model-reviewed; never changes a finding or an exit "
+             "code)")
     assess_sub = p_assess.add_subparsers(dest="assess_command", required=True)
     p_ab = assess_sub.add_parser(
         "benchmark",
-        help="score a provider on the metric-use dataset: missed drift, false alerts, "
-             "abstention, calibration, cost and latency (the fake provider measures "
-             "nothing — the report says so)")
+        help="score a provider on the metric-use dataset: drift flagged / labeled "
+             "permitted / undecided, permitted uses confirmed / flagged / undecided, "
+             "calibration, cost and latency (the fake provider measures nothing — the "
+             "report says so)")
     p_ab.add_argument("--provider", default="fake",
                       choices=["fake", "api", "databricks", "snowflake"],
-                      help="assessment backend; only `fake` runs in this release")
-    p_ab.add_argument("--model", help="model name for a model-backed provider")
-    p_ab.add_argument("--endpoint", help="serving endpoint or warehouse — never a secret")
+                      help="assessment backend: fake (measures nothing) or databricks "
+                           "(ai_query; the token is read from DATABRICKS_TOKEN)")
+    p_ab.add_argument("--model", help="databricks: the serving endpoint ai_query calls, "
+                                      "e.g. system.ai.<model>")
+    p_ab.add_argument("--endpoint", help="databricks: the SQL warehouse id (or "
+                                         "DATABRICKS_WAREHOUSE_ID) — never a secret")
+    p_ab.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST)")
     p_ab.add_argument("--seed", default="", help="seed for the fake provider")
     p_ab.add_argument("--split", default="test", choices=["dev", "test", "all"],
                       help="split by query family; tune on dev, report test")
@@ -378,6 +384,22 @@ def main(argv: list[str] | None = None) -> int:
                            "baseline")
     p_ab.add_argument("--dataset", help="dataset directory (default: the shipped one)")
     p_ab.add_argument("--json", dest="json_out", help="write the full report JSON here")
+    p_rs = assess_sub.add_parser(
+        "review-sheet",
+        help="write a BLIND review sheet (CSV, no labels or rationales) for a human labeler, "
+             "with the policy and definitions beside it")
+    p_rs.add_argument("--out", required=True,
+                      help="CSV file to write (the guide is written beside it as "
+                           "<name>.guide.md)")
+    p_rs.add_argument("--force", action="store_true",
+                      help="overwrite an existing sheet or guide")
+    p_rs.add_argument("--dataset", help="dataset directory (default: the shipped one)")
+    p_cl = assess_sub.add_parser(
+        "compare-labels",
+        help="compare a filled review sheet with the dataset's labels: agreement and every "
+             "disagreement (changes nothing)")
+    p_cl.add_argument("sheet", help="the filled CSV")
+    p_cl.add_argument("--dataset", help="dataset directory (default: the shipped one)")
 
     args = parser.parse_args(argv)
     handler = {
@@ -1091,49 +1113,207 @@ def _cmd_assess(args: argparse.Namespace) -> int:
     from semantix.assess.providers import ProviderConfig, get_provider
     from semantix.assess.runner import load_dataset, observations_from_monitor, run_benchmark
 
+    if args.assess_command == "review-sheet":
+        return _assess_review_sheet(args)
+    if args.assess_command == "compare-labels":
+        return _assess_compare_labels(args)
+
     try:
         provider = get_provider(ProviderConfig(args.provider, model=args.model,
                                                endpoint=args.endpoint,
-                                               options={"seed": args.seed}))
-    except NotImplementedError as e:
+                                               options={"seed": args.seed,
+                                                        **({"host": args.host}
+                                                           if args.host else {})}))
+    except (NotImplementedError, ValueError) as e:
         print(f"semantix assess: {e}", file=sys.stderr)
         return 2
     dataset = load_dataset(args.dataset)
     observations = (observations_from_monitor(dataset, args.split)
                     if args.with_observations else None)
-    report = run_benchmark(provider, dataset=dataset, split=args.split,
-                           observations=observations)
+    from semantix.assess.providers.databricks import DatabricksError
+
+    try:
+        report = run_benchmark(provider, dataset=dataset, split=args.split,
+                               observations=observations)
+    except DatabricksError as e:
+        print(f"semantix assess: {e}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        # Outside a provider call (building records): nothing was reported.
+        print("semantix assess: interrupted before a report was produced", file=sys.stderr)
+        return 130
+    labels = report["labels"]
     print(f"assess benchmark · {report['dataset']} · split {report['split']} · "
           f"{report['items']} item(s) over {len(report['families'])} famil"
           f"{'y' if len(report['families']) == 1 else 'ies'} · provider {report['provider']}"
           + (f" ({report['model']})" if report["model"] else ""))
-    if not report["performance_measured"]:
-        print(f"  NOTE: {report['note']}")
+    print(f"  labels: authored by {labels['authored_by']}, reviewed by "
+          f"{labels['reviewed_by']}; human review: {labels['human_review']}")
+    for note in report.get("notes", []):
+        print(f"  NOTE: {note}")
     print(f"  {report['advisory_only']}")
 
-    def line(label: str, m: dict) -> None:
-        def rate(x):
-            return "n/a" if x["rate"] is None else f"{x['count']}/{x['of']} ({x['rate']:.0%})"
-        ece = m["calibration"]["ece"]
-        print(f"  {label:<34} missed drift {rate(m['missed_drift'])} · false alerts "
-              f"{rate(m['false_alerts'])} · abstained {m['abstention']['count']}/{m['n']}"
-              + (f" · ECE {ece:.3f}" if ece is not None else ""))
-    tag = "" if report["performance_measured"] else " [not a measurement]"
+    def c(x):
+        return f"{x['count']}/{x['of']}"
+
+    def line(label: str, m: dict, confirmed: str = "confirmed") -> None:
+        d, ok, ie = m["drift"], m["permitted"], m["insufficient_evidence"]
+        print(f"  {label}")
+        print(f"      drift (n={d['of']}): flagged {c(d['flagged'])} · labeled permitted "
+              f"{c(d['labeled_permitted'])} · undecided {c(d['undecided'])} · failed "
+              f"{c(d['failed'])}")
+        print(f"      permitted (n={ok['of']}): {confirmed} "
+              f"{c(ok.get('confirmed') or ok['labeled_permitted'])} · flagged as "
+              f"drift {c(ok['flagged_as_drift'])} · undecided {c(ok['undecided'])} · failed "
+              f"{c(ok['failed'])}")
+        print(f"      insufficient evidence (n={ie['of']}): abstained {c(ie['abstained'])} · "
+              f"flagged {c(ie['flagged'])} · labeled permitted {c(ie['labeled_permitted'])} · "
+              f"failed {c(ie['failed'])}")
+        cal = m["calibration"]
+        agreement = m["agreement_with_labels"]
+        print(f"      answered {m['answered']}/{m['n']} · abstained {c(m['abstention'])}"
+              + (f" · agreement with labels {agreement:.0%}" if agreement is not None else "")
+              + (f" · ECE {cal['ece']:.3f} over {cal['scored']}/{cal['of']} answered with a "
+                 f"confidence ({report.get('confidence_source') or 'source not stated'})"
+                 if cal["ece"] is not None else " · calibration: no confidence to score")
+              + (f" · {cal['out_of_range']} confidence(s) outside [0, 1] not scored"
+                 if cal.get("out_of_range") else ""))
+        latency = m["latency_ms"]
+        print("      cost: " + (f"${m['cost_usd']}" if m["cost_reported"] else
+                                "not reported")
+              + " · latency: " + (f"mean {latency['mean']} ms, p95 {latency['p95']} ms"
+                                  if latency else "not reported"))
+        if m["errors"]["count"]:
+            kinds = ", ".join(f"{k} ×{v}" for k, v in m["errors"]["by_kind"].items())
+            print(f"      errors: {m['errors']['count']} ({kinds})")
     for arm, result in report["arms"].items():
-        line(arm.replace("_", " ") + tag, result["overall"])
+        line(arm.replace("_", " ")
+             + ("" if result["performance_measured"] else " [not a measurement]"),
+             result["overall"])
     for name, value in report["baselines"].items():
         if isinstance(value, dict):
-            line(f"baseline: {name.replace('_', ' ')}", value)
+            # semantix's "permitted" readings are experimental matches, never
+            # confirmations: positive verdicts are suspended.
+            line(f"baseline: {name.replace('_', ' ')}", value,
+                 confirmed="labeled permitted (experimental matches)")
         else:
             print(f"  baseline: {name.replace('_', ' ')} — {value}")
     if args.json_out:
         from semantix.assess.runner import to_json
 
         out = Path(args.json_out)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(to_json(report))
-        print(f"  report JSON: {out}")
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(to_json(report))
+            print(f"  report JSON: {out}")
+        except OSError as e:
+            print(f"semantix assess: could not write the report JSON to {out}: "
+                  f"{e.strerror or e}", file=sys.stderr)
+            if not report.get("stopped"):
+                return 2
+    if report.get("stopped"):
+        # The report above keeps what was answered before the run stopped;
+        # the exit code is the stop's KIND, never the server's wording.
+        print(f"semantix assess: the run stopped: {report['stopped']}", file=sys.stderr)
+        return 130 if report.get("stop_kind") == "interrupted" else 2
+    # A run in which no call answered measured nothing: never exit 0 on it.
+    if any(a["overall"]["answered"] == 0 for a in report["arms"].values()):
+        print("semantix assess: no call answered in at least one arm — nothing was measured",
+              file=sys.stderr)
+        return 1
     return 0
+
+
+def _assess_review_sheet(args: argparse.Namespace) -> int:
+    import csv
+
+    from semantix.assess.runner import LABELS, REVIEW_COLUMNS, load_dataset, review_sheet
+
+    dataset = load_dataset(args.dataset)
+    rows = review_sheet(dataset)
+    out = Path(args.out)
+    guide = out.with_name(f"{out.stem}.guide.md")
+    if guide.resolve() == out.resolve():
+        print("semantix assess: --out must not be the guide's own name", file=sys.stderr)
+        return 2
+    existing = [p for p in (out, guide) if p.exists()]
+    if existing and not args.force:
+        print(f"semantix assess: {', '.join(map(str, existing))} already exist(s) — a filled "
+              f"sheet would be lost; pass --force to overwrite", file=sys.stderr)
+        return 2
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=REVIEW_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    d = dataset["definitions"]
+    catalog = "\n".join(f"- `{rel}`: " + ", ".join(f"`{c}` {t}" for c, t in cols.items())
+                         for rel, cols in d["catalog"].items())
+    facts = "\n".join(f"- {f}" for f in d.get("stated_facts") or [])
+    guide.write_text(
+        "# Blind review of the metric-use labels\n\n"
+        "Label each row from the definitions and the policy below and the row itself "
+        "(`sql`, and `session_statements` — statements that ran earlier in the same "
+        "session and can change what its names resolve to). `metric` is the governed metric the "
+        "row is compared with. Fill `label` with one of: "
+        + ", ".join(f"`{x}`" for x in LABELS)
+        + ". Add a one-sentence `rationale` and your name in `reviewer`. Rows marked in "
+        "`priority` need the most care; the mark says nothing about their labels.\n\n"
+        "Until you have finished, do not open: the dataset's family files "
+        "(`benchmark/metric_uses/*.yaml` other than this sheet), `adjudication.yaml`, "
+        "`blind_labels.yaml`, the dataset README's label sections, `docs/assess.md` below "
+        "its review instructions (it reports results by family), or any semantix output."
+        f"\n\n## The definition: metric view `{d['view_name']}` over "
+        f"`{dataset['view']['source']}`\n\nIt is THE governed view: a query that reads "
+        f"`{d['view_name']}` reads the governed source through it.\n\n```yaml\n" + d["view"]
+        + "```\n\n## The data\n\nColumns and declared types:\n\n" + catalog
+        + "\n\nStated facts:\n\n" + facts
+        + "\n\n## Policy\n\n" + d["policy"] + "\n",
+        encoding="utf-8")
+    flagged = sum(1 for r in rows if r["priority"])
+    print(f"review sheet: {len(rows)} item(s), {flagged} marked priority → {out}")
+    print(f"  instructions, definitions and policy → {guide}")
+    print("  then: semantix assess compare-labels " + str(out))
+    return 0
+
+
+def _assess_compare_labels(args: argparse.Namespace) -> int:
+    import csv
+
+    from semantix.assess.runner import compare_labels, load_dataset
+
+    # utf-8-sig: a sheet saved by Excel starts with a byte-order mark.
+    with open(args.sheet, newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    try:
+        result = compare_labels(load_dataset(args.dataset), rows)
+    except ValueError as e:
+        print(f"semantix assess: {e}", file=sys.stderr)
+        return 2
+    print(f"human review: {result['reviewed']}/{result['of']} item(s) labeled · agreed "
+          f"{result['agreed']} · disagreed {len(result['disagreements'])}")
+    for d in result["disagreements"]:
+        print(f"  {d['id']}: dataset {d['dataset']} · reviewer {d['reviewer_label']}"
+              + (" (changes the advisory class)" if d["advisory_class_changes"] else "")
+              + (f" — {d['reviewer_rationale']}" if d["reviewer_rationale"] else ""))
+    problems = False
+    for key, label in (("not_reviewed", "not reviewed"), ("unknown_ids", "unknown ids"),
+                       ("invalid_labels", "invalid labels"),
+                       ("duplicate_ids", "labeled more than once"),
+                       ("conflicting_ids", "labeled twice with different labels (not scored)")):
+        if result[key]:
+            print(f"  {label}: {', '.join(result[key])}")
+            problems = problems or key != "not_reviewed"
+    if result["reviewed"] == 0:
+        labeled = result["unknown_ids"] or result["invalid_labels"] or result["conflicting_ids"]
+        print("semantix assess: " + ("no item could be scored — every labeled row has one of "
+                                     "the problems listed above" if labeled
+                                     else "no row of the sheet carries a label"),
+              file=sys.stderr)
+        return 1
+    print("  nothing was changed: decide each disagreement and record it in "
+          "adjudication.yaml")
+    return 1 if problems else 0
 
 
 def _cmd_monitor(args: argparse.Namespace) -> int:

@@ -6,10 +6,11 @@ A provider answers the criteria's per-component questions for each record;
 * `fake` — deterministic, for tests and dry runs. Its "answers" are a
   function of the record id, so a run on it establishes that the machinery
   works and NOTHING about classification performance;
-* `databricks` (`ai_query` with a structured response format; `ai_decide`
-  optional), `snowflake` (Cortex `AI_COMPLETE`), `api` (a direct model API
-  for local use) — interfaces only in this delivery. Each needs credentials
-  the operator supplies; semantix never stores, prints or logs them.
+* `databricks` — `ai_query` with a JSON-schema response format on a SQL
+  warehouse (providers/databricks.py), tested against mocked API responses;
+* `snowflake` (Cortex `AI_COMPLETE`) and `api` (a direct model API for local
+  use) — not implemented yet. Every backend reads its credential from the
+  environment; semantix never stores, prints or logs it.
 
 `render_prompt` is shared by every model-backed provider so the evidence
 order is the same everywhere: the original statement and the authoritative
@@ -52,6 +53,9 @@ class Assessment:
     latency_ms: float | None = None
     cost_estimate_usd: float | None = None
     error: str | None = None
+    # What KIND of failure `error` is (`HTTP 503`, `timeout`, `credential
+    # refused`, …) — errors are reported by kind, never by request path.
+    error_kind: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -70,28 +74,72 @@ def get_provider(config: ProviderConfig) -> Provider:
         from semantix.assess.providers.fake import FakeProvider
 
         return FakeProvider(seed=str(config.options.get("seed", "")))
+    if config.kind == "databricks":
+        from semantix.assess.providers.databricks import DatabricksProvider
+
+        return DatabricksProvider(config)
     raise NotImplementedError(
-        f"the {config.kind} provider is an interface in this delivery: it needs credentials "
-        f"this environment does not have, and its implementation arrives with them")
+        f"the {config.kind} provider is not implemented yet: Databricks (ai_query) is the "
+        f"one real backend in this release")
+
+
+def _unknown_relation(name: str, definition: dict, session: dict) -> str:
+    if name == str(definition.get("view") or "").lower():
+        return (f"the governed metric view of the definition above — it reads "
+                f"{definition.get('source') or 'its source'}, listed with its columns")
+    if name in (session.get("unresolved") or []):
+        return ("not resolved to a catalog.schema.table name (no session context fixes it) — "
+                "what it reads is not known")
+    return "not in the catalog — its columns are not known"
 
 
 def render_prompt(record: dict, criteria: Criteria) -> str:
     """The text a model-backed provider sends. Evidence order is fixed: the
-    statement as it ran, the authoritative definition, the schemas — then,
-    only if present, semantix's unverified observations, last."""
+    statement as it ran, WHEN and in what session it ran (the statements
+    before it can change what its names read), the authoritative definition
+    with its validity window, the governing variation policy, the schemas —
+    then, only if present, semantix's unverified observations, last. Every
+    field that can decide an answer is rendered: a review found two items
+    whose only difference was a session statement rendered identically."""
     execution = record["execution"]
     definition = record["definition"]
+    session = record.get("session_evidence") or {}
+    events = session.get("events") or []
+    context = session.get("context")
+    policy = definition.get("variation_policy") or {}
     parts = [
         "You compare a SQL statement that ran against the authoritative definition of a "
-        "business metric. Answer each question with exactly one of its listed answers; "
-        "answer `unknown` when the evidence does not decide it.",
+        "business metric, under the governing variation policy given below. Answer each "
+        "question with exactly one of its listed answers; answer `unknown` when the "
+        "evidence does not decide it.",
         f"## Statement as it ran ({execution['dialect']})\n{execution['statement']}",
+        # WHEN it ran and from what decide answers; WHO ran it and the
+        # session's id do not, and are not sent (a benchmark id names its
+        # family; a warehouse user is a person).
+        "## Execution\n" + json.dumps(
+            {k: execution.get(k) for k in ("start_time", "client", "asset")}),
+        "## Session before this statement\n" + (
+            ("context: " + json.dumps(context) + "\n" if context else "")
+            + ("statements recorded before this one that can affect its session, in order "
+               "(a note in parentheses says when its session or order is not certain):\n"
+               + "\n".join(f"{i}. {e}" for i, e in enumerate(events, 1))
+               if events else "no earlier statement of this session was recorded")),
         "## Authoritative definition\n" + json.dumps(
             {k: definition.get(k) for k in ("name", "view", "expr", "source",
-                                             "required_filters", "dimensions",
-                                             "snapshot_text")}, indent=1),
+                                             "required_filters", "dimensions", "applies",
+                                             "stated_facts", "snapshot_text")}, indent=1),
+        "## Governing variation policy" + (f" ({policy['source']})" if policy.get("source")
+                                           else "") + "\n"
+        + (policy.get("text") or "no variation policy was supplied: treat every departure "
+                                 "from the definition as undecided")
+        + ("\npermitted filter dimensions: " + ", ".join(policy["permitted_filter_dimensions"])
+           if policy.get("permitted_filter_dimensions") else "")
+        + ("\npermitted groupings: " + "; ".join(policy["permitted_groupings"])
+           if policy.get("permitted_groupings") else ""),
         f"## Claimed metric\n{json.dumps(record['claimed_metric'])}",
-        f"## Schemas of what it reads\n{json.dumps(record['schemas'])}",
+        f"## Schemas of what it reads\n{json.dumps(record['schemas'])}"
+        + ("".join(f"\n{r}: {_unknown_relation(r, definition, session)}"
+                   for r, cols in record["schemas"].items() if not cols)),
     ]
     if record.get("controlled_comparison"):
         parts.append("## Controlled execution comparison (an observed discrepancy still needs "
@@ -104,6 +152,7 @@ def render_prompt(record: dict, criteria: Criteria) -> str:
         f"- {name}: {spec['question'].strip()} Answers: {', '.join(spec['answers'])}"
         for name, spec in criteria.components.items())
     parts.append(f"## Questions (criteria v{criteria.version})\n{questions}\n"
-                 "Reply as JSON: {\"answers\": {component: answer}, "
-                 "\"confidence\": number between 0 and 1}.")
+                 "Reply as JSON: {\"answers\": {component: answer}, \"confidence\": c}, where "
+                 "c is your probability, between 0 and 1, that EVERY answer you gave is "
+                 "correct.")
     return "\n\n".join(parts)

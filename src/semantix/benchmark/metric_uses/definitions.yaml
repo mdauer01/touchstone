@@ -20,6 +20,36 @@ view: |
       expr: SUM(amount) - SUM(refund_amount)
     - name: gross_revenue
       expr: SUM(amount)
+# The governing variation policy, verbatim from README.md ("The policy"). Every
+# record carries it, so a classifier answers against THIS policy.
+policy: |
+  - **Filters.** Filtering on a declared dimension is permitted, including time windows
+    on `order_date` or `month`. A filter on any other column changes the population.
+  - **Grouping.** Grouping by declared dimensions exactly as declared is permitted.
+    Ranking, ordering or limiting the groups is also permitted, as long as each group's
+    value is unchanged. Grouping by anything else changes the grain, and so does
+    returning the value once per row.
+  - **Required filter.** The required filter must hold. Dropping, weakening, broadening
+    or replacing it changes the population.
+  - **Formula.** The formula is the declared one: same aggregation, same columns, same
+    arithmetic. A cast that cannot change a DOUBLE's value is the same formula.
+    Cumulative, ratio or scaled versions are a different formula.
+  - **Source.** The source is `main.finance.orders`, read directly or through
+    select-project-filter steps. Another relation, or a join that can change which rows
+    are counted (fan-out, dropped rows), changes the source.
+  - **Identity.** Presenting one metric's definition under another metric's name is an
+    identity mismatch, even when the math is a correct definition of some metric.
+  - **Insufficient evidence.** Use this label when the text alone cannot decide the
+    question:
+    - an unknown function;
+    - session state that is not shown;
+    - a result that depends on nullability, key uniqueness or referential integrity the
+      definitions do not state.
+# Facts the business definitions state about the data, verbatim from README.md
+# ("The business definitions"). Every record carries them.
+stated_facts:
+  - "`refund_amount` is nullable."
+  - "Key uniqueness and referential integrity are not stated."
 applies:
   from: "2026-09-01T00:00:00Z"
   to: null
