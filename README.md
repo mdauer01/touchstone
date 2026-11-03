@@ -1,6 +1,6 @@
-# semantix
+# touchstone
 
-semantix finds where a metric's declared definition and the SQL that computes it
+touchstone finds where a metric's declared definition and the SQL that computes it
 appear to disagree, and explains each suspected difference clause by clause.
 
 > **Positive verdicts are suspended.** Nine successive review rounds found new false
@@ -18,7 +18,7 @@ appear to disagree, and explains each suspected difference clause by clause.
 >   usable now, however authentic the receipt and however unchanged the estate.
 >
 > Stores and receipts written earlier are read under the same policy; tables
-> published earlier are brought under it with `semantix publish --refresh-policy`.
+> published earlier are brought under it with `touchstone publish --refresh-policy`.
 
 It reads computed definitions from dbt projects, plain SQL directories and view-DDL
 dumps, and declared definitions from metrics YAML, the dbt Semantic Layer, Apache
@@ -27,6 +27,40 @@ Ossie documents, Unity Catalog metric views and Agents Schema tables.
 - Concept: [docs/concept-one-pager.md](docs/concept-one-pager.md)
 - Architecture: [docs/architecture-spec.md](docs/architecture-spec.md)
 
+## Formerly semantix
+
+The project was called semantix. What was written under that name keeps meaning
+what it meant:
+
+- **Stores.** When `touchstone.db` is missing and `semantix.db` sits beside it, every
+  command refuses rather than create a new store. A store holds the signing key, and a
+  new one would mint a new key that no pinned public key matches. With nothing holding
+  it open (stop any `semantix mcp` server first), rename `semantix.db` to
+  `touchstone.db`, together with `semantix.db-wal` and `semantix.db-shm` if they are
+  there: the store runs in WAL mode, and recent writes live in the `-wal` file until
+  they are checkpointed. Or pass `--db semantix.db`. A `touchstone.db` beside a
+  stranded, non-empty `semantix.db-wal` is refused until the `-wal` is renamed to match.
+- **Policy id.** Scans and receipts recorded under `semantix-proof/2` are under
+  `touchstone-proof/2`. The grammar did not change with the name, and neither do
+  fingerprint ids: rescanning an existing store records no restatement.
+- **SQL annotations.** `-- semantix: relation=` directives and `semantix: metric=` tags
+  are still read.
+- **Published tables.** `touchstone publish` replaces the rows published under the
+  `semantix` provider in `agents.root`. Agent queries that filter
+  `provider = 'semantix'` must now filter `provider = 'touchstone'`; the republished
+  `skill/verify-metric` row says so. While a `semantix.verdicts` table exists, publish
+  writes the same projection into it, so gates that still read it keep failing on new
+  findings. `--refresh-policy` brings both tables under the policy. Point the gates at
+  `touchstone.verdicts`, then drop `semantix.verdicts`.
+- **What you wrote that names it.**
+  - The command is `touchstone`. Update CI, cron jobs and MCP client configs
+    (`{"command": "touchstone", "args": ["mcp", …]}`). In an existing virtualenv, run
+    `pip uninstall semantix` before reinstalling, so no stale `semantix` command lingers.
+  - The dbt package is `integrations/dbt/touchstone`: tests are `touchstone.<test>`,
+    and the vars are `touchstone_database`, `touchstone_schema` and `touchstone_table`.
+  - Environment variables are `TOUCHSTONE_*` (`TOUCHSTONE_DATABRICKS_*`,
+    `TOUCHSTONE_QUALIFY_SQLGLOT`).
+
 ## Quickstart
 
 ```bash
@@ -34,12 +68,12 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest                      # full suite
 
-.venv/bin/semantix scan \
+.venv/bin/touchstone scan \
   --dbt examples/acme/dbt_project \
   --metrics examples/acme/metrics.yml \
   --catalog examples/acme/catalog.yml \
   --execute examples/acme/seed.sql \
-  --db out/semantix.db \
+  --db out/touchstone.db \
   --report out/acme-report.html \
   --label "acme demo estate"
 
@@ -47,7 +81,7 @@ open out/acme-report.html
 ```
 
 (`--execute` is optional; estates without dbt scan via `--sql-dir <dir>` — one SELECT
-per `.sql` file, `-- semantix: relation=…` header to override naming — and/or
+per `.sql` file, `-- touchstone: relation=…` header to override naming — and/or
 `--views dump.sql` for a file of `CREATE VIEW` statements.)
 
 The demo estate is seven compiled dbt models plus a three-metric declared ontology,
@@ -69,7 +103,7 @@ shipped warehouse driver is DuckDB, so other warehouses are read through exporte
 files.
 
 **What an experimental equality means.** Both definitions are inside the proof
-grammar of policy [`semantix-proof/2`](docs/proof-policy.md), and their proof forms
+grammar of policy [`touchstone-proof/2`](docs/proof-policy.md), and their proof forms
 are equal. A proof form comes from a short list of stated transformations (CTE
 inlining, `*` expansion, conjunct and operand ordering, `BETWEEN`, parentheses …),
 never from a general optimizer. That is what the engine checks; it is **not reported
@@ -101,8 +135,8 @@ warehouse, and definitions the scan did not read.
 | Check | What it does |
 | --- | --- |
 | `pytest` | The suite, including one regression file per external review round |
-| `semantix bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal; pairs outside the proof grammar are listed as refused, with reasons |
-| `semantix oracle` | Executes every pair the engine would certify equal, and every proof-grade query against its own proof form, on adversarial DuckDB data, compared exactly. It then executes every query the monitor's rules call conforming against its definition plus the identified variation |
+| `touchstone bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal; pairs outside the proof grammar are listed as refused, with reasons |
+| `touchstone oracle` | Executes every pair the engine would certify equal, and every proof-grade query against its own proof form, on adversarial DuckDB data, compared exactly. It then executes every query the monitor's rules call conforming against its definition plus the identified variation |
 
 ## What is implemented
 
@@ -120,9 +154,9 @@ the receipt before quoting a number, and an **open equivalence benchmark** (`ben
 
 ```bash
 # change a model's SQL, rescan into the same db, then:
-.venv/bin/semantix history net_revenue --db out/semantix.db   # valid-time intervals per site
-.venv/bin/semantix asof net_revenue --at <timestamp after your first scan> --db out/semantix.db
-.venv/bin/semantix attest net_revenue --db out/semantix.db    # semantic receipt (JSON)
+.venv/bin/touchstone history net_revenue --db out/touchstone.db   # valid-time intervals per site
+.venv/bin/touchstone asof net_revenue --at <timestamp after your first scan> --db out/touchstone.db
+.venv/bin/touchstone attest net_revenue --db out/touchstone.db    # semantic receipt (JSON)
 ```
 
 `history` flags definition changes as restatement boundaries; `asof` answers "what did
@@ -131,10 +165,10 @@ definition versions, physical lineage, known divergences — **Ed25519-signed ov
 canonical payload**, so it verifies offline:
 
 ```bash
-.venv/bin/semantix attest net_revenue --db out/semantix.db > receipt.json
-.venv/bin/semantix verify-receipt receipt.json          # tamper-evidence
-.venv/bin/semantix pubkey --db out/semantix.db          # publish; verifiers pin it
-.venv/bin/semantix verify-receipt receipt.json --public-key <that key>
+.venv/bin/touchstone attest net_revenue --db out/touchstone.db > receipt.json
+.venv/bin/touchstone verify-receipt receipt.json          # tamper-evidence
+.venv/bin/touchstone pubkey --db out/touchstone.db          # publish; verifiers pin it
+.venv/bin/touchstone verify-receipt receipt.json --public-key <that key>
 ```
 
 **Verification decays honestly.** A verdict describes the estate *at scan time*, so
@@ -144,7 +178,7 @@ sources to `attest` (`--dbt` / `--sql-dir` / `--views` / `--metrics` /
 answering:
 
 ```bash
-.venv/bin/semantix attest gmv --db out/semantix.db \
+.venv/bin/touchstone attest gmv --db out/touchstone.db \
   --dbt examples/acme/dbt_project --metrics examples/acme/metrics.yml
 # freshness: fresh — estate matches the scanned snapshot
 #   ...or, after someone edits a model without rescanning:
@@ -167,7 +201,7 @@ SQLite; production custody is a KMS behind the same two functions.
 ### Agents check the receipt (MCP)
 
 ```bash
-.venv/bin/semantix mcp --db out/semantix.db \
+.venv/bin/touchstone mcp --db out/touchstone.db \
   --dbt examples/acme/dbt_project --metrics examples/acme/metrics.yml
 ```
 
@@ -182,17 +216,17 @@ verdicts have drifted out from under them.
 
 Joins are the ontology one level down, and almost nobody declares them — FKs
 go undeclared or unenforced, so the only honest record of how tables connect is the
-SQL the BI tool actually ran. semantix mines that history, then refuses to trust it:
+SQL the BI tool actually ran. touchstone mines that history, then refuses to trust it:
 
 ```bash
-.venv/bin/semantix mine-relationships \
+.venv/bin/touchstone mine-relationships \
   --history-file examples/acme/query_history.sql \
-  --catalog examples/acme/catalog.yml --db out/semantix.db
+  --catalog examples/acme/catalog.yml --db out/touchstone.db
 # or pull history from the warehouse itself:
 #   --warehouse wh.duckdb --history-query "SELECT query_text FROM ..."
 
-.venv/bin/semantix verify-relationships \
-  --seed examples/acme/seed.sql --dbt examples/acme/dbt_project --db out/semantix.db
+.venv/bin/touchstone verify-relationships \
+  --seed examples/acme/seed.sql --dbt examples/acme/dbt_project --db out/touchstone.db
 ```
 
 ```
@@ -250,14 +284,14 @@ limitation, and labels everything else as hypothesis rather than fact.
 **Warehouses are parameterized.** `--warehouse` accepts a URL; v0 ships the DuckDB
 driver (zero-infra, fully tested, `--seed` builds an ephemeral one from a seed script
 plus your estate). A Snowflake/BigQuery/Databricks driver is `query(sql) -> rows`,
-`close()`, and a dialect attribute — [warehouse.py](src/semantix/warehouse.py) names the
+`close()`, and a dialect attribute — [warehouse.py](src/touchstone/warehouse.py) names the
 seam, and unsupported schemes say so instead of silently degrading.
 
 ### CI: only newly introduced problems
 
 ```bash
-.venv/bin/semantix scan ... --db ci.db        # on main, then again on the PR branch
-.venv/bin/semantix diff --db ci.db --markdown pr-comment.md --fail-on-new contradiction
+.venv/bin/touchstone scan ... --db ci.db        # on main, then again on the PR branch
+.venv/bin/touchstone diff --db ci.db --markdown pr-comment.md --fail-on-new contradiction
 ```
 
 `diff` compares the latest scan to the previous one and reports only *newly
@@ -273,17 +307,17 @@ operator declared **authoritative**:
 ```bash
 # A pilot package: approved metric views + their snapshots and definition windows,
 # a history export, and any session context you can vouch for (docs/pilot.md)
-.venv/bin/semantix monitor --db out/semantix.db --pilot pilot/ --dbt my_project
+.venv/bin/touchstone monitor --db out/touchstone.db --pilot pilot/ --dbt my_project
 
 # Or against the scan's declared definitions, from a history file or the warehouse
-.venv/bin/semantix monitor --db out/semantix.db --history-file history.jsonl \
+.venv/bin/touchstone monitor --db out/touchstone.db --history-file history.jsonl \
   --dbt my_project --catalog catalog.yml [--authority uc_metrics,dbt_metrics] \
   [--min-runs 2] [--fail-on-alt]
 ```
 
 Most of what it sees is a governed metric used correctly: net revenue filtered to the US,
 grouped by channel. Some of it is a definition quietly changed. It tells them apart with
-**bounded rules** (`monitor-conformance/1`, [conformance.py](src/semantix/services/conformance.py)):
+**bounded rules** (`monitor-conformance/1`, [conformance.py](src/touchstone/services/conformance.py)):
 
 Positive verdicts are suspended, so the rules' conclusions are reported one step weaker:
 
@@ -332,16 +366,16 @@ reported, not recorded.
 
 ### Advisory drift assessment (in development)
 
-`semantix monitor --export-comparisons uses.jsonl` writes one `semantix-comparison/1`
+`touchstone monitor --export-comparisons uses.jsonl` writes one `touchstone-comparison/1`
 evidence record per metric use. The statement as it ran and the authoritative
-definition come first; semantix's own reading follows as explicitly unverified
+definition come first; touchstone's own reading follows as explicitly unverified
 observations. A separate advisory classifier answers versioned per-component questions
 about those records, and fixed code aggregates the answers into `suspected_drift`,
 `insufficient_evidence` or `likely_permitted`.
 
-`semantix assess benchmark` scores a provider against 60 labeled metric uses, split
+`touchstone assess benchmark` scores a provider against 60 labeled metric uses, split
 by query family. The labels are model-authored and model-reviewed; a blind human
-review is still to come (`semantix assess review-sheet`). Two backends run:
+review is still to come (`touchstone assess review-sheet`). Two backends run:
 - a deterministic fake, which measures nothing, and the report says so;
 - **Databricks** (`ai_query` on a SQL warehouse), tested against mocked responses and
   not yet run against a workspace.
@@ -356,42 +390,42 @@ and a direct API come next. Assessments never change a finding or an exit code. 
 declared semantics as `AGENTS.*` tables inside the warehouse so AI agents can
 discover business context with plain SQL. By its own spec it carries no
 verification, no history, and no conflict resolution — a distribution rail for
-claims, which makes it both a semantix input and a semantix output:
+claims, which makes it both a touchstone input and a touchstone output:
 
 ```bash
 # In: OSI metrics + LookML measures become claims alongside the metrics YAML.
-.venv/bin/semantix scan --dbt examples/acme/dbt_project \
+.venv/bin/touchstone scan --dbt examples/acme/dbt_project \
   --metrics examples/acme/metrics.yml \
   --agents-schema examples/acme/agents_schema.json \
-  --catalog examples/acme/catalog.yml --db out/semantix.db
+  --catalog examples/acme/catalog.yml --db out/touchstone.db
 
 # Out: signed receipts written back into AGENTS.ROOT (spec §7 Phase 2), each with an
 # assessment/<concept> row saying whether its claim may be relied on (not while
 # positive verdicts are suspended), a policy/conclusions row, a skill/verify-metric
-# row teaching agents the check — and a structured semantix.verdicts projection
+# row teaching agents the check — and a structured touchstone.verdicts projection
 # (policy_status, usable_for_reliance) beside it. Rows published before the
-# suspension: `semantix publish --refresh-policy --warehouse …`.
-.venv/bin/semantix publish --db out/semantix.db --warehouse out/agents.duckdb
+# suspension: `touchstone publish --refresh-policy --warehouse …`.
+.venv/bin/touchstone publish --db out/touchstone.db --warehouse out/agents.duckdb
 ```
 
 ### Act on findings — inside rails you already triage
 
-semantix grows no alert channel of its own. `publish` projects verdicts into
-`semantix.verdicts` (one row per verdict per affected relation), and the
+touchstone grows no alert channel of its own. `publish` projects verdicts into
+`touchstone.verdicts` (one row per verdict per affected relation), and the
 estate's existing immune system gates on it: the shipped **dbt package**
-([integrations/dbt/semantix](integrations/dbt/semantix)) turns findings into
-ordinary tests (`semantix.no_contradictions`, which fails on suspected
-divergences; `semantix.certified`, which fails closed while positive verdicts
-are suspended; `semantix.fresh_scan`) with dbt-native severity that stay red
+([integrations/dbt/touchstone](integrations/dbt/touchstone)) turns findings into
+ordinary tests (`touchstone.no_contradictions`, which fails on suspected
+divergences; `touchstone.certified`, which fails closed while positive verdicts
+are suspended; `touchstone.fresh_scan`) with dbt-native severity that stay red
 until the finding is resolved — state, not a one-shot alert. Non-dbt estates gate on
 the same table through Snowflake/Databricks SQL alerts, Dagster asset
 checks, Soda/Great Expectations checks, or the CLI's exit codes in any
 scheduler — copy-paste templates in
 [docs/action-rails.md](docs/action-rails.md). The doctrinal line every rail
-shares: semantix routes, proposes, and gates; it never auto-decides which
+shares: touchstone routes, proposes, and gates; it never auto-decides which
 side of a suspected divergence is the truth.
 
-The *propose* half is `semantix propose --out proposals/`: for every
+The *propose* half is `touchstone propose --out proposals/`: for every
 suspected divergence it emits the definition the code actually computes as a
 declaration in the ontology's own format (`--format metrics|ossie|uc-metrics`)
 — Option A, the ontology drifted — and describes the code change that would
@@ -411,7 +445,7 @@ grain — and the scan surfaces both as cross-provider contradictions with blame
 same queries behind a connector, later); LookML `${TABLE}` substitution and
 `[field: "value"]` filters are translated, anything stranger degrades at
 canonicalization rather than guessing. Positioning in one line: **Agents Schema
-tells the agent what a metric means; semantix tells it whether that meaning is
+tells the agent what a metric means; touchstone tells it whether that meaning is
 true — in the same tables, over the same SQL.**
 
 ### Apache Ossie: the interchange format, verified
@@ -423,9 +457,9 @@ models, and dbt Core v1.12+ both reads `osi/` documents and emits
 Ossie documents are a first-class claims source:
 
 ```bash
-.venv/bin/semantix scan --dbt my_project \
+.venv/bin/touchstone scan --dbt my_project \
   --osi my_project/osi \        # or my_project/target/osi_document.json
-  --catalog catalog.yml --db out/semantix.db
+  --catalog catalog.yml --db out/touchstone.db
 ```
 
 Spec versions 0.1.0/0.1.1 (the released line dbt accepts) in JSON or YAML.
@@ -452,9 +486,9 @@ Databricks metric views (GA April 2026, and what dbt-databricks v1.12
 materializes) are governed measure declarations — a claims source:
 
 ```bash
-.venv/bin/semantix catalog --warehouse duckdb://wh.db --out catalog.yml
-.venv/bin/semantix scan --sql-dir models/ \
-  --uc-metrics metric_views/ --catalog catalog.yml --db out/semantix.db
+.venv/bin/touchstone catalog --warehouse duckdb://wh.db --out catalog.yml
+.venv/bin/touchstone scan --sql-dir models/ \
+  --uc-metrics metric_views/ --catalog catalog.yml --db out/touchstone.db
 ```
 
 Each `measures[]` entry becomes a claim over the view's `source`, carrying
@@ -465,28 +499,28 @@ meaning are refused with the reason, not approximated: `window:` measures
 aliases, `:parameter` references, and measures naming a declared field whose
 expression is not the identity column. Joins (with cardinality),
 parameters, and materialization schedules are disclosed as unverified.
-`semantix catalog` generates the physical catalog from any warehouse's
+`touchstone catalog` generates the physical catalog from any warehouse's
 ANSI `information_schema.columns` — regenerate it instead of hand-
 maintaining YAML that drifts.
 
 ### Prove the prover — across dialects
 
 ```bash
-.venv/bin/semantix bench
+.venv/bin/touchstone bench
 # equivalence corpus: 32 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 78.1%
 #     duckdb      10/10 detected · near-misses 11/20 · coverage 78.1% · false certs 0
 #     ...
 #   equivalence detection: 40/40 (100%)
 #   known gaps: 2 confirmed
 #   near-misses distinguished: 44/80
-#   outside the proof grammar (semantix-proof/2), refused: 0 equivalence / 36 near-miss run(s)
+#   outside the proof grammar (touchstone-proof/2), refused: 0 equivalence / 36 near-miss run(s)
 #     join-type-inner-vs-left: uses a join
 #     limit-is-not-neutral: uses LIMIT
 #     ...
 #   false equalities: 0 ✓ (experimental rules; not a certification)
 ```
 
-The equivalence corpus ships in the repo (`src/semantix/benchmark/equivalence.yaml`):
+The equivalence corpus ships in the repo (`src/touchstone/benchmark/equivalence.yaml`):
 same-math rewrite pairs the canonicalizer must prove identical, `known_gap` rewrites it
 deliberately misses toward the safe side (difference-hypothesis), and near-miss pairs
 that must never hash-equal — one false certification in **any dialect** fails the run,
@@ -524,8 +558,8 @@ canonicalizer's own output tests the same imagination that wrote the canonicaliz
 ### The execution oracle
 
 ```bash
-.venv/bin/semantix oracle            # ~740 queries, ~2,500 pairs + ~5,100 proof-form executions, ~8s
-.venv/bin/semantix oracle --full     # ~24,500 queries, ~111,500 pairs + ~139,000 proof-form executions
+.venv/bin/touchstone oracle            # ~740 queries, ~2,500 pairs + ~5,100 proof-form executions, ~8s
+.venv/bin/touchstone oracle --full     # ~24,500 queries, ~111,500 pairs + ~139,000 proof-form executions
 ```
 
 The oracle does not ask the canonicalizer whether it is right. It generates queries
@@ -543,7 +577,7 @@ surface too. A self-test requires the datasets to tell apart pairs known to
 differ, so a quiet oracle has demonstrably been able to speak. Run against `ec4baff`,
 it reports 45 false certifications covering every class above.
 
-Under [`semantix-proof/2`](docs/proof-policy.md) it also executes **every proof-grade
+Under [`touchstone-proof/2`](docs/proof-policy.md) it also executes **every proof-grade
 query against its own proof form**, the SQL the stated rules produced from it. Each
 rule is therefore challenged one query at a time, not only through the pairs that
 happen to bucket together. Inlining variants carry traps: swapped and renamed
@@ -577,7 +611,7 @@ required filter as missing; that case is now unverifiable. Current results:
 | `--full` | ~7,750 | ~62,000 | 0 | 0 | Agreement on these datasets challenges the rules; it does not
 prove them, and whether a slice is *permitted* is policy, tested by the acceptance cases.
 `MEASURE()` cannot run in DuckDB; `tests/test_databricks_integration.py` checks it on a
-real workspace when `SEMANTIX_DATABRICKS_*` is set (opt-in, not yet run).
+real workspace when `TOUCHSTONE_DATABRICKS_*` is set (opt-in, not yet run).
 
 ### What an experimental equality does not establish
 
@@ -588,7 +622,7 @@ target engine — not one clean review or pilot), a `CERTIFIED` verdict would me
 of the following, and today an experimental equality means only that the engine's
 checks below held on the tree sqlglot parsed:
 
-- Both definitions are inside the proof grammar of [`semantix-proof/2`](docs/proof-policy.md),
+- Both definitions are inside the proof grammar of [`touchstone-proof/2`](docs/proof-policy.md),
   and their proof forms are equal. Those forms come only from the policy's stated
   rules, each with its preconditions.
 - No boolean simplification, constant folding, re-association or predicate movement
@@ -596,7 +630,7 @@ checks below held on the tree sqlglot parsed:
 - Relation identity came from names the SQL wrote or from execution context the
   operator supplied (`--default-database` / `--default-schema`). It never came from a
   shared short catalog entry, whose columns are never borrowed for a longer name.
-- The parser was a qualified sqlglot version (`semantix/toolchain.py`). An
+- The parser was a qualified sqlglot version (`touchstone/toolchain.py`). An
   unqualified version withholds certification, and a new one qualifies only through
   `scripts/qualify_sqlglot.sh`, which runs the suite, the benchmark and the full
   oracle.
@@ -642,7 +676,7 @@ whitelist**, so any construct it does not read defaults to *absent*, and two def
 differing only in an unread construct hash identically. A blind spot became a
 certification.
 
-The default is now inverted ([completeness.py](src/semantix/extraction/completeness.py)).
+The default is now inverted ([completeness.py](src/touchstone/extraction/completeness.py)).
 Anything the core cannot represent marks the measure `INCOMPLETE`, which sits outside
 `PROOF_LEVELS` — it can still be reported, diffed and blamed, but can never be certified
 equal to anything, and the receipt names what could not be read. Constructs leave that
@@ -654,7 +688,7 @@ than the name). A gate that never lifts is just a refusal to verify.
 ## Layout (maps 1:1 to the spec's five layers)
 
 ```
-src/semantix/
+src/touchstone/
   adapters/         L1  dbt manifest+compiled SQL, raw-SQL dirs, view-DDL dumps,
                         metrics YAML, Agents Schema, Apache Ossie documents,
                         catalog + declared keys/relationships                  (§2)
@@ -701,7 +735,7 @@ below proof grade can't certify (`UNRESOLVED`, not a false `CERTIFIED`). The sca
 prints two coverage numbers: how much SQL parsed and qualified, and how many measures
 reached proof grade (each unreadable artifact counts as one unverifiable measure). The
 second is the one to judge readiness by. The §9 target is >85 %; the demo estate is at
-80 % under `semantix-proof/2`, because one of its five models joins two tables. Coverage used to be the first number alone, which let an estate whose only metric
+80 % under `touchstone-proof/2`, because one of its five models joins two tables. Coverage used to be the first number alone, which let an estate whose only metric
 used TABLESAMPLE report 100 % while nothing in it could be certified.
 
 In practice `qualified` almost never fires: `qualify()` fails on the same
@@ -730,10 +764,10 @@ canonical content, which is what makes aliasing detectable and renames non-event
 
 **Landed early** (Phase-0-honest cuts of Phase 1/2 items): execution against locally
 reproducible data (`scan --execute`; the full harness with warehouse creds, sampling
-windows, and cost controls is still Phase 1) · the CI bot's core (`semantix diff`
+windows, and cost controls is still Phase 1) · the CI bot's core (`touchstone diff`
 + `--fail-on-new`; the GitHub App wrapper that posts the comment remains) · the
 attestation MCP server (was Phase 2; receipt schema unchanged) · signed receipts ·
-receipt write-back into Agents Schema (`semantix publish`; DuckDB target now,
+receipt write-back into Agents Schema (`touchstone publish`; DuckDB target now,
 Snowflake connector remains) · an Agents Schema claims adapter (second-platform
 declared source: OSI + LookML) · an Apache Ossie document adapter (`scan --osi`;
 per-dialect variants as sibling claims, cross-dialect drift as contradictions).

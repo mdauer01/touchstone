@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "semantix"
+name = "touchstone"
 version = "0.1.0"
 description = "Semantic verification engine: extracts the de facto semantics of a data estate from compiled SQL and reconciles them against the declared ontology."
 readme = "README.md"
@@ -25,7 +25,7 @@ databricks = ["databricks-sql-connector>=3"]
 dev = ["pytest>=8", "ruff>=0.5", "cryptography>=42", "duckdb>=1"]
 
 [project.scripts]
-semantix = "semantix.cli:main"
+touchstone = "touchstone.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,5 +39,5 @@ line-length = 100
 target-version = "py310"
 
 [tool.setuptools.package-data]
-semantix = ["benchmark/*.yaml", "benchmark/metric_uses/*.yaml", "benchmark/metric_uses/*.md",
+touchstone = ["benchmark/*.yaml", "benchmark/metric_uses/*.yaml", "benchmark/metric_uses/*.md",
             "assess/schema.json", "assess/criteria/*.yaml"]

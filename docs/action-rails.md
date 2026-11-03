@@ -1,11 +1,11 @@
 # Action rails: gating on findings without a new alert channel
 
-semantix deliberately does not grow its own alerting. Detection that lands in
+touchstone deliberately does not grow its own alerting. Detection that lands in
 a fresh inbox becomes one more signal nobody triages; detection that lands in
-a rail the team already gates on becomes action. `semantix publish` therefore
+a rail the team already gates on becomes action. `touchstone publish` therefore
 projects every scan's verdicts into a structured warehouse table:
 
-    semantix.verdicts (scan_id, scanned_at, published_at,
+    touchstone.verdicts (scan_id, scanned_at, published_at,
                        concept, verdict, severity, summary, relation)
 
 One row per verdict per affected relation (relation is NULL when a concept
@@ -13,7 +13,7 @@ touches none). The table is a wholesale-replaced projection of the
 append-only store — read it, never write it. Everything below is the same
 one-line query dressed for a different rail.
 
-The doctrinal line all rails share: semantix routes, proposes, and gates —
+The doctrinal line all rails share: touchstone routes, proposes, and gates —
 it never auto-decides which side of a contradiction is the truth. That
 decision belongs to the owning human; the bitemporal store then records the
 resolution as a definition change.
@@ -21,7 +21,7 @@ resolution as a definition change.
 ## Propose: resolutions in the code-review rail
 
 ```bash
-semantix propose --db semantix.db --out proposals/ [--format metrics|ossie|uc-metrics]
+touchstone propose --db touchstone.db --out proposals/ [--format metrics|ossie|uc-metrics]
 gh pr create --body-file proposals/RESOLUTIONS.md   # the memo is the PR body
 ```
 
@@ -37,12 +37,12 @@ applied itself would be the verifier deciding meaning.
 
 ## dbt (the richest rail)
 
-Use the shipped package — `integrations/dbt/semantix` — for generic tests
+Use the shipped package — `integrations/dbt/touchstone` — for generic tests
 (`no_contradictions`, `certified`, `fresh_scan`) with dbt-native severity.
 `no_contradictions` fails on suspected divergences (a triage gate on a suspicion);
 `certified` fails closed while positive verdicts are suspended
 ([proof-policy.md](proof-policy.md)). After upgrading, run
-`semantix publish --refresh-policy --warehouse …` so tables published earlier carry
+`touchstone publish --refresh-policy --warehouse …` so tables published earlier carry
 the policy (`usable_for_reliance = false`) before any rail reads them.
 Failing tests block `dbt build` and flow into dbt Cloud, Elementary, and
 anything else that already consumes test results.
@@ -52,12 +52,12 @@ anything else that already consumes test results.
 Snowflake:
 
 ```sql
-CREATE ALERT semantix_contradictions
+CREATE ALERT touchstone_contradictions
   WAREHOUSE = alerting_wh
   SCHEDULE = '60 MINUTE'
-  IF (EXISTS (SELECT 1 FROM semantix.verdicts WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')))
+  IF (EXISTS (SELECT 1 FROM touchstone.verdicts WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')))
   THEN CALL SYSTEM$SEND_EMAIL(...);  -- or a notification integration
-ALTER ALERT semantix_contradictions RESUME;  -- alerts are created SUSPENDED
+ALTER ALERT touchstone_contradictions RESUME;  -- alerts are created SUSPENDED
 ```
 
 Databricks: a SQL Alert on the same SELECT, routed to the workspace's
@@ -66,7 +66,7 @@ Dataform assertion over the table (`scanned_at` is a TIMESTAMP; compare it
 against `CURRENT_TIMESTAMP()`, not a DATETIME).
 
 Two DuckDB notes: name the warehouse file anything but `agents.duckdb` or
-`semantix.duckdb`, or qualify with the catalog (`"agents".agents.root`) —
+`touchstone.duckdb`, or qualify with the catalog (`"agents".agents.root`) —
 DuckDB otherwise reports the bare `agents.root` as ambiguous. URL forms are
 `duckdb://relative/path.duckdb` and `duckdb:///absolute/path.duckdb`.
 
@@ -80,7 +80,7 @@ def no_semantic_contradictions(context) -> AssetCheckResult:
     # Relations are stored as the scan saw them — three-part on a dbt
     # project with a database, two-part otherwise — so match both forms.
     rows = warehouse.query(
-        "SELECT concept, summary FROM semantix.verdicts "
+        "SELECT concept, summary FROM touchstone.verdicts "
         "WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION') "
         "AND (lower(relation) = 'prod.analytics.fct_orders' "
         "     OR lower(relation) = 'analytics.fct_orders')")
@@ -92,8 +92,8 @@ Airflow / Prefect / cron: run the CLI as a task — the exit code is the
 integration.
 
 ```bash
-semantix scan --dbt project/ --catalog catalog.yml --fail-on contradiction
-semantix diff --fail-on-new contradiction     # PR pipelines: only NEW findings fail
+touchstone scan --dbt project/ --catalog catalog.yml --fail-on contradiction
+touchstone diff --fail-on-new contradiction     # PR pipelines: only NEW findings fail
 ```
 
 ## Data-quality frameworks
@@ -101,12 +101,12 @@ semantix diff --fail-on-new contradiction     # PR pipelines: only NEW findings 
 Soda:
 
 ```yaml
-checks for semantix.verdicts:
+checks for touchstone.verdicts:
   - failed rows:
       name: No semantic contradictions
       fail query: |
         SELECT concept, severity, summary
-        FROM semantix.verdicts WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')
+        FROM touchstone.verdicts WHERE verdict IN ('SUSPECTED_DIVERGENCE', 'CONTRADICTION')
 ```
 
 Great Expectations: `unexpected_rows_expectation` with the same query.

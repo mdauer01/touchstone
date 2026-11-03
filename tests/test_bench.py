@@ -2,8 +2,8 @@
 
 import yaml
 
-from semantix.bench import DEFAULT_CORPUS, run_bench
-from semantix.cli import main
+from touchstone.bench import DEFAULT_CORPUS, run_bench
+from touchstone.cli import main
 
 
 # Near-miss cases the completeness gate answers with "unproven" rather than a
@@ -13,7 +13,7 @@ from semantix.cli import main
 # decision not to model something — never to make a regression pass.
 KNOWN_UNMODELED: set[str] = set()
 
-# Near-misses OUTSIDE the proof grammar (semantix-proof/2): refused by policy
+# Near-misses OUTSIDE the proof grammar (touchstone-proof/2): refused by policy
 # with a named reason, never certified — the measured cost of the narrower
 # scope. Supporting one of these constructs moves it to "distinguished"; a
 # case may only be added with the grammar change that refuses it.
@@ -53,11 +53,11 @@ def test_unproven_near_misses_are_only_the_documented_gaps():
 
 def test_grammar_refusals_are_exactly_the_documented_scope():
     result = run_bench()
-    assert result["proof_policy"] == "semantix-proof/2"
+    assert result["proof_policy"] == "touchstone-proof/2"
     assert set(result["refused"]) == set(GRAMMAR_REFUSED)
     for name, why in result["refused"].items():
-        assert why.startswith(("outside the supported grammar (semantix-proof/2): ",
-                               "relation identity not established (semantix-proof/2): "))
+        assert why.startswith(("outside the supported grammar (touchstone-proof/2): ",
+                               "relation identity not established (touchstone-proof/2): "))
         assert GRAMMAR_REFUSED[name] in why, (name, why)
     # Refusals never count as detection or distinction.
     assert result["equivalence_detection"]["refused"] == []
@@ -84,7 +84,7 @@ def test_dialect_restriction():
     result = run_bench(dialects=["duckdb"])
     assert result["dialects"] == ["duckdb"]
     assert list(result["by_dialect"]) == ["duckdb"]
-    from semantix.bench import load_corpus
+    from touchstone.bench import load_corpus
     expected = sum(1 for c in load_corpus()["cases"]
                    if c.get("expect") == "equivalent" and not c.get("known_gap"))
     assert result["equivalence_detection"]["of"] == expected

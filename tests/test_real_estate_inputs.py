@@ -8,11 +8,11 @@ relation, or read a file it had no business reading.
 import json
 
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.dbt import load_dbt_detailed
-from semantix.adapters.metrics_yaml import load_metrics
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.engine import run_scan
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.dbt import load_dbt_detailed
+from touchstone.adapters.metrics_yaml import load_metrics
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.engine import run_scan
 
 from .invariants import check_scan
 

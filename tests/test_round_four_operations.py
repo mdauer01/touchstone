@@ -11,11 +11,11 @@ whole engine inert on Snowflake, Databricks and BigQuery.
 
 import pytest
 
-from semantix.cli import main
-from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import CanonLevel
-from semantix.store import Store, normalize_ts, utcnow
+from touchstone.cli import main
+from touchstone.extraction.canonicalize import canonicalize, canonicalize_sql
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import CanonLevel
+from touchstone.store import Store, normalize_ts, utcnow
 
 COLS = {"order_id": "bigint", "region": "varchar", "amount": "decimal(18,2)"}
 
@@ -149,7 +149,7 @@ def test_a_missing_manifest_is_an_error_not_a_traceback(tmp_path, capsys):
     code = main(["scan", "--dbt", str(tmp_path / "nope"),
                  "--db", str(tmp_path / "e.db")])
     assert code == 2
-    assert "semantix:" in capsys.readouterr().err
+    assert "touchstone:" in capsys.readouterr().err
 
 
 def test_a_malformed_metrics_file_names_itself(acme, tmp_path, capsys):

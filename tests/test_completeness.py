@@ -9,10 +9,10 @@ which were live false-certification paths found by an adversarial review on
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, CanonLevel, Provenance
 
 CATALOG = {
     "raw.orders": {
@@ -97,7 +97,7 @@ def test_semantically_different_measures_never_collide(name, a, b):
 
 def test_modeled_constructs_stay_proof_grade():
     """Modeling must restore proof grade — a gate that never lifts is just a
-    refusal to verify. These are inside the proof grammar (semantix-proof/2)."""
+    refusal to verify. These are inside the proof grammar (touchstone-proof/2)."""
     for sql in [
         "select customer_id, sum(amount) as m from raw.orders group by 1 having sum(amount) > 100",
         "with base as (select customer_id, amount from raw.orders where status = 'completed') "
@@ -123,7 +123,7 @@ def test_modeled_constructs_stay_proof_grade():
 ])
 def test_constructs_outside_the_proof_grammar_are_refused_by_name(sql, construct):
     """Round-six modeling let the optimizer certify these. Under
-    semantix-proof/2 they are outside the grammar: the optimizer's reading
+    touchstone-proof/2 they are outside the grammar: the optimizer's reading
     survives as a hypothesis, and the refusal names the construct."""
     f = fp(sql)
     assert f.canon_level not in PROOF_LEVELS

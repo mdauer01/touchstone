@@ -10,10 +10,10 @@ import shutil
 
 import pytest
 
-import semantix.store as store_mod
-from semantix.engine import run_scan
-from semantix.mcp import McpServer
-from semantix.store import Store, normalize_ts
+import touchstone.store as store_mod
+from touchstone.engine import run_scan
+from touchstone.mcp import McpServer
+from touchstone.store import Store, normalize_ts
 
 pytest.importorskip("duckdb")
 
@@ -84,7 +84,7 @@ def test_publish_does_not_corrupt_a_pre_existing_agents_root(acme, tmp_path):
     value into the wrong column."""
     import duckdb
 
-    from semantix.services.writeback import publish_receipts
+    from touchstone.services.writeback import publish_receipts
 
     _, store = scan(acme, tmp_path / "s.db")
 
@@ -108,7 +108,7 @@ def test_publish_does_not_corrupt_a_pre_existing_agents_root(acme, tmp_path):
     con = duckdb.connect(str(warehouse))
     rows = con.execute(
         'SELECT provider, key, content FROM "agents".agents.root '
-        "WHERE provider = 'semantix'"
+        "WHERE provider = 'touchstone'"
     ).fetchall()
     other = con.execute(
         'SELECT provider, key FROM "agents".agents.root '
@@ -121,7 +121,7 @@ def test_publish_does_not_corrupt_a_pre_existing_agents_root(acme, tmp_path):
     for provider, key, content in rows:
         # Each value must be in ITS OWN column, which a positional insert
         # into this 5-column table would have scrambled.
-        assert provider == "semantix"
+        assert provider == "touchstone"
         assert key and provider not in key
         assert content
         if key.startswith("receipt/"):

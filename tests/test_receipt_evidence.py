@@ -13,9 +13,9 @@ import re
 
 import pytest
 
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.signing import verify_receipt_dict
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.signing import verify_receipt_dict
 
 from .policy import engine_verdict
 

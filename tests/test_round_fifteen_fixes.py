@@ -15,7 +15,7 @@
    "contested". Every match candidate, and contestedness, is now drawn from
    the definitions that apply to the execution.
 
-Under the conclusions policy (semantix.conclusions) matches are reported as
+Under the conclusions policy (touchstone.conclusions) matches are reported as
 experimental and violations as suspected differences; the tests pin the
 engine's judgment through tests.policy and the reported kind beside it.
 """
@@ -28,13 +28,13 @@ import json
 import pytest
 import yaml
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.engine import run_scan
-from semantix.models import PROOF_LEVELS, VerdictType
-from semantix.services.history import read_history
-from semantix.services.monitor import build_registry, monitor_history
-from semantix.services.pilot import load_pilot
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.engine import run_scan
+from touchstone.models import PROOF_LEVELS, VerdictType
+from touchstone.services.history import read_history
+from touchstone.services.monitor import build_registry, monitor_history
+from touchstone.services.pilot import load_pilot
 
 from .policy import engine_codes, engine_funnel, engine_kind, engine_kinds
 from .test_monitor_conformance import CATALOG, GOVERNED, MODEL, VIEW, codes
@@ -56,11 +56,11 @@ def test_distinct_on_alias_key_is_resolved_into_the_core():
     assert sorted(r[0] for r in con.execute(KEYED).fetchall()) == [100.0, 900.0]
     assert [r[0] for r in con.execute(KEYED_MOD).fetchall()] == [900.0]
     a, b = _fp(KEYED), _fp(KEYED_MOD)
-    # DISTINCT ON is outside semantix-proof/2: refused by name, never proof
+    # DISTINCT ON is outside touchstone-proof/2: refused by name, never proof
     # grade. The optimizer's reading (a hypothesis, for candidates and diffs)
     # still resolves the key, so the two do not even look alike.
     assert a.canon_level not in PROOF_LEVELS and b.canon_level not in PROOF_LEVELS
-    assert a.gaps == ("outside the supported grammar (semantix-proof/2): uses DISTINCT",)
+    assert a.gaps == ("outside the supported grammar (touchstone-proof/2): uses DISTINCT",)
     assert a.core.hash() != b.core.hash()
     assert any("DISTINCT ON (SUM(" in f for f in a.core.filters)
 

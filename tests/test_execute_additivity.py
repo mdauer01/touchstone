@@ -9,9 +9,9 @@ prevent. Found by adversarial review, 2026-07-25.
 
 import pytest
 
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.execute import _is_additive
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.execute import _is_additive
 
 from .policy import engine_verdict
 

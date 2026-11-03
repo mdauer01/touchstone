@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from semantix.extraction.registry import SchemaRegistry
+from touchstone.extraction.registry import SchemaRegistry
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "acme"
 

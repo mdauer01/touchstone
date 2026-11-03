@@ -8,10 +8,10 @@ covered by the receipt signature.
 import json
 import shutil
 
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.services.freshness import check_freshness
-from semantix.signing import verify_receipt_dict
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.services.freshness import check_freshness
+from touchstone.signing import verify_receipt_dict
 
 GROWTH = "dbt_project/target/compiled/acme/models/growth/growth_net_revenue.sql"
 
@@ -221,7 +221,7 @@ def test_cli_attest_with_estate_sources(acme, tmp_path, capsys):
 
 
 def test_mcp_attest_carries_freshness(acme, tmp_path):
-    from semantix.mcp import McpServer
+    from touchstone.mcp import McpServer
 
     estate = tmp_path / "estate"
     shutil.copytree(acme, estate)

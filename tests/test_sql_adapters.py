@@ -2,12 +2,12 @@
 
 import pytest
 
-from semantix.adapters.sql_dir import load_sql_dir, load_views_file
-from semantix.engine import run_scan
+from touchstone.adapters.sql_dir import load_sql_dir, load_views_file
+from touchstone.engine import run_scan
 
 from .policy import engine_verdict
 
-FINANCE_SQL = """-- semantix: relation=analytics.finance_net_revenue
+FINANCE_SQL = """-- touchstone: relation=analytics.finance_net_revenue
 select date_trunc('month', order_date) as revenue_month,
        sum(amount - refund_amount) as net_revenue
 from analytics.fct_orders

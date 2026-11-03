@@ -13,12 +13,12 @@ import socket
 
 import pytest
 
-from semantix.assess import ADVISORY_LABELS
-from semantix.assess.criteria import CHANGED, aggregate, load
-from semantix.assess.providers import (ProviderConfig, get_provider, render_prompt)
-from semantix.assess.record import FORMAT, OBSERVATIONS_NOTE, validate, without_observations
-from semantix.assess.runner import (LABELS, UNMEASURED, build_record, gold_advisory, items,
-                                    load_dataset, run_benchmark, semantix_alone)
+from touchstone.assess import ADVISORY_LABELS
+from touchstone.assess.criteria import CHANGED, aggregate, load
+from touchstone.assess.providers import (ProviderConfig, get_provider, render_prompt)
+from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, validate, without_observations
+from touchstone.assess.runner import (LABELS, UNMEASURED, build_record, gold_advisory, items,
+                                    load_dataset, run_benchmark, touchstone_alone)
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +53,7 @@ def test_the_validator_enforces_the_schema(dataset):
                                       if k != "statement"}}
     assert any("missing statement" in e for e in validate(broken))
     assert any("unexpected field" in e for e in validate({**record, "verdict": "CERTIFIED"}))
-    assert validate({**record, "format": "semantix-comparison/0"})
+    assert validate({**record, "format": "touchstone-comparison/0"})
     claimed = {**record, "claimed_metric": {"name": None, "identity_evidence": [
         {"source": "guess", "value": "x"}]}}
     assert any("must be one of" in e for e in validate(claimed))
@@ -69,15 +69,15 @@ def test_observations_are_unverified_and_removable(dataset):
     assert validate(without_observations(record)) == []
 
 
-def test_the_prompt_puts_the_statement_and_definition_before_semantix(dataset):
+def test_the_prompt_puts_the_statement_and_definition_before_touchstone(dataset):
     item = items(dataset)[0][1]
     record = build_record(dataset, item, {"finding_kind": "unverifiable"})
     prompt = render_prompt(record, load(1))
     i_stmt = prompt.index("## Statement as it ran")
     i_def = prompt.index("## Authoritative definition")
-    i_obs = prompt.index("## semantix's observations — UNVERIFIED")
+    i_obs = prompt.index("## touchstone's observations — UNVERIFIED")
     assert i_stmt < i_def < i_obs < prompt.index("## Questions")
-    assert "## semantix's observations" not in render_prompt(without_observations(record),
+    assert "## touchstone's observations" not in render_prompt(without_observations(record),
                                                              load(1))
 
 
@@ -161,17 +161,17 @@ def test_a_fake_run_reports_the_machinery_and_says_performance_is_unmeasured(dat
     assert "with_observations" not in report["arms"]
 
 
-def test_observations_add_the_ablation_and_the_semantix_alone_baseline(dataset):
+def test_observations_add_the_ablation_and_the_touchstone_alone_baseline(dataset):
     obs = {i["id"]: {"finding_kind": "suspected_difference"} for _, i in items(dataset, "dev")}
     report = run_benchmark(get_provider(ProviderConfig("fake")), dataset=dataset,
                            split="dev", observations=obs)
     assert set(report["arms"]) == {"without_observations", "with_observations"}
-    alone = report["baselines"]["semantix_observations_alone"]
+    alone = report["baselines"]["touchstone_observations_alone"]
     assert alone["drift"]["flagged"]["count"] == alone["drift"]["of"]   # flags everything
     assert alone["drift"]["labeled_permitted"]["count"] == 0
-    assert semantix_alone({"finding_kind": "unverifiable",
+    assert touchstone_alone({"finding_kind": "unverifiable",
                            "experimental": {"kind": "conforming_use"}}) == "likely_permitted"
-    assert semantix_alone(None) == "insufficient_evidence"
+    assert touchstone_alone(None) == "insufficient_evidence"
 
 
 # ------------------------------------------------- the monitor's export
@@ -183,12 +183,12 @@ def test_the_monitor_exports_valid_records_with_the_statement_as_it_ran(tmp_path
            f"WHERE status = 'completed' AND country = 'US'")
     result = run(tmp_path, _rows(sql, sql.replace("AND country = 'US'", "")))
     assert "comparisons" not in result          # only when asked
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.services.pilot import load_pilot
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.services.pilot import load_pilot
 
     from .test_monitor_conformance import make_pilot
 
@@ -218,7 +218,7 @@ def test_the_monitor_exports_valid_records_with_the_statement_as_it_ran(tmp_path
 
 
 def test_the_cli_writes_comparisons_and_the_benchmark_report(tmp_path, capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     out = tmp_path / "report.json"
     assert main(["assess", "benchmark", "--split", "dev", "--json", str(out)]) == 0
@@ -232,7 +232,7 @@ def test_the_cli_writes_comparisons_and_the_benchmark_report(tmp_path, capsys):
 def test_the_blind_pass_covers_every_item_and_every_disagreement_is_adjudicated(dataset):
     import yaml
 
-    from semantix.assess.runner import DATASET_DIR
+    from touchstone.assess.runner import DATASET_DIR
 
     blind = {b["id"]: b["label"] for b in
              yaml.safe_load((DATASET_DIR / "blind_labels.yaml").read_text())["items"]}
@@ -254,7 +254,7 @@ def test_every_field_that_decides_an_answer_reaches_the_prompt(dataset):
     """temp-01 and temp-02 differ ONLY in the temp view an earlier session
     statement created (one drops nonpositive amounts, one passes everything
     through); they are labeled drift and permitted. Their prompts were
-    identical without semantix's observations."""
+    identical without touchstone's observations."""
     by_id = {i["id"]: i for _, i in items(dataset)}
     p1 = render_prompt(build_record(dataset, by_id["temp-01"]), load(1))
     p2 = render_prompt(build_record(dataset, by_id["temp-02"]), load(1))
@@ -276,7 +276,7 @@ def test_every_field_that_decides_an_answer_reaches_the_prompt(dataset):
 
 
 def test_the_model_and_the_monitor_baseline_see_the_same_execution(dataset):
-    from semantix.assess.runner import execution_context
+    from touchstone.assess.runner import execution_context
 
     for _, item in items(dataset):
         record = build_record(dataset, item)
@@ -288,7 +288,7 @@ def test_the_model_and_the_monitor_baseline_see_the_same_execution(dataset):
 
 
 def test_the_dataset_policy_is_the_readme_policy(dataset):
-    from semantix.assess.runner import DATASET_DIR
+    from touchstone.assess.runner import DATASET_DIR
 
     readme = " ".join((DATASET_DIR / "README.md").read_text().split())
     assert " ".join(dataset["definitions"]["policy"].split()) in readme
@@ -297,7 +297,7 @@ def test_the_dataset_policy_is_the_readme_policy(dataset):
 def test_undecided_drift_is_never_reported_as_caught():
     """Abstaining on every drift reassured no one wrongly — and caught
     nothing. All three are reported together."""
-    from semantix.assess.runner import _Fixed, _metrics, _row
+    from touchstone.assess.runner import _Fixed, _metrics, _row
 
     m = _metrics([_row("suspected_drift", _Fixed("insufficient_evidence"))] * 15)
     assert m["drift"]["of"] == 15
@@ -309,7 +309,7 @@ def test_undecided_drift_is_never_reported_as_caught():
 
 
 def test_the_cli_reports_flagged_permitted_and_undecided(capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     assert main(["assess", "benchmark", "--split", "test"]) == 0
     out = capsys.readouterr().out
@@ -319,8 +319,8 @@ def test_the_cli_reports_flagged_permitted_and_undecided(capsys):
 
 def test_the_review_sheet_is_blind_and_flags_what_needs_a_human(dataset, tmp_path):
 
-    from semantix.assess.runner import review_sheet
-    from semantix.cli import main
+    from touchstone.assess.runner import review_sheet
+    from touchstone.cli import main
 
     rows = review_sheet(dataset)
     assert len(rows) == len(items(dataset))
@@ -339,7 +339,7 @@ def test_the_review_sheet_is_blind_and_flags_what_needs_a_human(dataset, tmp_pat
 def test_compare_labels_reports_every_disagreement_and_changes_nothing(dataset, tmp_path):
     import csv
 
-    from semantix.cli import main
+    from touchstone.cli import main
 
     out = tmp_path / "sheet.csv"
     main(["assess", "review-sheet", "--out", str(out)])
@@ -367,7 +367,7 @@ def test_the_sheet_does_not_depend_on_the_labels(dataset):
     import copy
     import random
 
-    from semantix.assess.runner import review_sheet
+    from touchstone.assess.runner import review_sheet
 
     shuffled = copy.deepcopy(dataset)
     labels = [i["label"] for _, i in items(shuffled)]
@@ -379,7 +379,7 @@ def test_the_sheet_does_not_depend_on_the_labels(dataset):
 
 
 def test_the_guide_carries_what_the_labels_rest_on(tmp_path):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     out = tmp_path / "s.csv"
     assert main(["assess", "review-sheet", "--out", str(out)]) == 0
@@ -398,7 +398,7 @@ def test_the_guide_carries_what_the_labels_rest_on(tmp_path):
 def _sheet(tmp_path, mutate, encoding="utf-8", header=None):
     import csv
 
-    from semantix.assess.runner import REVIEW_COLUMNS, review_sheet
+    from touchstone.assess.runner import REVIEW_COLUMNS, review_sheet
 
     ds = load_dataset()
     rows = review_sheet(ds)
@@ -417,7 +417,7 @@ def _sheet(tmp_path, mutate, encoding="utf-8", header=None):
 
 
 def test_compare_labels_counts_distinct_ids_and_reports_duplicates(tmp_path, capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     def dup(rows):
         first = dict(rows[0])
@@ -434,8 +434,8 @@ def test_compare_labels_counts_distinct_ids_and_reports_duplicates(tmp_path, cap
 
 
 def test_compare_labels_reads_excel_sheets_and_refuses_unreadable_ones(tmp_path, capsys):
-    from semantix.assess.runner import REVIEW_COLUMNS
-    from semantix.cli import main
+    from touchstone.assess.runner import REVIEW_COLUMNS
+    from touchstone.cli import main
 
     assert main(["assess", "compare-labels",
                  str(_sheet(tmp_path, lambda r: r, encoding="utf-8-sig"))]) == 0
@@ -450,7 +450,7 @@ def test_compare_labels_reads_excel_sheets_and_refuses_unreadable_ones(tmp_path,
 # ------------------------------------------- evidence (round-18 review)
 
 def test_the_stated_facts_reach_the_prompt_and_match_the_readme(dataset):
-    from semantix.assess.runner import DATASET_DIR
+    from touchstone.assess.runner import DATASET_DIR
 
     readme = " ".join((DATASET_DIR / "README.md").read_text().replace("**", "").split())
     by_id = {i["id"]: i for _, i in items(dataset)}
@@ -478,7 +478,7 @@ def test_relations_read_through_the_session_have_their_schemas(dataset):
     ("temp-04", ["orders"], None),                     # nothing fixes its catalog
 ])
 def test_the_session_resolves_what_the_statement_reads(dataset, item_id, reads, context):
-    from semantix.assess.runner import session_reads
+    from touchstone.assess.runner import session_reads
 
     by_id = {i["id"]: i for _, i in items(dataset)}
     record = build_record(dataset, by_id[item_id])
@@ -492,7 +492,7 @@ def test_the_session_resolves_what_the_statement_reads(dataset, item_id, reads, 
 
 
 def test_use_drop_and_alter_read_nothing(dataset):
-    from semantix.assess.runner import session_reads
+    from touchstone.assess.runner import session_reads
 
     item = {"id": "x", "metric": "net_revenue",
             "session": ["SET spark.sql.ansi.enabled = false",
@@ -518,7 +518,7 @@ def test_prompts_carry_no_identity_that_decides_nothing(dataset):
     ({}, "2026-09-01T12:00:00Z"),
 ])
 def test_the_execution_time_is_inside_any_window(applies, expect):
-    from semantix.assess.runner import execution_time
+    from touchstone.assess.runner import execution_time
 
     assert execution_time({"definitions": {"applies": applies}}) == expect
 
@@ -528,7 +528,7 @@ def test_a_zone_less_window_is_refused_clearly(tmp_path):
 
     import yaml
 
-    from semantix.assess.runner import DATASET_DIR
+    from touchstone.assess.runner import DATASET_DIR
 
     copy = tmp_path / "ds"
     shutil.copytree(DATASET_DIR, copy)
@@ -547,7 +547,7 @@ def test_the_execution_time_is_inside_the_window_or_the_dataset_is_refused(tmp_p
 
     import yaml
 
-    from semantix.assess.runner import DATASET_DIR, execution_time
+    from touchstone.assess.runner import DATASET_DIR, execution_time
 
     ds = {"definitions": {"applies": {"from": "2026-09-01T18:00:00Z", "to": None}}}
     assert execution_time(ds) == "2026-09-02T06:00:00Z"
@@ -564,7 +564,7 @@ def test_the_execution_time_is_inside_the_window_or_the_dataset_is_refused(tmp_p
 
 
 def test_a_finding_without_a_concept_reaches_the_observations(dataset):
-    from semantix.assess.runner import observations_from_monitor
+    from touchstone.assess.runner import observations_from_monitor
 
     obs = observations_from_monitor(dataset, "dev")
     assert obs["temp-01"]["finding_kind"] == "unverifiable"
@@ -583,7 +583,7 @@ class _Broken:
         self.fail = fail
 
     def assess(self, records, criteria):
-        from semantix.assess.providers import Assessment
+        from touchstone.assess.providers import Assessment
 
         return [Assessment(record_id=r["record_id"], provider="broken", model="m",
                            criteria_version=1, answers={}, label="insufficient_evidence",
@@ -617,8 +617,8 @@ def test_a_partial_outage_is_partial_and_scored_only_on_answers(dataset):
 
 
 def test_the_cli_exits_nonzero_when_nothing_answered(capsys, monkeypatch):
-    from semantix import cli
-    from semantix.assess import providers
+    from touchstone import cli
+    from touchstone.assess import providers
 
     monkeypatch.setattr(providers, "get_provider", lambda config: _Broken())
     assert cli.main(["assess", "benchmark", "--split", "test"]) == 1
@@ -628,9 +628,9 @@ def test_the_cli_exits_nonzero_when_nothing_answered(capsys, monkeypatch):
 
 
 def test_a_refused_credential_exits_2_without_a_traceback(capsys, monkeypatch):
-    from semantix import cli
-    from semantix.assess import providers
-    from semantix.assess.providers.databricks import DatabricksAuthError
+    from touchstone import cli
+    from touchstone.assess import providers
+    from touchstone.assess.providers.databricks import DatabricksAuthError
 
     class Refused(_Broken):
         def assess(self, records, criteria):
@@ -641,7 +641,7 @@ def test_a_refused_credential_exits_2_without_a_traceback(capsys, monkeypatch):
 
 
 def test_every_report_carries_label_provenance_and_calibration_counts(dataset, capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     report = run_benchmark(get_provider(ProviderConfig("fake")), dataset=dataset,
                            split="test")
@@ -662,17 +662,17 @@ def test_unreported_latency_and_cost_are_not_zero(dataset):
     obs = {i["id"]: {"finding_kind": "suspected_difference"} for _, i in items(dataset, "dev")}
     report = run_benchmark(get_provider(ProviderConfig("fake")), dataset=dataset,
                            split="dev", observations=obs)
-    alone = report["baselines"]["semantix_observations_alone"]
+    alone = report["baselines"]["touchstone_observations_alone"]
     assert alone["latency_ms"] is None and alone["cost_usd"] is None
     assert set(alone["by_family"]) == set(report["families"])
 
 
 def test_another_metrics_finding_is_not_this_uses_reading(dataset):
-    """An item about net_revenue whose SQL computes gross_revenue: semantix's
+    """An item about net_revenue whose SQL computes gross_revenue: touchstone's
     finding is about gross_revenue, and must not stand as its reading of the
     net_revenue use (it made 'labeled permitted' out of another metric's
     experimental match)."""
-    from semantix.assess.runner import observations_from_monitor
+    from touchstone.assess.runner import observations_from_monitor
 
     item = {"id": "probe-01", "metric": "net_revenue", "label": "identity_mismatch",
             "rationale": "computes gross revenue under another name",
@@ -682,13 +682,13 @@ def test_another_metrics_finding_is_not_this_uses_reading(dataset):
     obs = observations_from_monitor(ds)["probe-01"]
     experimental = obs.get("experimental") or {}
     assert "gross_revenue" not in json.dumps(experimental)
-    assert semantix_alone(obs) != "likely_permitted"
+    assert touchstone_alone(obs) != "likely_permitted"
 
 
 def test_exported_session_notes_say_what_is_uncertain():
     from types import SimpleNamespace
 
-    from semantix.services.monitor import _how_related
+    from touchstone.services.monitor import _how_related
 
     ex = SimpleNamespace(session_id="S")
     log = SimpleNamespace(row=0, session=None, ts=None)
@@ -706,12 +706,12 @@ def test_exported_session_notes_say_what_is_uncertain():
 
 
 class _Odd(_Broken):
-    """Fails every call that carries semantix's observations; otherwise answers
+    """Fails every call that carries touchstone's observations; otherwise answers
     — with a label outside the vocabulary on the first record and an
     out-of-range confidence on the second."""
 
     def assess(self, records, criteria):
-        from semantix.assess.providers import Assessment
+        from touchstone.assess.providers import Assessment
 
         out = []
         for i, r in enumerate(records):
@@ -725,8 +725,8 @@ class _Odd(_Broken):
 
 
 def test_each_arm_says_whether_it_measured_anything(dataset, capsys, monkeypatch):
-    from semantix import cli
-    from semantix.assess import providers
+    from touchstone import cli
+    from touchstone.assess import providers
 
     obs = {i["id"]: {"finding_kind": None} for _, i in items(dataset, "test")}
     report = run_benchmark(_Odd(), dataset=dataset, split="test", observations=obs)
@@ -748,7 +748,7 @@ def test_each_arm_says_whether_it_measured_anything(dataset, capsys, monkeypatch
 
 
 def test_compare_labels_survives_short_rows_and_names_conflicts(tmp_path, capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     short = tmp_path / "short.csv"
     short.write_text("label,id\ngrain_drift\nformula_drift,bogus-1\npermitted_variation,time-01\n")
@@ -762,24 +762,24 @@ def test_compare_labels_survives_short_rows_and_names_conflicts(tmp_path, capsys
 
 
 def test_a_report_json_that_cannot_be_written_is_an_error_not_a_traceback(tmp_path, capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     assert main(["assess", "benchmark", "--split", "test", "--json", str(tmp_path)]) == 2
     assert "could not write the report JSON" in capsys.readouterr().err
 
 
 def test_the_baseline_never_calls_an_experimental_match_confirmed(capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     main(["assess", "benchmark", "--split", "test", "--with-observations"])
     out = capsys.readouterr().out
-    baseline = out[out.index("baseline: semantix observations alone"):]
+    baseline = out[out.index("baseline: touchstone observations alone"):]
     assert "labeled permitted (experimental matches) 9/12" in baseline
     assert "confirmed" not in baseline
 
 
 def test_compare_labels_names_no_single_cause_for_an_unscorable_sheet(tmp_path, capsys):
-    from semantix.cli import main
+    from touchstone.cli import main
 
     sheet = tmp_path / "unknown.csv"
     sheet.write_text("id,label\nslice-99,grain_drift\n")
@@ -822,7 +822,7 @@ def test_compare_labels_names_no_single_cause_for_an_unscorable_sheet(tmp_path, 
      ["main.finance.orders"], None),
 ])
 def test_session_reads_follows_the_engine_and_the_monitor(dataset, session, sql, reads, context):
-    from semantix.assess.runner import session_reads
+    from touchstone.assess.runner import session_reads
 
     item = {"id": "x", "metric": "net_revenue", "session": session,
             "sql": sql if sql.startswith("WITH") else f"SELECT SUM(amount) AS net_revenue {sql}"}
@@ -840,7 +840,7 @@ def test_the_governed_view_and_the_permitted_filters_reach_the_prompt(dataset):
 
 
 def test_offset_windows_are_placed_in_utc():
-    from semantix.assess.runner import execution_time
+    from touchstone.assess.runner import execution_time
 
     assert execution_time({"definitions": {"applies": {"from": "2026-09-01T00:00:00+02:00"}}}) \
         == "2026-09-01T10:00:00Z"
@@ -851,7 +851,7 @@ def test_offset_windows_are_placed_in_utc():
 def test_a_window_with_only_an_end_runs_with_observations_and_unquoted_instants_load(tmp_path):
     import shutil
 
-    from semantix.assess.runner import DATASET_DIR, observations_from_monitor
+    from touchstone.assess.runner import DATASET_DIR, observations_from_monitor
 
     copy = tmp_path / "ds"
     shutil.copytree(DATASET_DIR, copy)
@@ -867,7 +867,7 @@ def test_a_window_with_only_an_end_runs_with_observations_and_unquoted_instants_
 
 
 def test_a_use_read_as_another_metric_says_so(dataset):
-    from semantix.assess.runner import observations_from_monitor
+    from touchstone.assess.runner import observations_from_monitor
 
     item = {"id": "probe-02", "metric": "net_revenue", "label": "identity_mismatch",
             "rationale": "computes gross revenue",
@@ -886,8 +886,8 @@ def test_exported_session_events_are_bounded_on_a_session_less_history():
 
     import sqlglot
 
-    from semantix.services.monitor import _run_record
-    from semantix.services.session import SessionEvent
+    from touchstone.services.monitor import _run_record
+    from touchstone.services.session import SessionEvent
 
     events = [SessionEvent(row=i, index=0, session=None, ts=f"2026-10-02T10:{i:02d}:00Z",
                            what="SET", names=None, text=f"SET x.y = {i}") for i in range(60)]
@@ -930,8 +930,8 @@ def test_session_statements_never_export_credentials(tmp_path):
 
     import sqlglot
 
-    from semantix.services.monitor import _run_record
-    from semantix.services.session import SessionEvent
+    from touchstone.services.monitor import _run_record
+    from touchstone.services.session import SessionEvent
 
     secret = "FAKEKEY0000notarealsecret0000"
     texts = [f"SET fs.azure.account.key.acct.dfs.core.windows.net = {secret}",
@@ -953,12 +953,12 @@ def test_session_statements_never_export_credentials(tmp_path):
 
 
 def test_the_baseline_json_never_calls_an_experimental_match_confirmed():
-    from semantix.assess.runner import observations_from_monitor
+    from touchstone.assess.runner import observations_from_monitor
 
     ds = load_dataset()
     report = run_benchmark(get_provider(ProviderConfig("fake")), dataset=ds, split="test",
                            observations=observations_from_monitor(ds, "test"))
-    alone = report["baselines"]["semantix_observations_alone"]
+    alone = report["baselines"]["touchstone_observations_alone"]
     assert "confirmed" not in alone["permitted"]
     assert alone["permitted"]["labeled_permitted"]["count"] == 9
     assert "experimental" in alone["positive_readings"]
@@ -970,7 +970,7 @@ def test_the_baseline_json_never_calls_an_experimental_match_confirmed():
 def test_the_benchmark_dataset_refuses_a_key_written_twice(tmp_path):
     import shutil
 
-    from semantix.assess.runner import DATASET_DIR, load_dataset
+    from touchstone.assess.runner import DATASET_DIR, load_dataset
 
     copy = tmp_path / "ds"
     shutil.copytree(DATASET_DIR, copy)

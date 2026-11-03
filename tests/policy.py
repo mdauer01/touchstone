@@ -1,6 +1,6 @@
 """Reading the ENGINE's judgment under the conclusions policy.
 
-While positive verdicts are suspended (semantix.conclusions), users see
+While positive verdicts are suspended (touchstone.conclusions), users see
 experimental comparisons and suspected differences; the engine's own result
 travels beside them. Tests that pin the engine's judgment — "never
 conforming", "a violation with code X", "certifies these two" — read it
@@ -10,7 +10,7 @@ and neither assertion is weakened.
 
 from __future__ import annotations
 
-from semantix.models import VerdictType
+from touchstone.models import VerdictType
 
 
 def _evidence(v) -> dict:

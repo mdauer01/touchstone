@@ -1,8 +1,8 @@
 """Semantic blame: verdicts name the exact clause that diverges."""
 
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.blame import blame_members
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.blame import blame_members
 
 from .policy import engine_verdict
 

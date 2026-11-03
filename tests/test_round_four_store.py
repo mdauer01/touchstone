@@ -12,16 +12,16 @@ import shutil
 
 import pytest
 
-from semantix.engine import run_scan
-from semantix.signing import verify_receipt_dict
-from semantix.store import Store
+from touchstone.engine import run_scan
+from touchstone.signing import verify_receipt_dict
+from touchstone.store import Store
 
 from .policy import engine_verdict
 
 
 @pytest.fixture
 def clock(monkeypatch):
-    import semantix.store as store_mod
+    import touchstone.store as store_mod
     times = iter([f"2026-0{m}-01T00:00:00Z" for m in range(1, 9)])
     now = {"t": next(times)}
     monkeypatch.setattr(store_mod, "utcnow", lambda: now["t"])
@@ -177,7 +177,7 @@ def test_a_stale_freshness_block_blocks_certification(acme, tmp_path, clock):
 def test_an_empty_pin_is_refused_at_the_api(tmp_path):
     """Same rule, exercised without a store: an empty pin must never silently
     downgrade to the embedded key."""
-    from semantix.signing import ALG
+    from touchstone.signing import ALG
     fake = {"signature": {"alg": ALG, "signature": "x", "public_key": "y"}}
     ok, detail = verify_receipt_dict(fake, public_key_b64="")
     assert ok is False

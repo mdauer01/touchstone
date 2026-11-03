@@ -5,18 +5,18 @@ approved metric view) rests on one assumption about the Databricks runtime:
 that `MEASURE(m)` over a metric view, filtered and grouped by its
 dimensions, computes the view's declared measure over its source under the
 view filter AND those slices. These tests execute both sides on a real
-workspace and require exact agreement, and they check that semantix's rules
+workspace and require exact agreement, and they check that touchstone's rules
 call the governed query conforming in the first place.
 
 Skipped unless all of these are set (nothing here runs in CI):
 
-    SEMANTIX_DATABRICKS_HOST       workspace host, e.g. dbc-xxxx.cloud.databricks.com
-    SEMANTIX_DATABRICKS_HTTP_PATH  SQL warehouse HTTP path
-    SEMANTIX_DATABRICKS_TOKEN      access token
-    SEMANTIX_DATABRICKS_SCHEMA     a writable catalog.schema for test objects
+    TOUCHSTONE_DATABRICKS_HOST       workspace host, e.g. dbc-xxxx.cloud.databricks.com
+    TOUCHSTONE_DATABRICKS_HTTP_PATH  SQL warehouse HTTP path
+    TOUCHSTONE_DATABRICKS_TOKEN      access token
+    TOUCHSTONE_DATABRICKS_SCHEMA     a writable catalog.schema for test objects
 
 and `pip install -e '.[databricks]'`. The tests create and drop
-`semantix_it_orders` and `semantix_it_revenue_mv` in that schema. Status:
+`touchstone_it_orders` and `touchstone_it_revenue_mv` in that schema. Status:
 written against the metric-view YAML 1.1 spec; NOT YET RUN against a
 workspace — the first run is what qualifies them.
 """
@@ -31,16 +31,21 @@ import pytest
 import sqlglot
 import yaml
 
-from semantix.adapters.uc_metrics import _read_view
-from semantix.engine import build_claim
-from semantix.extraction.registry import SchemaRegistry
-from semantix.services.conformance import Authority, check_metric_view
+from touchstone.adapters.uc_metrics import _read_view
+from touchstone.engine import build_claim
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.services.conformance import Authority, check_metric_view
 
-_ENV = ("SEMANTIX_DATABRICKS_HOST", "SEMANTIX_DATABRICKS_HTTP_PATH",
-        "SEMANTIX_DATABRICKS_TOKEN", "SEMANTIX_DATABRICKS_SCHEMA")
+_ENV = ("TOUCHSTONE_DATABRICKS_HOST", "TOUCHSTONE_DATABRICKS_HTTP_PATH",
+        "TOUCHSTONE_DATABRICKS_TOKEN", "TOUCHSTONE_DATABRICKS_SCHEMA")
+# The variables' names before the project was renamed: set, they would skip
+# these tests without a word about why.
+_FORMER = [k.replace("TOUCHSTONE_", "SEMANTIX_", 1) for k in _ENV
+           if os.environ.get(k.replace("TOUCHSTONE_", "SEMANTIX_", 1))]
 pytestmark = pytest.mark.skipif(
     not all(os.environ.get(k) for k in _ENV),
-    reason="Databricks integration tests are opt-in: set " + ", ".join(_ENV))
+    reason="Databricks integration tests are opt-in: set " + ", ".join(_ENV)
+    + (f" ({', '.join(_FORMER)} found: rename them)" if _FORMER else ""))
 
 ROWS = [
     # amount, refund_amount, status, country, channel, order_date
@@ -74,11 +79,11 @@ measures:
 @pytest.fixture(scope="module")
 def workspace():
     sql = pytest.importorskip("databricks.sql")
-    schema = os.environ["SEMANTIX_DATABRICKS_SCHEMA"]
-    orders, view = f"{schema}.semantix_it_orders", f"{schema}.semantix_it_revenue_mv"
-    con = sql.connect(server_hostname=os.environ["SEMANTIX_DATABRICKS_HOST"],
-                      http_path=os.environ["SEMANTIX_DATABRICKS_HTTP_PATH"],
-                      access_token=os.environ["SEMANTIX_DATABRICKS_TOKEN"])
+    schema = os.environ["TOUCHSTONE_DATABRICKS_SCHEMA"]
+    orders, view = f"{schema}.touchstone_it_orders", f"{schema}.touchstone_it_revenue_mv"
+    con = sql.connect(server_hostname=os.environ["TOUCHSTONE_DATABRICKS_HOST"],
+                      http_path=os.environ["TOUCHSTONE_DATABRICKS_HTTP_PATH"],
+                      access_token=os.environ["TOUCHSTONE_DATABRICKS_TOKEN"])
     cur = con.cursor()
     cur.execute(f"CREATE OR REPLACE TABLE {orders} (amount DOUBLE, refund_amount DOUBLE, "
                 f"status STRING, country STRING, channel STRING, order_date DATE)")
@@ -109,9 +114,9 @@ def _rows(cur, sql):
 
 
 def _conforms(view, sql, orders):
-    """semantix's own verdict on the governed query."""
+    """touchstone's own verdict on the governed query."""
     specs, skipped = [], []
-    _read_view(Path("semantix_it_revenue_mv.yaml"),
+    _read_view(Path("touchstone_it_revenue_mv.yaml"),
                yaml.safe_load(VIEW_YAML.format(orders=orders)), "databricks", specs, skipped)
     (spec,) = specs
     registry = SchemaRegistry({orders: {"amount": "DOUBLE", "refund_amount": "DOUBLE",

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from semantix.extraction import parse_agreement as pa
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import CanonLevel
+from touchstone.extraction import parse_agreement as pa
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import CanonLevel
 
 pytest.importorskip("duckdb")
 
@@ -122,11 +122,11 @@ def test_proof_grade_forms_record_their_check_from_the_original_text():
 
 
 def test_experimental_comparisons_carry_the_detector_summary(tmp_path):
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
 
     (tmp_path / "models").mkdir()
     (tmp_path / "models" / "m.sql").write_text(
-        "-- semantix: relation=db.main.m\nSELECT SUM(amount) AS m FROM db.main.t\n")
+        "-- touchstone: relation=db.main.m\nSELECT SUM(amount) AS m FROM db.main.t\n")
     (tmp_path / "metrics.yml").write_text(
         "version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n    expr: \"sum(amount)\"\n")
     (tmp_path / "catalog.yml").write_text("db:\n  main:\n    t:\n      amount: DOUBLE\n")
@@ -145,7 +145,7 @@ def test_experimental_comparisons_carry_the_detector_summary(tmp_path):
 
 
 def test_the_oracle_counts_the_detector_and_fails_on_a_proof_grade_disagreement():
-    from semantix import oracle
+    from touchstone import oracle
 
     report = oracle.run_oracle()
     assert report.parse_checks.get(pa.DISAGREES, 0) >= 5   # the refused blind spots

@@ -12,13 +12,13 @@ import time
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import Provenance, VerdictType
-from semantix.services.blame import blame_members
-from semantix.services.execute import _relations_read, _same_relation
-from semantix.services.relationships import edge_status
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import Provenance, VerdictType
+from touchstone.services.blame import blame_members
+from touchstone.services.execute import _relations_read, _same_relation
+from touchstone.services.relationships import edge_status
 
 from .policy import engine_verdict
 
@@ -53,9 +53,9 @@ def test_an_n_to_m_over_sparse_data_still_fails(tmp_path):
     evidence floor even when the column is mostly NULL. Classifying it as
     inconclusive would let a row-multiplying join through."""
     pytest.importorskip("duckdb")
-    from semantix.services.relationships import record_declared, verify_edges
-    from semantix.store import Store
-    from semantix.warehouse import DuckDBWarehouse
+    from touchstone.services.relationships import record_declared, verify_edges
+    from touchstone.store import Store
+    from touchstone.warehouse import DuckDBWarehouse
 
     store = Store(tmp_path / "rel.db")
 
@@ -112,7 +112,7 @@ def test_a_certification_is_measured_against_the_data(acme, tmp_path):
     and it was pointed exclusively at CONTRADICTION — the one verdict class
     that does not need falsifying. Certifications must be measured too."""
     pytest.importorskip("duckdb")
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
 
     result, _ = run_scan(
         dbt_path=str(acme / "dbt_project"),
@@ -138,8 +138,8 @@ def test_a_falsified_certification_is_withdrawn(tmp_path):
     found — the corpus reports zero false certifications, so a genuine
     collision does not exist to test with."""
     pytest.importorskip("duckdb")
-    from semantix.models import Concept, Fingerprint, SemanticCore, Verdict
-    from semantix.services.execute import annotate_with_execution
+    from touchstone.models import Concept, Fingerprint, SemanticCore, Verdict
+    from touchstone.services.execute import annotate_with_execution
 
     core = SemanticCore(measure_expr="SUM(amount)", source_columns=("raw.orders.amount",))
 

@@ -20,16 +20,16 @@ import json
 
 import pytest
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.mcp import McpServer
-from semantix.models import PROOF_LEVELS, Provenance, VerdictType
-from semantix.services.monitor import build_registry, monitor_history
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.mcp import McpServer
+from touchstone.models import PROOF_LEVELS, Provenance, VerdictType
+from touchstone.services.monitor import build_registry, monitor_history
 
 from .policy import engine_kinds, engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, VIEW, _rows, codes, run
@@ -120,7 +120,7 @@ def _estate(tmp_path, models: dict[str, str]):
     d = tmp_path / "models"
     d.mkdir()
     for name, sql in models.items():
-        (d / f"{name}.sql").write_text(f"-- semantix: relation=analytics.{name}\n{sql}\n")
+        (d / f"{name}.sql").write_text(f"-- touchstone: relation=analytics.{name}\n{sql}\n")
     (tmp_path / "catalog.yml").write_text(CATALOG_YML)
     return d
 
@@ -166,7 +166,7 @@ def certified(tmp_path):
     models = tmp_path / "models"
     models.mkdir()
     model = models / "m.sql"
-    model.write_text("-- semantix: relation=db.main.m\nSELECT SUM(amount) AS m FROM db.main.t\n")
+    model.write_text("-- touchstone: relation=db.main.m\nSELECT SUM(amount) AS m FROM db.main.t\n")
     (tmp_path / "catalog.yml").write_text("db:\n  main:\n    t:\n      amount: DOUBLE\n")
     (tmp_path / "metrics.yml").write_text(
         "version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n    expr: \"sum(amount)\"\n")
@@ -186,7 +186,7 @@ def _call(server, name, args):
 
 def _edit(c):
     c["model"].write_text(
-        "-- semantix: relation=db.main.m\nSELECT SUM(amount) * 2 AS m FROM db.main.t\n")
+        "-- touchstone: relation=db.main.m\nSELECT SUM(amount) * 2 AS m FROM db.main.t\n")
 
 
 def test_fresh_receipt_is_not_current_after_the_estate_changes_mcp(certified):
@@ -296,13 +296,13 @@ def test_names_alone_do_not_establish_different_definitions(tmp_path, sql, kind)
 # ------------------------------------------------------ 5. toolchain gate
 
 def _monitor_with(tmp_path, monkeypatch, scan_qualified: bool, run_qualified: bool, sql):
-    import semantix.toolchain as tc
-    from semantix.services.history import read_history
-    from semantix.services.pilot import load_pilot
+    import touchstone.toolchain as tc
+    from touchstone.services.history import read_history
+    from touchstone.services.pilot import load_pilot
 
     from .test_monitor_conformance import make_pilot
 
-    monkeypatch.delenv("SEMANTIX_QUALIFY_SQLGLOT", raising=False)
+    monkeypatch.delenv("TOUCHSTONE_QUALIFY_SQLGLOT", raising=False)
     root, models = make_pilot(tmp_path, _rows(sql))
     real = tc.QUALIFIED_SQLGLOT
     monkeypatch.setattr(tc, "QUALIFIED_SQLGLOT", real if scan_qualified else frozenset())
@@ -354,7 +354,7 @@ def test_qualified_parsers_still_conform(tmp_path, monkeypatch, sql):
 # ------------------------------------------------- 6. exact comparator
 
 def test_comparator_is_exact_beyond_28_significant_digits():
-    from semantix.oracle import _norm, _run, _same
+    from touchstone.oracle import _norm, _run, _same
 
     D = decimal.Decimal
 

@@ -1,6 +1,6 @@
 name: ci
 
-# Every claim semantix makes about itself is re-checked here: the suite, the
+# Every claim touchstone makes about itself is re-checked here: the suite, the
 # canonicalization benchmark in four dialects, and the execution oracle, which
 # runs every pair the engine would certify as equal against adversarial data.
 
@@ -28,12 +28,12 @@ jobs:
           pip install --no-deps -e .
       - name: Parser version is qualified
         run: |
-          python -c "from semantix.toolchain import toolchain_status as t; s = t(); print(s); assert s['qualified'], s"
+          python -c "from touchstone.toolchain import toolchain_status as t; s = t(); print(s); assert s['qualified'], s"
       - name: Lint
         run: ruff check --select F401,F811,F841,F821 src tests
       - name: Test suite
         run: pytest -q
       - name: Equivalence benchmark (fails on any false certification)
-        run: semantix bench
+        run: touchstone bench
       - name: Execution oracle (fails on any disagreement)
-        run: semantix oracle
+        run: touchstone oracle

@@ -1,8 +1,8 @@
 """Fingerprint field extraction: grain, filters, join graph, lineage terminals."""
 
-from semantix.extraction.canonicalize import canonicalize_sql
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.models import Provenance
+from touchstone.extraction.canonicalize import canonicalize_sql
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.models import Provenance
 
 DIALECT = "duckdb"
 PROV = Provenance(system="test", object_id="test.model", path=None)

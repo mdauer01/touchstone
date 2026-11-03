@@ -11,11 +11,11 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
-from semantix.engine import run_scan
-from semantix.services.writeback import publish_receipts
+from touchstone.engine import run_scan
+from touchstone.services.writeback import publish_receipts
 
 MODEL_SQL = (
-    "-- semantix: relation=db.main.rev_mart\n"
+    "-- touchstone: relation=db.main.rev_mart\n"
     "SELECT SUM(amount) AS total_revenue FROM db.main.orders\n"
 )
 METRICS_YML = (
@@ -59,7 +59,7 @@ def test_verdicts_projected_per_relation(scanned_store, tmp_path):
 
     rows = _rows(wh, "SELECT concept, verdict, relation, scan_id, "
                      "CAST(scanned_at AS VARCHAR) "
-                     "FROM semantix.verdicts ORDER BY concept, verdict")
+                     "FROM touchstone.verdicts ORDER BY concept, verdict")
     assert rows, "projection wrote no rows"
     concepts = {r[0] for r in rows}
     assert "total_revenue" in concepts
@@ -69,24 +69,24 @@ def test_verdicts_projected_per_relation(scanned_store, tmp_path):
     total_rels = {r[2] for r in rows if r[0] == "total_revenue"}
     assert "db.main.rev_mart" in total_rels and "db.main.orders" in total_rels
     # Receipts rail still beside it.
-    root = _rows(wh, "SELECT count(*) FROM agents.root WHERE provider = 'semantix'")
+    root = _rows(wh, "SELECT count(*) FROM agents.root WHERE provider = 'touchstone'")
     assert root[0][0] > 0
 
 
 def test_republish_replaces_wholesale(scanned_store, tmp_path):
     wh = tmp_path / "wh.duckdb"
     publish_receipts(scanned_store, str(wh))
-    first = _rows(wh, "SELECT count(*) FROM semantix.verdicts")[0][0]
+    first = _rows(wh, "SELECT count(*) FROM touchstone.verdicts")[0][0]
     publish_receipts(scanned_store, str(wh))
-    second = _rows(wh, "SELECT count(*) FROM semantix.verdicts")[0][0]
+    second = _rows(wh, "SELECT count(*) FROM touchstone.verdicts")[0][0]
     assert first == second  # projection, not an append log
 
 
 def test_mismatched_verdicts_table_refused(scanned_store, tmp_path):
     wh = tmp_path / "wh.duckdb"
     con = duckdb.connect(str(wh))
-    con.execute("CREATE SCHEMA semantix")
-    con.execute("CREATE TABLE semantix.verdicts (something_else VARCHAR)")
+    con.execute("CREATE SCHEMA touchstone")
+    con.execute("CREATE TABLE touchstone.verdicts (something_else VARCHAR)")
     con.close()
     with pytest.raises(ValueError, match="missing column"):
         publish_receipts(scanned_store, str(wh))
@@ -97,11 +97,11 @@ def test_dbt_package_tests_query_the_projection(tmp_path):
     findings() macro and carry the three test names the README promises."""
     from pathlib import Path
 
-    pkg = Path(__file__).resolve().parent.parent / "integrations" / "dbt" / "semantix"
+    pkg = Path(__file__).resolve().parent.parent / "integrations" / "dbt" / "touchstone"
     tests_sql = (pkg / "macros" / "tests.sql").read_text(encoding="utf-8")
     findings_sql = (pkg / "macros" / "findings.sql").read_text(encoding="utf-8")
     for name in ("no_contradictions", "certified", "fresh_scan"):
         assert f"test {name}" in tests_sql
-    assert "semantix.findings()" in tests_sql
-    assert "semantix_schema" in findings_sql
+    assert "touchstone.findings()" in tests_sql
+    assert "touchstone_schema" in findings_sql
     assert (pkg / "dbt_project.yml").exists()

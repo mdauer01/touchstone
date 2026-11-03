@@ -1,5 +1,5 @@
 # Exact versions the suite, benchmark and execution oracle were qualified with.
-# sqlglot is the trusted parser (see src/semantix/toolchain.py); change it only
+# sqlglot is the trusted parser (see src/touchstone/toolchain.py); change it only
 # through scripts/qualify_sqlglot.sh.
 cffi==2.1.0
 cryptography==49.0.0

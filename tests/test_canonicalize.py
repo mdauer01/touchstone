@@ -2,9 +2,9 @@
 verdict system leans on: equality is proof, difference is hypothesis."""
 
 
-from semantix.extraction.canonicalize import canonicalize_sql
-from semantix.extraction.sqlutil import render
-from semantix.models import CanonLevel
+from touchstone.extraction.canonicalize import canonicalize_sql
+from touchstone.extraction.sqlutil import render
+from touchstone.models import CanonLevel
 
 DIALECT = "duckdb"
 

@@ -2,9 +2,9 @@
 
 import json
 
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.signing import verify_receipt_dict
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.signing import verify_receipt_dict
 
 
 def _store_with_scan(acme, tmp_path):
@@ -61,7 +61,7 @@ def test_one_key_per_store_and_persisted_payload_is_signed(acme, tmp_path):
 
 
 def test_cli_verify_roundtrip(acme, tmp_path, capsys):
-    from semantix.services.freshness import check_freshness
+    from touchstone.services.freshness import check_freshness
 
     store = _store_with_scan(acme, tmp_path)
     # Unchecked: the signature verifies, but a receipt nobody re-checked is a

@@ -8,10 +8,10 @@ the store's own history contradicts. Found by adversarial review, 2026-07-25.
 import json
 import shutil
 
-import semantix.store as store_mod
-from semantix.engine import run_scan
-from semantix.signing import verify_receipt_dict
-from semantix.store import Store, normalize_ts
+import touchstone.store as store_mod
+from touchstone.engine import run_scan
+from touchstone.signing import verify_receipt_dict
+from touchstone.store import Store, normalize_ts
 
 from .policy import engine_verdict
 
@@ -210,7 +210,7 @@ def test_absence_needs_coverage_of_that_system(acme, tmp_path, monkeypatch):
 def test_store_carries_no_private_normalizer():
     """The store's old private copy disagreed with the resolver's on names
     with digits or punctuation — the cause of the empty-receipt bug above."""
-    from semantix.services.resolution import normalize_name
+    from touchstone.services.resolution import normalize_name
 
     assert not hasattr(store_mod, "_norm")
     assert store_mod.normalize_name is normalize_name

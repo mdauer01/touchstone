@@ -19,9 +19,9 @@ import shutil
 
 import pytest
 
-import semantix.store as store_mod
-from semantix.engine import run_scan
-from semantix.models import VerdictType
+import touchstone.store as store_mod
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
 
 from .policy import engine_kinds, engine_verdict
 

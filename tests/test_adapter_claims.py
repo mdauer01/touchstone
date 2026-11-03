@@ -8,8 +8,8 @@ wrote. Every test here failed before its fix.
 
 import pytest
 
-from semantix.adapters.agents_schema import claims_from_tables
-from semantix.adapters.metrics_yaml import load_metrics
+from touchstone.adapters.agents_schema import claims_from_tables
+from touchstone.adapters.metrics_yaml import load_metrics
 
 
 def lookml(measure_sql="${TABLE}.amount", filters=None, mtype="sum"):
@@ -104,8 +104,8 @@ def test_unparseable_filter_blob_is_not_passed_through_as_sql():
 def test_untranslatable_filters_make_the_claim_inexpressible(acme, tmp_path):
     """The end-to-end consequence: a claim we cannot fully translate must not
     be reconciled as if we had."""
-    from semantix.engine import build_claim
-    from semantix.extraction.registry import SchemaRegistry
+    from touchstone.engine import build_claim
+    from touchstone.extraction.registry import SchemaRegistry
 
     spec = lookml(filters='[amount: ">100"]')
     claim = build_claim(spec, SchemaRegistry({"analytics.fct_orders": {"amount": "int"}}), "duckdb")

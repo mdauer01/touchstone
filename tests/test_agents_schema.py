@@ -4,16 +4,16 @@ import json
 
 import pytest
 
-from semantix.adapters.agents_schema import (
+from touchstone.adapters.agents_schema import (
     claims_from_tables,
     load_agents_schema,
 )
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.writeback import publish_receipts
-from semantix.signing import verify_receipt_dict
-from semantix.store import Store
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.writeback import publish_receipts
+from touchstone.signing import verify_receipt_dict
+from touchstone.store import Store
 
 from .policy import engine_kinds, engine_verdict
 
@@ -143,7 +143,7 @@ def test_publish_receipts_into_agents_root(acme, tmp_path):
 
     con = duckdb.connect(str(warehouse))
     rows = {key: content for _, key, content in
-            con.execute("SELECT * FROM agents.root WHERE provider = 'semantix'").fetchall()}
+            con.execute("SELECT * FROM agents.root WHERE provider = 'touchstone'").fetchall()}
     receipt = json.loads(rows["receipt/net_revenue"])
     # The engine contradicts; the published receipt states the effective
     # status under the conclusions policy, a suspected divergence.
@@ -162,7 +162,7 @@ def test_publish_receipts_into_agents_root(acme, tmp_path):
     # Republish replaces the provider's rows wholesale (the schema's own model).
     publish_receipts(store, str(warehouse))
     count = con.execute(
-        "SELECT count(*) FROM agents.root WHERE provider = 'semantix'").fetchone()[0]
+        "SELECT count(*) FROM agents.root WHERE provider = 'touchstone'").fetchone()[0]
     con.close()
     assert count == len(rows)
 
@@ -173,4 +173,4 @@ def test_publish_without_scans_is_a_clean_error(tmp_path, capsys):
     rc = main(["publish", "--db", str(empty),
                "--warehouse", str(tmp_path / "w.duckdb")])
     assert rc == 2
-    assert "run `semantix scan` first" in capsys.readouterr().err
+    assert "run `touchstone scan` first" in capsys.readouterr().err

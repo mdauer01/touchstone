@@ -7,12 +7,12 @@ beside it.
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, Fingerprint, Provenance, SemanticCore, VerdictType
-from semantix.services.reconcile import reconcile
-from semantix.services.resolution import resolve_concepts
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, Fingerprint, Provenance, SemanticCore, VerdictType
+from touchstone.services.reconcile import reconcile
+from touchstone.services.resolution import resolve_concepts
 
 CATALOG = {"raw.orders": {"order_id": "bigint", "status": "varchar",
                           "amount": "decimal(18,2)", "refund_amount": "decimal(18,2)"}}
@@ -121,7 +121,7 @@ def test_a_difference_below_proof_grade_is_not_a_contradiction():
     we could not canonicalize is not even that, and accusing working code of
     contradicting itself over an artefact of failed resolution is worse than
     saying nothing."""
-    from semantix.models import Concept
+    from touchstone.models import Concept
 
     good = _fp("revenue", _core("SUM(amount)"), "analytics.a")
     weak = _fp("revenue", _core("SUM(amount) /* different */"), "analytics.b")
@@ -138,7 +138,7 @@ def test_estate_sql_cannot_inject_statements_into_the_execution_slice(tmp_path):
     its own statements, redefining the relations a divergence is measured
     over."""
     pytest.importorskip("duckdb")
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
 
     root = tmp_path / "sql"
     (root / "analytics").mkdir(parents=True)

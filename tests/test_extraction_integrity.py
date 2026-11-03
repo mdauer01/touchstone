@@ -7,11 +7,11 @@ Every test failed before its fix.
 
 import pytest
 
-from semantix.adapters.catalog import load_catalog
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, Provenance
+from touchstone.adapters.catalog import load_catalog
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, Provenance
 
 CATALOG = {
     "raw.orders": {

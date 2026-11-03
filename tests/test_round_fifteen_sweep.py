@@ -16,11 +16,11 @@ import json
 import pytest
 import yaml
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, Provenance
-from semantix.services.pilot import load_pilot
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, Provenance
+from touchstone.services.pilot import load_pilot
 
 from .policy import engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, T_IN, VIEW, _rows, codes, make_pilot, run
@@ -205,7 +205,7 @@ TWO = VIEW.format(extra="") + "  - name: gross_revenue\n    expr: SUM(amount)\n"
 
 
 @pytest.mark.parametrize("extra", [
-    {"statement_text": "/* semantix: metric=gross_revenue */ "
+    {"statement_text": "/* touchstone: metric=gross_revenue */ "
                        "SELECT MEASURE(net_revenue) AS net_revenue FROM main.finance.revenue_mv"},
     {"query_tag": "metric=gross_revenue"},
 ])
@@ -221,10 +221,10 @@ def test_explicit_identity_applies_to_metric_view_uses(tmp_path, extra):
 
 
 def test_a_tag_names_only_its_own_statement(tmp_path):
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
 
     root, models = make_pilot(tmp_path, [], view_text=TWO)
     _, store = run_scan(sql_dir=str(models), uc_metrics_path=str(root / "views"),
@@ -232,7 +232,7 @@ def test_a_tag_names_only_its_own_statement(tmp_path):
                         db_path=str(tmp_path / "s.db"), dialect="databricks")
     registry = build_registry(load_catalog(root / "catalog.yml"),
                               load_sql_dir(models, "databricks")[0], "databricks")
-    log = (f"/* semantix: metric=net_revenue */ SELECT {GOVERNED} AS x FROM "
+    log = (f"/* touchstone: metric=net_revenue */ SELECT {GOVERNED} AS x FROM "
            f"main.finance.orders WHERE status = 'completed';\n"
            f"SELECT {GOVERNED} AS gross_revenue FROM main.finance.orders "
            f"WHERE status = 'completed'")
@@ -299,11 +299,11 @@ def test_compare_against_current_judges_current_definitions(tmp_path):
     manifest = yaml.safe_load(pilot_yml.read_text())
     manifest["compare_against"] = "current"
     pilot_yml.write_text(yaml.safe_dump(manifest))
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.store import Store
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.store import Store
 
     pilot = load_pilot(root / "pilot", "databricks")
     store = Store(str(root / "s.db"))
@@ -358,11 +358,11 @@ def test_executions_outside_the_export_window_are_excluded_and_counted(tmp_path)
     manifest = yaml.safe_load((root / "pilot.yml").read_text())
     manifest["window"] = {"from": "2026-10-01T00:00:00Z", "to": "2026-10-15T00:00:00Z"}
     (root / "pilot.yml").write_text(yaml.safe_dump(manifest))
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
 
     _, store = run_scan(sql_dir=str(models), uc_metrics_path=str(root / "views"),
                         catalog_path=str(root / "catalog.yml"),
@@ -482,11 +482,11 @@ def test_findings_judged_against_different_versions_are_not_merged(tmp_path):
     history.write_text("\n".join(json.dumps(r) for r in rows))
     manifest = root / "pilot" / "pilot.yml"
     data = yaml.safe_load(manifest.read_text())
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.store import Store
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.store import Store
 
     pilot = load_pilot(root / "pilot", "databricks")
     store = Store(str(root / "s.db"))
@@ -524,11 +524,11 @@ def test_conforming_breakdown_excludes_contested_uses(tmp_path):
     models = tmp_path / "models"
     models.mkdir()
     (models / "m.sql").write_text(MODEL)
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
 
     _, store = run_scan(sql_dir=str(models), uc_metrics_path=str(views),
                         catalog_path=str(root / "catalog.yml"),

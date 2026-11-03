@@ -9,10 +9,10 @@ coverage, it manufactures CERTIFIED verdicts. Found by adversarial review,
 import json
 import shutil
 
-from semantix.adapters.base import ComputedArtifact, duplicate_relations, topo_sort
-from semantix.adapters.dbt import load_dbt_detailed
-from semantix.engine import run_scan
-from semantix.models import VerdictType
+from touchstone.adapters.base import ComputedArtifact, duplicate_relations, topo_sort
+from touchstone.adapters.dbt import load_dbt_detailed
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
 
 from .policy import engine_kinds
 
@@ -68,12 +68,12 @@ def test_two_definitions_of_one_relation_contradict_instead_of_certifying(tmp_pa
     (sql_dir / "finance").mkdir(parents=True)
     (sql_dir / "growth").mkdir(parents=True)
     (sql_dir / "finance" / "revenue.sql").write_text(
-        "-- semantix: relation=analytics.revenue\n"
+        "-- touchstone: relation=analytics.revenue\n"
         "select sum(amount - refund_amount) as revenue from raw.orders "
         "where status = 'completed'\n"
     )
     (sql_dir / "growth" / "revenue.sql").write_text(
-        "-- semantix: relation=analytics.revenue\n"
+        "-- touchstone: relation=analytics.revenue\n"
         "select sum(amount) as revenue from raw.orders\n"
     )
     catalog = tmp_path / "catalog.yml"

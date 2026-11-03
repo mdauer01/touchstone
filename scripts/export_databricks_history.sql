@@ -1,8 +1,8 @@
--- semantix pilot: export executed statements from Databricks.
+-- touchstone pilot: export executed statements from Databricks.
 --
 -- Run in a Databricks SQL editor (system tables are admin-readable by
 -- default), download the result as CSV, and save it as the pilot's
--- history file (e.g. pilot/history.csv). semantix reads these column names
+-- history file (e.g. pilot/history.csv). touchstone reads these column names
 -- as-is; extra columns are listed in the report, never silently used.
 --
 -- BEFORE RUNNING: confirm the column names against your workspace —
@@ -19,7 +19,7 @@
 --
 -- EVERY statement type is exported, with its session: a USE, SET or
 -- CREATE TEMP VIEW earlier in a session changes what that session's short
--- names read, and semantix makes the affected queries unverifiable rather
+-- names read, and touchstone makes the affected queries unverifiable rather
 -- than guess. Filtering to SELECT would hide exactly those statements.
 --
 -- TIME: start_time is compared with the definition windows in pilot.yml,

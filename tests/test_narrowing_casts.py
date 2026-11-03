@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from semantix.services.conformance import _narrows, _numeric_type
+from touchstone.services.conformance import _narrows, _numeric_type
 
 from .policy import engine_codes, engine_kind
 from .test_monitor_conformance import _rows, run
@@ -174,7 +174,7 @@ def test_a_cast_wrapping_an_aggregate_is_described_as_such(tmp_path):
 def test_observation_wording_follows_what_the_sql_states(expr, expect):
     import sqlglot
 
-    from semantix.services.conformance import narrowing_casts
+    from touchstone.services.conformance import narrowing_casts
 
     notes = narrowing_casts(sqlglot.parse_one(expr, read="databricks"),
                             {"amount": "INT", "d": "DOUBLE"}, "databricks")
@@ -243,7 +243,7 @@ def test_a_metric_view_between_keeps_the_conservative_boundary(tmp_path, where, 
 def test_value_types_follow_the_engines(expr, types, dialect, expect):
     import sqlglot
 
-    from semantix.services.conformance import narrowing_casts
+    from touchstone.services.conformance import narrowing_casts
 
     notes = narrowing_casts(sqlglot.parse_one(expr, read=dialect), types, dialect)
     if expect is None:
@@ -272,7 +272,7 @@ def test_neutral_arithmetic_with_a_typed_literal_is_undecided(tmp_path, measure)
 
 
 def test_a_cast_is_typed_by_the_relation_it_reads_in_a_join(tmp_path, monkeypatch):
-    from semantix.services.monitor import _typed_columns
+    from touchstone.services.monitor import _typed_columns
 
     class Reg:
         def column_types(self, r):
@@ -282,7 +282,7 @@ def test_a_cast_is_typed_by_the_relation_it_reads_in_a_join(tmp_path, monkeypatc
     assert "amount" not in types and types["status"] == "STRING"
     import sqlglot
 
-    from semantix.services.conformance import narrowing_casts
+    from touchstone.services.conformance import narrowing_casts
 
     cast = sqlglot.parse_one("CAST(main.finance.orders.amount AS BIGINT)", read="databricks")
     assert narrowing_casts(cast, types, "databricks") == []          # INT to BIGINT widens
@@ -291,7 +291,7 @@ def test_a_cast_is_typed_by_the_relation_it_reads_in_a_join(tmp_path, monkeypatc
 def test_the_definitions_cast_is_not_blamed_on_the_optimizer_reading_either():
     import sqlglot
 
-    from semantix.services.conformance import narrowing_casts
+    from touchstone.services.conformance import narrowing_casts
 
     governed = sqlglot.parse_one("SUM(CAST(amount AS DECIMAL(18,2))) - SUM(refund_amount)")
     hypothesis = sqlglot.parse_one(
@@ -350,7 +350,7 @@ def test_a_bd_literal_is_refused_not_read_as_a_bare_decimal(tmp_path):
         f = _one(tmp_path / shape, sql)
         assert engine_codes(f) == ["shape_unsupported"], (shape, f["reasons"])
         assert "1.05BD" in f["reasons"][0]["detail"]
-    from semantix.extraction.proof import Refusal, _check_tokens
+    from touchstone.extraction.proof import Refusal, _check_tokens
 
     with pytest.raises(Refusal, match="BD"):
         _check_tokens("SELECT SUM(a * 1.05BD) FROM t", "databricks")

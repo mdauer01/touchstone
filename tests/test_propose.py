@@ -15,10 +15,10 @@ import json
 import pytest
 import yaml
 
-from semantix.engine import run_scan
-from semantix.models import SemanticCore, VerdictType
-from semantix.services.emit import emit_declaration
-from semantix.services.propose import build_proposals, render_memo, write_proposals
+from touchstone.engine import run_scan
+from touchstone.models import SemanticCore, VerdictType
+from touchstone.services.emit import emit_declaration
+from touchstone.services.propose import build_proposals, render_memo, write_proposals
 
 from .policy import engine_kinds
 
@@ -28,7 +28,7 @@ CATALOG = (
     "    customers:\n      customer_id: INTEGER\n      region: VARCHAR\n"
 )
 MART_SQL = (
-    "-- semantix: relation=db.main.rev_mart\n"
+    "-- touchstone: relation=db.main.rev_mart\n"
     "SELECT DATE_TRUNC('month', order_date) AS month, "
     "SUM(amount - refund_amount) AS net_revenue "
     "FROM db.main.orders WHERE status = 'completed' GROUP BY 1\n"
@@ -134,7 +134,7 @@ def test_emit_metrics_unqualifies_and_unquotes():
 
 
 def _registry():
-    from semantix.extraction.registry import SchemaRegistry
+    from touchstone.extraction.registry import SchemaRegistry
     return SchemaRegistry({"db.main.orders": {"amount": "DOUBLE", "status": "VARCHAR",
                                               "order_date": "DATE"}})
 
@@ -230,7 +230,7 @@ def test_memo_when_nothing_to_propose(tmp_path):
 
 def test_join_backed_shadow_is_refused_with_reason(tmp_path):
     joined = (
-        "-- semantix: relation=db.main.regional_mart\n"
+        "-- touchstone: relation=db.main.regional_mart\n"
         "SELECT c.region, SUM(o.amount) AS regional_revenue "
         "FROM db.main.orders o JOIN db.main.customers c "
         "ON o.customer_id = c.customer_id GROUP BY 1\n")
@@ -240,7 +240,7 @@ def test_join_backed_shadow_is_refused_with_reason(tmp_path):
     proposals = build_proposals(store, concept="regional_revenue")
     store.close()
     (p,) = proposals["proposals"]
-    # Joins are outside the proof grammar (semantix-proof/2): the joined
+    # Joins are outside the proof grammar (touchstone-proof/2): the joined
     # definition is not proof grade, so nothing is proposed FROM it — it is
     # counted as excluded, never emitted as a declaration.
     assert p["candidates"] == []

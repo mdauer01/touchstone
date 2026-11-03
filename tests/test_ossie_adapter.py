@@ -14,10 +14,10 @@ import json
 import pytest
 import sqlglot
 
-from semantix.adapters.ossie import load_ossie
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.freshness import SOURCE_SYSTEMS, current_estate_shas
+from touchstone.adapters.ossie import load_ossie
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.freshness import SOURCE_SYSTEMS, current_estate_shas
 
 from .policy import engine_verdict
 
@@ -377,7 +377,7 @@ def _estate(tmp_path, sql):
     estate = tmp_path / "estate"
     estate.mkdir()
     (estate / "mart.sql").write_text(
-        "-- semantix: relation=db.main.revenue_mart\n" + sql, encoding="utf-8")
+        "-- touchstone: relation=db.main.revenue_mart\n" + sql, encoding="utf-8")
     catalog = tmp_path / "catalog.yml"
     catalog.write_text(
         "db:\n  main:\n    orders:\n      amount: DOUBLE\n      net: DOUBLE\n"

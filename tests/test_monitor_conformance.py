@@ -6,7 +6,7 @@ channel grouping) from a definition quietly changed, and must say
 its rules. Each case below is one acceptance criterion; none may be
 weakened to make an implementation pass.
 
-While positive verdicts are suspended (semantix.conclusions) a conforming
+While positive verdicts are suspended (touchstone.conclusions) a conforming
 use is REPORTED as unverifiable (an experimental match) and a violation as a
 suspected difference; each case pins the monitor's own judgment through
 tests/policy.py and, where it adds something, the user-facing label too.
@@ -26,13 +26,13 @@ import re
 import pytest
 import yaml
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.services.history import read_history
-from semantix.services.monitor import build_registry, monitor_history
-from semantix.services.pilot import load_pilot
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.services.history import read_history
+from touchstone.services.monitor import build_registry, monitor_history
+from touchstone.services.pilot import load_pilot
 
 from .policy import engine_codes, engine_conformance, engine_funnel, engine_kind
 
@@ -67,7 +67,7 @@ dimensions:
   - name: net_revenue
     expr: SUM(amount) - SUM(refund_amount)
 """
-MODEL = ("-- semantix: relation=main.finance.channel_mart\n"
+MODEL = ("-- touchstone: relation=main.finance.channel_mart\n"
          "SELECT channel, SUM(amount) AS gross FROM main.finance.orders GROUP BY channel\n")
 GOVERNED = "SUM(amount) - SUM(refund_amount)"
 T_IN = "2026-10-02T10:00:00Z"
@@ -542,7 +542,7 @@ def only_any(result):
 # ------------------------------------------------- identity and naming
 
 def test_explicit_tag_outranks_the_alias(tmp_path):
-    q = (f"-- semantix: metric=net_revenue\nSELECT {GOVERNED} AS rev FROM "
+    q = (f"-- touchstone: metric=net_revenue\nSELECT {GOVERNED} AS rev FROM "
          f"main.finance.orders WHERE status = 'completed' AND country = 'US'")
     f = only(run(tmp_path, _rows(q)))
     assert engine_kind(f) == "conforming_use" and f["identity_source"] == "tag"
@@ -626,7 +626,7 @@ def test_without_a_pilot_slices_are_unverifiable_and_drops_are_violations(tmp_pa
 # ------------------------------------------------------------ intake
 
 def test_history_formats_and_disclosed_columns(tmp_path):
-    from semantix.services.history import read_history as rh
+    from touchstone.services.history import read_history as rh
 
     jl = tmp_path / "h.jsonl"
     jl.write_text("\n".join(json.dumps(r) for r in [
@@ -696,7 +696,7 @@ def test_cli_context_assertion_is_explicit(tmp_path, capsys):
 # ---------------------------------------------------------- adapter
 
 def test_uc_dimensions_resolve_to_columns_or_say_why_not(tmp_path):
-    from semantix.adapters.uc_metrics import load_uc_metrics
+    from touchstone.adapters.uc_metrics import load_uc_metrics
 
     view = tmp_path / "mv.yaml"
     view.write_text("""version: 1.1
@@ -735,7 +735,7 @@ measures:
 
 
 def test_declarations_without_dimensions_keep_their_content_identity():
-    from semantix.adapters.base import DeclaredSpec, DimensionSpec, spec_content_text
+    from touchstone.adapters.base import DeclaredSpec, DimensionSpec, spec_content_text
 
     plain = DeclaredSpec(system="metrics_yaml", name="m", model="t", expr="sum(a)")
     assert "dimensions" not in spec_content_text(plain)

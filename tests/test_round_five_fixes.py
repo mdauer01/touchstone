@@ -15,12 +15,12 @@ import shutil
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
-from semantix.services.execute import _diverges, _is_additive
-from semantix.store import Store, normalize_ts
+from touchstone.extraction.canonicalize import canonicalize, canonicalize_sql
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, CanonLevel, Provenance
+from touchstone.services.execute import _diverges, _is_additive
+from touchstone.store import Store, normalize_ts
 
 CATALOG = {
     "raw.orders": {"order_id": "bigint", "customer_id": "bigint", "status": "varchar",
@@ -77,7 +77,7 @@ def test_order_sensitive_spellings_are_gated(fn):
 
 def test_ranked_summary_sql_is_refused_with_its_reason():
     """Round five made ranked-summary SQL certify through the optimizer.
-    Window functions are outside the proof grammar (semantix-proof/2): the
+    Window functions are outside the proof grammar (touchstone-proof/2): the
     refusal must name the construct, not a consumer that does not exist —
     a coverage backlog item, never a silent pass."""
     _, level, gaps = core(
@@ -159,8 +159,8 @@ def test_union_models_are_never_measured_through_one_branch(acme, tmp_path):
     never fire and a `us UNION ALL eu` model still measured one branch,
     manufacturing a +1800% divergence between definitions that agree."""
     pytest.importorskip("duckdb")
-    from semantix.models import Concept, Fingerprint, SemanticCore, Verdict, VerdictType
-    from semantix.services.execute import annotate_with_execution
+    from touchstone.models import Concept, Fingerprint, SemanticCore, Verdict, VerdictType
+    from touchstone.services.execute import annotate_with_execution
 
     core_obj = SemanticCore(measure_expr="SUM(amount)",
                             source_columns=("raw.orders.amount",))
@@ -263,11 +263,11 @@ def test_one_shared_artifact_is_not_absence_proof(tmp_path, monkeypatch, acme):
     scenario the round-four fix's own comment names. Majority overlap is
     required now; deleting half of a two-model estate is unprovable and
     stays live, which is the direction absence-requires-proof points."""
-    import semantix.store as store_mod
+    import touchstone.store as store_mod
     times = iter([f"2026-0{m}-01T00:00:00Z" for m in range(1, 9)])
     now = {"t": next(times)}
     monkeypatch.setattr(store_mod, "utcnow", lambda: now["t"])
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
 
     def estate(root, files):
         sql = root / "sql" / "analytics"
@@ -294,7 +294,7 @@ def test_one_shared_artifact_is_not_absence_proof(tmp_path, monkeypatch, acme):
 
 
 def test_scan_as_of_skips_interrupted_scans(tmp_path, monkeypatch):
-    import semantix.store as store_mod
+    import touchstone.store as store_mod
     times = iter([f"2026-0{m}-01T00:00:00Z" for m in range(1, 9)])
     now = {"t": next(times)}
     monkeypatch.setattr(store_mod, "utcnow", lambda: now["t"])
@@ -314,7 +314,7 @@ def test_attest_by_any_member_name_finds_the_concept(acme, tmp_path):
     name went dark and a receipt SIGNED 'no definition was live' for a
     concept with two live definitions."""
     shutil.copytree(acme, tmp_path / "estate")
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
     _, store = run_scan(
         dbt_path=str(tmp_path / "estate" / "dbt_project"),
         metrics_path=str(tmp_path / "estate" / "metrics.yml"),
@@ -353,7 +353,7 @@ def test_join_to_timespine_is_read_from_the_measure_reference():
     """dbt serializes it on type_params.measure; the round-four guard checked
     type_params — a location that does not exist in dbt's schema — so the
     refusal never fired on real manifests."""
-    from semantix.adapters.dbt import _metric_expression
+    from touchstone.adapters.dbt import _metric_expression
     metric = {"type": "simple",
               "type_params": {"measure": {"name": "m", "join_to_timespine": True}}}
     expr, _, untranslatable = _metric_expression(
@@ -366,7 +366,7 @@ def test_filters_outside_legacy_blocks_are_not_dropped():
     """Once one legacy block matched, everything OUTSIDE the blocks — modern
     filters included — was silently dropped: a proof-grade claim missing a
     declared filter, the exact failure `untranslatable` exists to prevent."""
-    from semantix.adapters.agents_schema import _lookml_filters
+    from touchstone.adapters.agents_schema import _lookml_filters
     predicates, untranslatable = _lookml_filters(
         '{ field: region, value: "US" } [status: "completed"]')
     assert "region = 'US'" in predicates
@@ -379,7 +379,7 @@ def test_filters_outside_legacy_blocks_are_not_dropped():
 
 
 def test_a_field_named_field_is_not_a_legacy_block():
-    from semantix.adapters.agents_schema import _lookml_filters
+    from touchstone.adapters.agents_schema import _lookml_filters
     predicates, untranslatable = _lookml_filters('[field: "webinar"]')
     assert predicates == ["field = 'webinar'"]
     assert not untranslatable
@@ -390,7 +390,7 @@ def test_all_struct_table_with_table_siblings_is_a_table(tmp_path):
     deleted, with each struct column becoming a phantom relation — whenever
     no scalar column disambiguated it. A sibling that is unambiguously a
     table proves the level."""
-    from semantix.adapters.catalog import load_catalog
+    from touchstone.adapters.catalog import load_catalog
     (tmp_path / "c.yml").write_text(
         "analytics:\n"
         "  events:\n"
@@ -403,13 +403,13 @@ def test_all_struct_table_with_table_siblings_is_a_table(tmp_path):
 
 
 def test_directive_reads_quoted_and_backticked_names(tmp_path):
-    from semantix.adapters.sql_dir import load_sql_dir
+    from touchstone.adapters.sql_dir import load_sql_dir
     root = tmp_path / "sql" / "analytics"
     root.mkdir(parents=True)
     (root / "a.sql").write_text(
-        '-- semantix: relation="MY DB".analytics.orders\nselect 1 as x')
+        '-- touchstone: relation="MY DB".analytics.orders\nselect 1 as x')
     (root / "b.sql").write_text(
-        "-- semantix: relation=`prod`.analytics.orders2\nselect 1 as x")
+        "-- touchstone: relation=`prod`.analytics.orders2\nselect 1 as x")
     artifacts, _ = load_sql_dir(tmp_path / "sql")
     relations = {a.relation for a in artifacts}
     assert "MY DB.analytics.orders" in relations, "quoted name truncated at the space"
@@ -420,7 +420,7 @@ def test_duplicate_view_definitions_are_disclosed(tmp_path):
     """topo_sort's keyed dedup collapsed same-relation CREATE VIEWs before
     duplicate_relations could see them — the superseded contradictor vanished
     without a trace, the one remaining silent-loss channel."""
-    from semantix.adapters.sql_dir import load_views_file
+    from touchstone.adapters.sql_dir import load_views_file
     dump = tmp_path / "views.sql"
     dump.write_text(
         "CREATE VIEW analytics.net_revenue AS SELECT SUM(amount) AS net_revenue "
@@ -437,7 +437,7 @@ def test_duplicate_view_definitions_are_disclosed(tmp_path):
 def test_wrong_shape_metrics_yaml_is_loud(tmp_path):
     """`metrics: "just a string"` ran the scan green with claims 0 — silent
     ontology loss in the one file the customer authors by hand."""
-    from semantix.adapters.metrics_yaml import load_metrics
+    from touchstone.adapters.metrics_yaml import load_metrics
     p = tmp_path / "m.yml"
     p.write_text('metrics: "just a string"\n')
     with pytest.raises(ValueError) as e:
@@ -451,7 +451,7 @@ def test_dbt_metrics_declarations_are_freshness_checked(tmp_path):
     PERMANENTLY invisible: no flag existed that could ever re-check
     dbt_metrics, so a receipt kept verifying after the declared metric's
     meaning changed."""
-    from semantix.services.freshness import SOURCE_SYSTEMS, current_estate_shas
+    from touchstone.services.freshness import SOURCE_SYSTEMS, current_estate_shas
     assert "dbt_metrics" in SOURCE_SYSTEMS["dbt_path"]
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -477,7 +477,7 @@ def test_metric_over_mart_is_refused_with_the_real_reason(tmp_path):
     output, produced a sev-96 CONTRADICTION blaming the mart's own internals
     for faithfully restating itself — the standard pilot input turned into
     top-band noise."""
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "manifest.json").write_text(json.dumps({"nodes": {

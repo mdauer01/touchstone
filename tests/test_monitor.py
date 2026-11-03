@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import pytest
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.engine import run_scan
-from semantix.services.monitor import build_registry, monitor_history
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.engine import run_scan
+from touchstone.services.monitor import build_registry, monitor_history
 
 from .policy import engine_kind
 
 MODEL_SQL = (
-    "-- semantix: relation=db.main.rev_mart\n"
+    "-- touchstone: relation=db.main.rev_mart\n"
     "SELECT SUM(amount - refund_amount) AS net_revenue "
     "FROM db.main.orders WHERE status = 'completed'\n"
 )
@@ -155,7 +155,7 @@ def test_monitor_writes_nothing(scanned):
 
 
 def test_monitor_without_scan_refuses(tmp_path):
-    from semantix.store import Store
+    from touchstone.store import Store
 
     store = Store(str(tmp_path / "empty.db"))
     registry = build_registry({}, [], "duckdb")

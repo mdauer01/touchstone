@@ -3,9 +3,9 @@
 import io
 import json
 
-from semantix.engine import run_scan
-from semantix.mcp import McpServer, serve
-from semantix.models import VerdictType
+from touchstone.engine import run_scan
+from touchstone.mcp import McpServer, serve
+from touchstone.models import VerdictType
 
 from .policy import engine_kinds
 
@@ -35,7 +35,7 @@ def test_initialize_and_tool_listing(acme, tmp_path):
     server = McpServer(_db(acme, tmp_path))
     init = server.handle({"jsonrpc": "2.0", "id": 0, "method": "initialize",
                           "params": {"protocolVersion": "2025-06-18"}})
-    assert init["result"]["serverInfo"]["name"] == "semantix"
+    assert init["result"]["serverInfo"]["name"] == "touchstone"
     tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in tools["result"]["tools"]}
     assert names == {"attest", "asof", "history", "concepts", "relationships",

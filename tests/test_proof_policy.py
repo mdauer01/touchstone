@@ -1,4 +1,4 @@
-"""semantix-proof/2: certification through a small, stated grammar.
+"""touchstone-proof/2: certification through a small, stated grammar.
 
 The general optimizer no longer grants proof grade. Inside the grammar a form
 is produced only by the policy's RULES; outside it the optimizer's reading is
@@ -16,10 +16,10 @@ import sqlite3
 import pytest
 import sqlglot
 
-from semantix.engine import run_scan
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.proof import (
+from touchstone.engine import run_scan
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.proof import (
     ASSUMPTIONS,
     POLICY_ID,
     RULES,
@@ -27,12 +27,12 @@ from semantix.extraction.proof import (
     round_trips,
     strip_parens,
 )
-from semantix.extraction.registry import SchemaRegistry
-from semantix.mcp import McpServer
-from semantix.models import PROOF_LEVELS, CanonLevel, Provenance, VerdictType
-from semantix.services.freshness import check_freshness
-from semantix.signing import assess_receipt
-from semantix.store import Store
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.mcp import McpServer
+from touchstone.models import PROOF_LEVELS, CanonLevel, Provenance, VerdictType
+from touchstone.services.freshness import check_freshness
+from touchstone.signing import assess_receipt
+from touchstone.store import Store
 
 from .policy import engine_codes, engine_funnel, engine_kind, engine_verdict
 
@@ -122,7 +122,7 @@ def _scan(tmp_path, models: dict[str, str], metrics: str | None = None):
     d = tmp_path / "models"
     d.mkdir(exist_ok=True)
     for name, sql in models.items():
-        (d / f"{name}.sql").write_text(f"-- semantix: relation=db.main.{name}\n{sql}\n")
+        (d / f"{name}.sql").write_text(f"-- touchstone: relation=db.main.{name}\n{sql}\n")
     (tmp_path / "catalog.yml").write_text(
         "db:\n  main:\n    t:\n      amount: DOUBLE\n      status: VARCHAR\n"
         "    u:\n      id: INTEGER\n      amount: DOUBLE\n")

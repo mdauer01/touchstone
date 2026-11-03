@@ -3,9 +3,9 @@ restatement detection, receipts."""
 
 import pytest
 
-import semantix.store as store_mod
-from semantix.models import Fingerprint, Provenance, SemanticCore
-from semantix.store import Store, normalize_ts
+import touchstone.store as store_mod
+from touchstone.models import Fingerprint, Provenance, SemanticCore
+from touchstone.store import Store, normalize_ts
 
 
 @pytest.fixture

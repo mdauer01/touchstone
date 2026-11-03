@@ -12,7 +12,7 @@ fails here even when its own example was never imagined.
 
 from __future__ import annotations
 
-from semantix.models import PROOF_LEVELS, CanonLevel, VerdictType
+from touchstone.models import PROOF_LEVELS, CanonLevel, VerdictType
 
 CERTIFYING = {VerdictType.CERTIFIED, VerdictType.ALIASING}
 
@@ -99,7 +99,7 @@ def _receipts_are_substantiated(result, store) -> list[str]:
         if receipt is None:
             continue
         # While positive verdicts are suspended no receipt may state one at
-        # all (semantix.conclusions); a definitive CONTRADICTION is reported
+        # all (touchstone.conclusions); a definitive CONTRADICTION is reported
         # as a SUSPECTED_DIVERGENCE.
         if receipt.status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value,
                               VerdictType.CONTRADICTION.value):

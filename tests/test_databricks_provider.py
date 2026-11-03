@@ -12,10 +12,10 @@ import socket
 
 import pytest
 
-from semantix.assess.criteria import aggregate, load
-from semantix.assess.providers import ProviderConfig, get_provider, render_prompt
-from semantix.assess.providers.databricks import DatabricksProvider, response_format
-from semantix.assess.runner import build_record, items, load_dataset, run_benchmark
+from touchstone.assess.criteria import aggregate, load
+from touchstone.assess.providers import ProviderConfig, get_provider, render_prompt
+from touchstone.assess.providers.databricks import DatabricksProvider, response_format
+from touchstone.assess.runner import build_record, items, load_dataset, run_benchmark
 
 TOKEN = "dapi-test-token-0123456789"
 ENV = {"DATABRICKS_TOKEN": TOKEN, "DATABRICKS_HOST": "https://dbc-test.cloud.databricks.com"}
@@ -209,7 +209,7 @@ def test_the_real_transport_never_follows_a_redirect():
     import io
     from urllib import request as urlrequest
 
-    from semantix.assess.providers.databricks import _NoRedirect
+    from touchstone.assess.providers.databricks import _NoRedirect
 
     handler = _NoRedirect()
     req = urlrequest.Request("https://dbc-test.cloud.databricks.com/api/2.0/sql/statements",
@@ -231,7 +231,7 @@ def _assess_one(dataset, replies, **options):
 @pytest.mark.parametrize("state", ["CANCELED", "CLOSED", "FAILED"])
 @pytest.mark.parametrize("where", ["post", "poll"])
 def test_every_terminal_state_other_than_succeeded_is_an_error(dataset, state, where):
-    from semantix.assess.providers.databricks import TERMINAL
+    from touchstone.assess.providers.databricks import TERMINAL
 
     assert TERMINAL == {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
     final = (200, {"statement_id": "s", "status": {"state": state}})
@@ -304,8 +304,8 @@ def test_a_credential_refused_mid_run_keeps_what_was_answered(dataset, tmp_path,
     """An OAuth token expiring an hour into a run discarded every completed
     assessment. Now the report keeps them, marks the rest failed (not
     attempted), is written, and the CLI exits 2."""
-    from semantix import cli
-    from semantix.assess.providers import databricks as D
+    from touchstone import cli
+    from touchstone.assess.providers import databricks as D
 
     expired = (401, {"error_code": "UNAUTHENTICATED", "message": "Token expired"})
     replies = [succeeded()] * 3 + [expired]
@@ -349,7 +349,7 @@ def test_a_token_echoed_with_a_json_escape_is_redacted_everywhere(dataset, escap
 
 
 def test_an_ipv6_host_keeps_its_brackets():
-    from semantix.assess.providers.databricks import _parse_host
+    from touchstone.assess.providers.databricks import _parse_host
 
     assert _parse_host("https://[::1]:8443") == "https://[::1]:8443"
     assert _parse_host("https://[2001:db8::1]") == "https://[2001:db8::1]"
@@ -410,8 +410,8 @@ def test_an_interrupt_while_polling_still_cancels(dataset):
 
 
 def test_ctrl_c_mid_run_keeps_the_report_and_exits_130(dataset, tmp_path, monkeypatch, capsys):
-    from semantix import cli
-    from semantix.assess.providers import databricks as D
+    from touchstone import cli
+    from touchstone.assess.providers import databricks as D
 
     sent = []
 
@@ -620,8 +620,8 @@ def test_an_escaped_echo_is_decoded_before_it_is_redacted(dataset):
 
 def test_the_exit_code_comes_from_the_stop_kind_not_the_servers_words(dataset, tmp_path,
                                                                        monkeypatch, capsys):
-    from semantix import cli
-    from semantix.assess.providers import databricks as D
+    from touchstone import cli
+    from touchstone.assess.providers import databricks as D
 
     refusal = Fake([(401, {"error_code": "UNAUTHENTICATED",
                            "message": "Token refresh was interrupted; sign in again"})] * 2)

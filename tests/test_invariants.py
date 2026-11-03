@@ -10,7 +10,7 @@ import shutil
 
 import pytest
 
-from semantix.engine import run_scan
+from touchstone.engine import run_scan
 
 from .invariants import check_scan
 

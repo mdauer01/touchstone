@@ -1,7 +1,7 @@
 """Execution slice: contradictions get measured, not just asserted."""
 
-from semantix.engine import run_scan
-from semantix.models import VerdictType
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
 
 from .policy import engine_verdict
 

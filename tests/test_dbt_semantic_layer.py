@@ -10,9 +10,9 @@ already open.
 import json
 import shutil
 
-from semantix.adapters.dbt import load_dbt_detailed, load_dbt_metrics
-from semantix.engine import run_scan
-from semantix.models import VerdictType
+from touchstone.adapters.dbt import load_dbt_detailed, load_dbt_metrics
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
 
 from .policy import engine_kinds
 

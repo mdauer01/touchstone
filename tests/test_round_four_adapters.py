@@ -8,8 +8,8 @@ definition nobody wrote.
 
 import pytest
 
-from semantix.adapters.agents_schema import claims_from_tables
-from semantix.adapters.catalog import load_catalog
+from touchstone.adapters.agents_schema import claims_from_tables
+from touchstone.adapters.catalog import load_catalog
 
 
 def lookml(**row):

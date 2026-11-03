@@ -10,14 +10,14 @@ import json
 import pytest
 import yaml
 
-from semantix.adapters.ossie import load_ossie
-from semantix.adapters.uc_metrics import load_uc_metrics
-from semantix.engine import run_scan
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import SemanticCore, VerdictType
-from semantix.services.emit import emit_declaration
-from semantix.services.monitor import build_registry, monitor_history
-from semantix.services.propose import build_proposals
+from touchstone.adapters.ossie import load_ossie
+from touchstone.adapters.uc_metrics import load_uc_metrics
+from touchstone.engine import run_scan
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import SemanticCore, VerdictType
+from touchstone.services.emit import emit_declaration
+from touchstone.services.monitor import build_registry, monitor_history
+from touchstone.services.propose import build_proposals
 
 from .policy import engine_funnel, engine_kind, engine_kinds
 
@@ -30,7 +30,7 @@ def _estate(tmp_path, models: dict[str, str]):
     estate.mkdir(exist_ok=True)
     for name, sql in models.items():
         (estate / f"{name}.sql").write_text(
-            f"-- semantix: relation=db.main.{name}\n{sql}\n", encoding="utf-8")
+            f"-- touchstone: relation=db.main.{name}\n{sql}\n", encoding="utf-8")
     (tmp_path / "catalog.yml").write_text(CATALOG_YML, encoding="utf-8")
     return dict(sql_dir=str(estate), catalog_path=str(tmp_path / "catalog.yml"),
                 db_path=str(tmp_path / "s.db"))
@@ -121,14 +121,14 @@ def test_ossie_mixed_list_file_raises(tmp_path):
 
 
 def test_sql_dir_nonexistent_path_refused(tmp_path):
-    from semantix.adapters.sql_dir import load_sql_dir
+    from touchstone.adapters.sql_dir import load_sql_dir
     with pytest.raises(ValueError, match="not a directory"):
         load_sql_dir(tmp_path / "modelz", "duckdb")
 
 
 def test_agents_schema_duckdb_without_tables_refused(tmp_path):
     duckdb = pytest.importorskip("duckdb")
-    from semantix.adapters.agents_schema import load_agents_schema
+    from touchstone.adapters.agents_schema import load_agents_schema
     p = tmp_path / "wh.duckdb"
     duckdb.connect(str(p)).close()
     with pytest.raises(ValueError, match="no AGENTS schema tables"):
@@ -147,8 +147,8 @@ def monitored(tmp_path):
     }
     kwargs = _estate(tmp_path, models)
     result, store = run_scan(**kwargs)
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
     registry = build_registry(load_catalog(kwargs["catalog_path"]),
                               load_sql_dir(kwargs["sql_dir"], "duckdb")[0], "duckdb")
     yield store, registry
@@ -242,8 +242,8 @@ def test_monitor_contested_definition_is_not_consistency(tmp_path):
     result, store = run_scan(metrics_path=str(tmp_path / "metrics.yml"), **kwargs)
     assert VerdictType.CONTRADICTION in engine_kinds(result.verdicts, "rev")
     assert _verdict(result, "rev", VerdictType.SUSPECTED_DIVERGENCE)
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
     registry = build_registry(load_catalog(kwargs["catalog_path"]),
                               load_sql_dir(kwargs["sql_dir"], "duckdb")[0], "duckdb")
     # Both systems authoritative: their definitions disagree, so matching one
@@ -324,28 +324,28 @@ def test_propose_reports_matching_site_and_rejects_unknown_concept(tmp_path):
 
 def test_publish_refuses_customer_not_null_column_before_deleting(tmp_path):
     duckdb = pytest.importorskip("duckdb")
-    from semantix.services.writeback import publish_receipts
+    from touchstone.services.writeback import publish_receipts
     kwargs = _estate(tmp_path, {"mart": "SELECT SUM(amount) AS rev FROM db.main.orders"})
     _, store = run_scan(**kwargs)
     wh = tmp_path / "wh.duckdb"
     con = duckdb.connect(str(wh))
-    con.execute("CREATE SCHEMA semantix")
-    con.execute("CREATE TABLE semantix.verdicts (scan_id VARCHAR, scanned_at TIMESTAMPTZ, "
+    con.execute("CREATE SCHEMA touchstone")
+    con.execute("CREATE TABLE touchstone.verdicts (scan_id VARCHAR, scanned_at TIMESTAMPTZ, "
                 "published_at TIMESTAMPTZ, concept VARCHAR, verdict VARCHAR, severity INTEGER, "
                 "summary VARCHAR, relation VARCHAR, owner_team VARCHAR NOT NULL)")
-    con.execute("INSERT INTO semantix.verdicts VALUES ('manual', now(), now(), 'x', 'CERTIFIED', "
+    con.execute("INSERT INTO touchstone.verdicts VALUES ('manual', now(), now(), 'x', 'CERTIFIED', "
                 "5, 's', 'r', 'finance')")
     con.close()
     with pytest.raises(ValueError, match="NOT NULL"):
         publish_receipts(store, str(wh))
     store.close()
     con = duckdb.connect(str(wh))
-    assert con.execute("SELECT count(*) FROM semantix.verdicts").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM touchstone.verdicts").fetchone()[0] == 1
     con.close()
 
 
 def test_diff_markdown_names_lost_certifications():
-    from semantix.services.diff import markdown_comment
+    from touchstone.services.diff import markdown_comment
     md = markdown_comment({"scan_id": "s2", "baseline_scan_id": "s1", "unchanged": 0,
                            "new": [],
                            "resolved": [{"verdict": "CERTIFIED", "concept_label": "gmv",
@@ -355,7 +355,7 @@ def test_diff_markdown_names_lost_certifications():
 
 def test_warehouse_url_grammar(tmp_path):
     duckdb = pytest.importorskip("duckdb")
-    from semantix.warehouse import connect_warehouse
+    from touchstone.warehouse import connect_warehouse
     db = tmp_path / "wh.db"
     con = duckdb.connect(str(db))
     con.execute("CREATE TABLE t (x INTEGER)")
@@ -375,19 +375,19 @@ JOIN_CATALOG = {"db.main.orders": {"customer_id": "INT", "amount": "DOUBLE",
 
 
 def _fp(sql: str):
-    """Joins are outside the proof grammar (semantix-proof/2), so a joined
+    """Joins are outside the proof grammar (touchstone-proof/2), so a joined
     query is read only as the optimizer's HYPOTHESIS — never proof grade, with
     the join as its one stated gap. The join normalization below still
     matters: it feeds diffs, blame and candidate matching."""
-    from semantix.extraction.canonicalize import canonicalize
-    from semantix.extraction.fingerprint import extract_fingerprints
-    from semantix.models import PROOF_LEVELS, Provenance
+    from touchstone.extraction.canonicalize import canonicalize
+    from touchstone.extraction.fingerprint import extract_fingerprints
+    from touchstone.models import PROOF_LEVELS, Provenance
     registry = SchemaRegistry(JOIN_CATALOG)
     canon = canonicalize(sql, registry, "duckdb")
     (fp,) = extract_fingerprints(canon, "db.main.m", Provenance("t", "m"), "duckdb", registry)
     if " JOIN " in sql.upper() or ", db.main" in sql:
         assert fp.canon_level not in PROOF_LEVELS
-        assert fp.gaps == ("outside the supported grammar (semantix-proof/2): uses a join",), \
+        assert fp.gaps == ("outside the supported grammar (touchstone-proof/2): uses a join",), \
             fp.gaps
     else:
         assert fp.canon_level in PROOF_LEVELS and not fp.gaps, (canon.level, fp.gaps)
@@ -421,7 +421,7 @@ def test_outer_join_direction_and_kind_still_differ():
 
 
 def test_expression_is_not_blamed_when_only_alias_numbering_differs():
-    from semantix.models import core_components, core_diff
+    from touchstone.models import core_components, core_diff
     single = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o WHERE o.status = 'x'")
     joined = _fp("SELECT SUM(o.amount) AS r FROM db.main.orders o "
                  "JOIN db.main.customers c ON o.customer_id = c.customer_id "

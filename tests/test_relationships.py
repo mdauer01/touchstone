@@ -4,14 +4,14 @@ import json
 
 import pytest
 
-from semantix.adapters.catalog import (
+from touchstone.adapters.catalog import (
     load_catalog,
     load_declared_relationships,
     load_primary_keys,
 )
-from semantix.cli import main
-from semantix.extraction.registry import SchemaRegistry
-from semantix.services.relationships import (
+from touchstone.cli import main
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.services.relationships import (
     Edge,
     graph_with_status,
     mine_sql_text,
@@ -20,8 +20,8 @@ from semantix.services.relationships import (
     relationships_for_agent,
     verify_edges,
 )
-from semantix.store import Store
-from semantix.warehouse import DuckDBWarehouse, UnsupportedWarehouseError, connect_warehouse
+from touchstone.store import Store
+from touchstone.warehouse import DuckDBWarehouse, UnsupportedWarehouseError, connect_warehouse
 
 pytest.importorskip("duckdb")
 
@@ -340,8 +340,8 @@ def test_identifier_quotes_cannot_break_out(store, warehouse):
     """Identifiers arrive from estate SQL and catalog YAML — files we do not
     control — and are interpolated into checks run against a customer
     warehouse."""
-    from semantix.services.relationships import qcol
-    from semantix.warehouse import qident
+    from touchstone.services.relationships import qcol
+    from touchstone.warehouse import qident
 
     assert qident('raw.or"ders') == '"raw"."or""ders"'
     assert qcol('id" ; DROP TABLE x --') == '"id"" ; DROP TABLE x --"'
@@ -458,7 +458,7 @@ def test_cli_requires_a_source(tmp_path, capsys):
 
 
 def test_mcp_relationships_tool(acme, tmp_path):
-    from semantix.mcp import McpServer
+    from touchstone.mcp import McpServer
 
     db = str(tmp_path / "mcp.db")
     main(["mine-relationships", "--history-file", str(acme / "query_history.sql"),
@@ -481,7 +481,7 @@ def test_mcp_relationships_tool(acme, tmp_path):
 
 
 def test_mcp_relationships_without_data_is_an_error(tmp_path):
-    from semantix.mcp import McpServer
+    from touchstone.mcp import McpServer
 
     # An MCP server on a nonexistent store must refuse, not create one.
     Store(tmp_path / "bare.db")  # the store exists but holds nothing

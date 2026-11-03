@@ -94,12 +94,12 @@ def test_a_created_fully_qualified_name_is_affected_only_where_read(tmp_path):
 def test_a_sql_log_orders_statements_but_does_not_identify_sessions(tmp_path):
     """A bare .sql log: order known, sessions not — a USE earlier in it is
     possible context, never reconstructed."""
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
-    from semantix.services.history import from_sql_text
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.services.pilot import load_pilot
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
+    from touchstone.services.history import from_sql_text
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.services.pilot import load_pilot
 
     from .test_monitor_conformance import make_pilot
 
@@ -127,10 +127,10 @@ def test_a_sql_log_orders_statements_but_does_not_identify_sessions(tmp_path):
 # ------------------------------------------------------- attribution (#37 #56 #48)
 
 def test_a_trailing_tag_names_its_own_statement(tmp_path):
-    """#37 / #56: `…; -- semantix: metric=x` was applied to the NEXT one."""
+    """#37 / #56: `…; -- touchstone: metric=x` was applied to the NEXT one."""
     gross = ("SELECT SUM(amount) AS gross FROM main.finance.orders "
              "WHERE status = 'completed'")
-    text = f"{gross}; -- semantix: metric=gross_revenue\n{Q_FULL}"
+    text = f"{gross}; -- touchstone: metric=gross_revenue\n{Q_FULL}"
     result = run(tmp_path, [_row(0, text)])
     net = only(result)
     assert engine_kind(net) == "conforming_use" and net["identity_source"] != "tag"
@@ -150,20 +150,20 @@ import json  # noqa: E402
 
 import pytest  # noqa: E402
 
-from semantix.cli import main  # noqa: E402
-from semantix.engine import run_scan  # noqa: E402
-from semantix.mcp import McpServer  # noqa: E402
-from semantix.models import Receipt  # noqa: E402
-from semantix.services.freshness import check_freshness  # noqa: E402
-from semantix.signing import sign_receipt  # noqa: E402
-from semantix.store import Store  # noqa: E402
+from touchstone.cli import main  # noqa: E402
+from touchstone.engine import run_scan  # noqa: E402
+from touchstone.mcp import McpServer  # noqa: E402
+from touchstone.models import Receipt  # noqa: E402
+from touchstone.services.freshness import check_freshness  # noqa: E402
+from touchstone.signing import sign_receipt  # noqa: E402
+from touchstone.store import Store  # noqa: E402
 
 
 @pytest.fixture()
 def certified(tmp_path):
     models = tmp_path / "models"
     models.mkdir()
-    (models / "m.sql").write_text("-- semantix: relation=db.main.m\n"
+    (models / "m.sql").write_text("-- touchstone: relation=db.main.m\n"
                                   "SELECT SUM(amount) AS m FROM db.main.t\n")
     (tmp_path / "catalog.yml").write_text("db:\n  main:\n    t:\n      amount: DOUBLE\n")
     (tmp_path / "metrics.yml").write_text(
@@ -245,7 +245,7 @@ def test_the_scans_own_dialect_rehashes_the_estate(tmp_path):
         store.close()
     import argparse
 
-    from semantix.cli import _estate_kwargs
+    from touchstone.cli import _estate_kwargs
     args = argparse.Namespace(dbt=None, sql_dir=None, views_path=None, metrics=None,
                               agents_schema_path=None, osi_path=None,
                               uc_metrics_path=str(views), catalog_path=None, dialect=None)
@@ -289,11 +289,11 @@ import hashlib  # noqa: E402
 
 import yaml  # noqa: E402
 
-from semantix.adapters.catalog import load_catalog  # noqa: E402
-from semantix.adapters.sql_dir import load_sql_dir  # noqa: E402
-from semantix.services.history import read_history  # noqa: E402
-from semantix.services.monitor import build_registry, monitor_history  # noqa: E402
-from semantix.services.pilot import load_pilot  # noqa: E402
+from touchstone.adapters.catalog import load_catalog  # noqa: E402
+from touchstone.adapters.sql_dir import load_sql_dir  # noqa: E402
+from touchstone.services.history import read_history  # noqa: E402
+from touchstone.services.monitor import build_registry, monitor_history  # noqa: E402
+from touchstone.services.pilot import load_pilot  # noqa: E402
 
 from .test_monitor_conformance import CATALOG, MODEL, VIEW, _rows  # noqa: E402
 
@@ -457,7 +457,7 @@ def test_a_multi_measure_projection_is_one_use_on_every_path(tmp_path):
 def test_pilot_instants_keep_their_written_precision(tmp_path):
     """#47: unquoted YAML instants were truncated to microseconds; comma
     fractions were dropped."""
-    from semantix.services.pilot import load_pilot, precise_ts
+    from touchstone.services.pilot import load_pilot, precise_ts
 
     root, _ = make_pilot(tmp_path, _rows("SELECT 1"))
     manifest = (root / "pilot.yml").read_text()
@@ -497,7 +497,7 @@ def test_unrecognized_aggregates_are_counted_not_dropped(tmp_path):
 def test_unrecognized_aggregates_count_against_scan_coverage(tmp_path):
     models = tmp_path / "models"
     models.mkdir()
-    (models / "a.sql").write_text("-- semantix: relation=db.main.a\n"
+    (models / "a.sql").write_text("-- touchstone: relation=db.main.a\n"
                                   "SELECT SUM(amount) AS s, product(amount) AS p "
                                   "FROM db.main.t\n")
     (tmp_path / "catalog.yml").write_text("db:\n  main:\n    t:\n      amount: DOUBLE\n")
@@ -528,7 +528,7 @@ def test_a_timestamptz_history_column_needs_no_pytz(tmp_path):
     """#63"""
     import duckdb
 
-    from semantix.warehouse import DuckDBWarehouse
+    from touchstone.warehouse import DuckDBWarehouse
 
     con = duckdb.connect()
     con.execute("CREATE TABLE h AS SELECT 'SELECT 1' AS statement_text, "

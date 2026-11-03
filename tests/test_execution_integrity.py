@@ -7,9 +7,9 @@ a wrong one is worse than none. Every test here failed before its fix.
 
 import pytest
 
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.execute import _is_additive
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.execute import _is_additive
 
 from .policy import engine_verdict
 
@@ -132,7 +132,7 @@ def test_collision_tolerance_survives_float_summation_noise(tmp_path):
 
 def test_a_real_collision_is_still_caught():
     """The falsification check must still fire on a genuine mismatch."""
-    from semantix.services.execute import _diverges
+    from touchstone.services.execute import _diverges
 
     assert not _diverges(700.70, 700.7000000000001)
     assert not _diverges(1_000_000.0, 1_000_000.0000001)

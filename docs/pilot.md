@@ -7,7 +7,7 @@ and which could not be judged — and why.**
 A query-history export alone cannot answer that. It says what ran. It does not say which
 definitions were authoritative, what they were when each query ran, or which session
 defaults a short table name resolved under. The pilot package supplies those explicitly,
-and `semantix monitor --pilot` refuses a package that leaves one out.
+and `touchstone monitor --pilot` refuses a package that leaves one out.
 
 ## Package layout
 
@@ -81,7 +81,7 @@ approved_time_groupings:
   and units from YEAR, QUARTER, MONTH, WEEK, DAY, HOUR, MINUTE, SECOND, MILLISECOND and
   MICROSECOND (or a spelling the dialect's DATE_TRUNC accepts for one, such as `MM`).
   Anything else is refused at load, and so is a measure or dimension listed twice — in
-  any case, and as an exact duplicate key (every YAML file semantix reads — pilot,
+  any case, and as an exact duplicate key (every YAML file touchstone reads — pilot,
   catalog, snapshots, the benchmark dataset and criteria — refuses a key written twice
   in one mapping, which YAML would otherwise silently drop; an explicit key overriding
   a `<<:` merge is not a duplicate).
@@ -120,7 +120,7 @@ approved_time_groupings:
 
 1. **Export history.** Run [scripts/export_databricks_history.sql](../scripts/export_databricks_history.sql)
    for the window, download the result as CSV, and save it as `history.csv`. Confirm the
-   column names first with `DESCRIBE TABLE system.query.history`. Columns semantix does
+   column names first with `DESCRIBE TABLE system.query.history`. Columns touchstone does
    not read are listed in the report, not silently used. Timestamps are compared as UTC.
 2. **Snapshot the approved views.** For each view, take the YAML body of its definition
    (for example, from `SHOW CREATE TABLE main.finance.revenue_mv`, the text between the
@@ -128,18 +128,18 @@ approved_time_groupings:
    `shasum -a 256 views/revenue_mv.yaml`, or leave `sha256` empty once and the loader
    prints it.
 3. **Catalog.** Write `catalog.yml` for the tables the views read, or generate it with
-   `semantix catalog --warehouse …`.
+   `touchstone catalog --warehouse …`.
 4. **Scan** the snapshots together with the estate's models, so the authority the
    monitor cites is the one the scan verified:
    ```bash
-   semantix scan --dbt my_project --uc-metrics pilot/views --catalog pilot/catalog.yml \
+   touchstone scan --dbt my_project --uc-metrics pilot/views --catalog pilot/catalog.yml \
      --dialect databricks --db pilot.db
    ```
    The monitor refuses if the latest scan did not read each snapshot measure
    byte-for-byte.
 5. **Monitor:**
    ```bash
-   semantix monitor --pilot pilot/ --dbt my_project --db pilot.db --json findings.json
+   touchstone monitor --pilot pilot/ --dbt my_project --db pilot.db --json findings.json
    ```
 
 ## Session context
@@ -156,7 +156,7 @@ dashboard in the window runs against one catalog and schema. The report states w
 a context was asserted.
 
 **Session state is reconstructed only from evidence.** What a short name reads can be
-changed by statements the session ran earlier ([session.py](../src/semantix/services/session.py)).
+changed by statements the session ran earlier ([session.py](../src/touchstone/services/session.py)).
 The rules:
 
 - **What each statement can change.**
@@ -185,7 +185,7 @@ SELECT-only export hides exactly the statements that change a session. An assert
 `execution_context` is your statement that nothing outside the export changed these
 names either.
 
-**Identity.** A query is judged as the metric it claims. A `-- semantix: metric=<name>`
+**Identity.** A query is judged as the metric it claims. A `-- touchstone: metric=<name>`
 comment names only the statement it is written on; a tag on the same line after a
 statement's semicolon belongs to that statement. Query tags may be `metric=<name>`,
 `metric: <name>` or JSON (`{"metric": "<name>"}`). A query tag or an `asset_map` entry
@@ -204,7 +204,7 @@ Every measure use lands in exactly one bucket: suspected difference, candidate,
 unregistered, unverifiable (including experimental matches), or below the recurrence
 threshold. A use's
 bucket is its most severe finding, judged as the metric the query claims to compute
-(its alias, an explicit `-- semantix: metric=` tag, or the asset map); a calculation
+(its alias, an explicit `-- touchstone: metric=` tag, or the asset map); a calculation
 that matches a *different* approved metric is evidence on that finding, not a second
 one. Judgment runs in a fixed order: definition evidence (for the referenced and the
 claimed metric), then the supported-SQL boundary (shape, filters, groupings), then the
@@ -228,9 +228,9 @@ by reason, which shows where the next bottleneck is:
 
 It is not a conclusion while positive verdicts are suspended. It says that, on the tree
 sqlglot parsed, the query matched an authoritative definition exactly, or matched one of
-the shapes listed in rule set `monitor-conformance/1` ([conformance.py](../src/semantix/services/conformance.py)).
+the shapes listed in rule set `monitor-conformance/1` ([conformance.py](../src/touchstone/services/conformance.py)).
 Both observations and definitions are read through the proof grammar of
-[`semantix-proof/2`](proof-policy.md). A select-project-filter CTE or derived table is
+[`touchstone-proof/2`](proof-policy.md). A select-project-filter CTE or derived table is
 inlined by a stated rule and judged as the single query it is. SQL outside the grammar
 is unverifiable, and its optimizer reading appears only as `suspected` context.
 It says nothing beyond that rule set. Excluded from the claim:
@@ -243,8 +243,8 @@ It says nothing beyond that rule set. Excluded from the claim:
 - unsupported dimension expressions
 - Databricks runtime behaviour of `MEASURE()` beyond its declared definition
 
-`semantix oracle` executes every match the rules produce for its generated cases against
+`touchstone oracle` executes every match the rules produce for its generated cases against
 the definition plus the identified variation. That challenges the rules on its datasets but
 does not prove them. `MEASURE()` runtime behaviour is checked by
 `tests/test_databricks_integration.py` against a real workspace, which is opt-in via
-`SEMANTIX_DATABRICKS_*` and has not yet been run.
+`TOUCHSTONE_DATABRICKS_*` and has not yet been run.

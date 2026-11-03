@@ -7,13 +7,13 @@ regressions of the previous round's fixes.
 
 import pytest
 
-from semantix.adapters.agents_schema import _lookml_filters
-from semantix.adapters.catalog import load_catalog
-from semantix.extraction.canonicalize import canonicalize, canonicalize_sql
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
-from semantix.signing import receipt_trust
+from touchstone.adapters.agents_schema import _lookml_filters
+from touchstone.adapters.catalog import load_catalog
+from touchstone.extraction.canonicalize import canonicalize, canonicalize_sql
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, CanonLevel, Provenance
+from touchstone.signing import receipt_trust
 
 from .policy import engine_verdict
 
@@ -179,8 +179,8 @@ def test_reaggregation_refusal_survives_spelling_variants():
     """The exact-key aggregate_outputs lookup meant `ANALYTICS.MARTS.M` or a
     database-omitted spelling bypassed the refusal and the sev-96
     metric-over-mart noise returned."""
-    from semantix.adapters.base import DeclaredSpec
-    from semantix.engine import build_claim
+    from touchstone.adapters.base import DeclaredSpec
+    from touchstone.engine import build_claim
     registry = SchemaRegistry(
         {"analytics.raw.orders": {"customer_id": "bigint", "amount": "decimal(18,2)"}})
     mart = canonicalize_sql(
@@ -203,16 +203,16 @@ def test_cte_mediated_and_transitive_readers_of_contested_relations(tmp_path):
     PAST the contested relation — both kept signed CERTIFIED receipts over
     scan-order-ambiguous lineage. Contamination now propagates through the
     dependency graph."""
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
     root = tmp_path / "sql" / "analytics"
     root.mkdir(parents=True)
     # Two DIFFERENT definitions racing for one relation name.
     (root / "aaa.sql").write_text(
-        "-- semantix: relation=analytics.base_rev\n"
+        "-- touchstone: relation=analytics.base_rev\n"
         "select customer_id, sum(amount) as rev from raw.orders "
         "where status = 'completed' group by 1")
     (root / "zzz.sql").write_text(
-        "-- semantix: relation=analytics.base_rev\n"
+        "-- touchstone: relation=analytics.base_rev\n"
         "select customer_id, sum(amount) as rev from raw.orders group by 1")
     # A CTE-mediated reader and a transitive reader.
     (root / "mid.sql").write_text(
@@ -256,12 +256,12 @@ def test_partial_no_drift_receipts_are_historical_not_drifted():
     assert not any("has drifted" in w for w in warnings)
     assert any("metrics_yaml" in w for w in warnings)
     fresh = {"status": "CERTIFIED", "scan_id": "scan_1", "freshness": {"status": "fresh"},
-             "proof_policy": "semantix-proof/2"}
+             "proof_policy": "touchstone-proof/2"}
     # Issuance freshness alone is historical (round fourteen); a live check
     # bound to the receipt's scan establishes that the estate is unchanged —
     # but under the conclusions policy a CERTIFIED claim is suspended, so even
     # then it is not valid for current use.
-    from semantix.signing import assess_receipt
+    from touchstone.signing import assess_receipt
     assert receipt_trust(fresh)[0] is False
     assert assess_receipt(fresh).estate_unchanged is None
     bound = assess_receipt(fresh, {"status": "fresh", "scan_id": "scan_1"})
@@ -297,7 +297,7 @@ def test_as_of_receipts_survive_current_estate_drift():
     trusted, warnings = receipt_trust(receipt)
     # Drift is disclosure, not decay: still a historical record. Untrusted
     # only because the claim is suspended under the conclusions policy.
-    from semantix.signing import assess_receipt
+    from touchstone.signing import assess_receipt
     a = assess_receipt(receipt)
     assert a.historical and not a.semantic_claim_usable and trusted is False
     assert any("a record of that instant only" in w for w in warnings)
@@ -333,7 +333,7 @@ def test_non_string_lookml_sql_is_refused():
     """str()-coercing a dict produced `sum({'dialect': 'x'})` — a valid
     DuckDB struct literal, canonicalized at proof grade as a definition
     nobody wrote."""
-    from semantix.adapters.agents_schema import _lookml_expr
+    from touchstone.adapters.agents_schema import _lookml_expr
     expr, untranslatable = _lookml_expr({"sql": {"dialect": "x"}, "type": "sum"})
     assert expr is None
     assert untranslatable
@@ -369,7 +369,7 @@ def test_supersession_disclosure_does_not_block_certification(tmp_path):
     artifact channel, so a routine replay dump PERMANENTLY un-certified the
     estate with the false reason 'could not be read' — the statement WAS
     read; OR REPLACE means the end state is the truth."""
-    from semantix.engine import run_scan
+    from touchstone.engine import run_scan
     dump = tmp_path / "views.sql"
     dump.write_text(
         "CREATE VIEW analytics.net_revenue AS SELECT SUM(amount) AS net_revenue "
@@ -393,7 +393,7 @@ def test_supersession_disclosure_does_not_block_certification(tmp_path):
 
 
 def test_mcp_server_refuses_a_missing_store(tmp_path):
-    from semantix.mcp import McpServer
+    from touchstone.mcp import McpServer
     with pytest.raises(ValueError):
         McpServer(str(tmp_path / "typo.db"))
     assert not (tmp_path / "typo.db").exists()

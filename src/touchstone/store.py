@@ -1,0 +1,1557 @@
+"""Bitemporal, append-only fingerprint store (§4 of the architecture spec).
+
+Two invariants are enforced structurally rather than by convention:
+
+* Append-only — every write path is an INSERT (INSERT OR IGNORE for
+  content-addressed rows). Nothing is ever DELETEd. Two UPDATE shapes exist,
+  neither of which mutates semantic history: `finish_scan`'s write-once stats
+  stamp (guarded by `stats_json IS NULL`) and `_migrate_timestamp_width`'s
+  one-time representation canonicalization (the recorded instants are
+  unchanged; only their text width is). The observation log's CONTENT is
+  INSERT-only without exception.
+* Derived valid time — a definition's valid interval is never stored as a
+  mutable column. It is computed at read time from the observation log: a
+  fingerprint is live at a definition site from its first observation until
+  a different fingerprint is first observed at the same site.
+
+SQLite is the Phase 0 engine. The schema is deliberately portable SQL
+(TEXT ids, ISO-8601 UTC timestamps, JSON payloads as TEXT) so the spec's
+v0 Postgres target is a connection-string change, not a redesign.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+# One normalization function for the whole system. The store used to carry a
+# private copy that disagreed with the resolver's on names containing digits
+# or punctuation, so a concept the resolver had clustered could not be found
+# again at attest time — yielding a SIGNED receipt with an empty
+# definition_version and empty lineage.
+from touchstone.extraction.proof import POLICY_ID, policy_in_force
+from touchstone.models import (
+    VERDICT_PRECEDENCE,
+    Claim,
+    Concept,
+    Fingerprint,
+    Receipt,
+    Verdict,
+    VerdictType,
+)
+from touchstone.services.resolution import normalize_name
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS scans (
+    scan_id     TEXT PRIMARY KEY,
+    label       TEXT,
+    dialect     TEXT,
+    started_at  TEXT NOT NULL,
+    stats_json  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    system      TEXT NOT NULL,
+    object_id   TEXT NOT NULL,
+    relation    TEXT,
+    path        TEXT,
+    raw_sha     TEXT,
+    canon_level TEXT,
+    error       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fingerprints (
+    fingerprint_id      TEXT PRIMARY KEY,
+    concept_candidate   TEXT NOT NULL,
+    semantic_hash       TEXT NOT NULL,
+    relation            TEXT,
+    dialect             TEXT,
+    canon_level         TEXT,
+    measure_expr        TEXT,
+    filters_json        TEXT,
+    grain_json          TEXT,
+    join_nodes_json     TEXT,
+    join_edges_json     TEXT,
+    source_columns_json TEXT,
+    canonical_sql       TEXT,
+    provenance_json     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS claims (
+    claim_id        TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT,
+    owner           TEXT,
+    model           TEXT,
+    expr_raw        TEXT,
+    expressible     INTEGER NOT NULL,
+    semantic_hash   TEXT,
+    canon_level     TEXT,
+    measure_expr    TEXT,
+    filters_json    TEXT,
+    grain_json      TEXT,
+    join_nodes_json TEXT,
+    join_edges_json TEXT,
+    source_columns_json TEXT,
+    canonical_sql   TEXT,
+    error           TEXT,
+    provenance_json TEXT
+);
+
+-- The observation log: the only source of temporal truth.
+-- record time = observed_at (when the engine saw it, per scan);
+-- valid time  = derived interval between observations at one object_key.
+CREATE TABLE IF NOT EXISTS observations (
+    scan_id     TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    kind        TEXT NOT NULL,          -- 'fingerprint' | 'claim'
+    object_key  TEXT NOT NULL,          -- definition site
+    ref_id      TEXT NOT NULL,
+    PRIMARY KEY (scan_id, kind, object_key, ref_id)
+);
+
+CREATE TABLE IF NOT EXISTS concepts (
+    scan_id      TEXT NOT NULL,
+    concept_id   TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    members_json TEXT NOT NULL,
+    PRIMARY KEY (scan_id, concept_id)
+);
+
+CREATE TABLE IF NOT EXISTS verdicts (
+    verdict_id    TEXT PRIMARY KEY,
+    scan_id       TEXT NOT NULL,
+    concept_id    TEXT NOT NULL,
+    concept_label TEXT NOT NULL,
+    verdict       TEXT NOT NULL,
+    severity      INTEGER NOT NULL,
+    summary       TEXT,
+    evidence_json TEXT,
+    created_at    TEXT NOT NULL
+);
+
+-- Which artifacts (by content hash) each scan observed: the estate snapshot
+-- that receipt freshness checks compare against. Append-only.
+CREATE TABLE IF NOT EXISTS scan_artifacts (
+    scan_id     TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    PRIMARY KEY (scan_id, artifact_id)
+);
+
+-- Per-scan fate of every artifact the scan KNEW ABOUT, which is what makes
+-- absence interpretable. A site may only be retired when a scan enumerated
+-- its source and the artifact was genuinely gone; an artifact that was listed
+-- but unreadable (uncompiled, unparseable) carries NO information about
+-- whether its definitions still exist.
+CREATE TABLE IF NOT EXISTS scan_artifact_state (
+    scan_id      TEXT NOT NULL,
+    artifact_key TEXT NOT NULL,       -- "<system>:<object_id>"
+    readable     INTEGER NOT NULL,    -- 1 = extracted from, 0 = known but unreadable
+    PRIMARY KEY (scan_id, artifact_key)
+);
+
+CREATE TABLE IF NOT EXISTS receipts (
+    receipt_id   TEXT PRIMARY KEY,
+    concept      TEXT NOT NULL,
+    as_of        TEXT,
+    issued_at    TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+-- Receipt-signing keys (append-only; newest row signs). Phase 0 keeps the
+-- private half here — single-tenant local file; production custody is a KMS.
+CREATE TABLE IF NOT EXISTS signing_keys (
+    key_id      TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    public_key  TEXT NOT NULL,
+    private_key TEXT NOT NULL
+);
+
+-- Relationship layer: join edges as first-class, direction-free identities.
+-- Same doctrine one level down — mined usage is a claim, declared FKs are
+-- claims, and only warehouse checks upgrade either to verified.
+CREATE TABLE IF NOT EXISTS relationship_edges (
+    edge_id        TEXT PRIMARY KEY,   -- content hash of canonical endpoints
+    left_relation  TEXT NOT NULL,
+    left_column    TEXT NOT NULL,
+    right_relation TEXT NOT NULL,
+    right_column   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS relationship_observations (
+    observed_at TEXT NOT NULL,
+    edge_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,          -- 'mined' | 'declared'
+    source      TEXT NOT NULL,          -- history file/warehouse | catalog path
+    stats_json  TEXT,
+    PRIMARY KEY (observed_at, edge_id, kind, source)
+);
+
+CREATE TABLE IF NOT EXISTS relationship_checks (
+    check_id      TEXT PRIMARY KEY,
+    edge_id       TEXT NOT NULL,
+    checked_at    TEXT NOT NULL,
+    warehouse     TEXT,
+    passed        INTEGER NOT NULL,
+    evidence_json TEXT NOT NULL
+);
+
+-- Read-path indexes. history()/issue_receipt() walk observations and concepts
+-- on every call; without these, read cost grows with ALL store history per
+-- query (measured: attest 66ms at 30 scans -> 216ms at 120) and publish is
+-- concepts x receipts. Indexes are representation, not history.
+CREATE INDEX IF NOT EXISTS idx_observations_kind ON observations (kind, object_key, observed_at);
+CREATE INDEX IF NOT EXISTS idx_concepts_scan ON concepts (scan_id);
+CREATE INDEX IF NOT EXISTS idx_verdicts_scan ON verdicts (scan_id);
+CREATE INDEX IF NOT EXISTS idx_scan_artifacts_scan ON scan_artifacts (scan_id);
+CREATE INDEX IF NOT EXISTS idx_rel_checks_edge ON relationship_checks (edge_id, checked_at);
+"""
+
+
+def utcnow() -> str:
+    """Now, to MILLISECONDS.
+
+    Whole seconds could not represent a change that happens inside one, so two
+    scans in the same second produced a ZERO-LENGTH valid interval: a
+    definition that genuinely existed was live at no instant, and an `asof`
+    query at the only moment it was ever observed returned its replacement.
+    Millisecond precision sorts identically as text (fixed width, zero-padded)
+    and stays comparable with the whole-second timestamps already in a store —
+    `normalize_ts` renders both to this shape.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+@dataclass
+class ValidInterval:
+    """Derived valid-time interval of one fingerprint at one definition site."""
+
+    object_key: str
+    ref_id: str
+    concept_candidate: str
+    semantic_hash: str
+    valid_from: str
+    valid_to: str | None  # None = still live
+    relation: str | None = None
+
+
+# The default store name, and the one it had under the project's former name.
+DEFAULT_PATH = "touchstone.db"
+FORMER_PATH = "semantix.db"
+
+
+def former_store(path: str | Path) -> str | None:
+    """Why `path` must not be opened: it is the default name, and either it is
+    absent while the store kept under the former name sits beside it, or the
+    former store's WAL was left behind when the store was renamed. A store
+    holds the Ed25519 signing key, so a fresh touchstone.db would mint a NEW
+    key and every receipt the old one signed would stop verifying against a
+    pinned key."""
+    path = Path(path)
+    former = path.with_name(FORMER_PATH)
+    if path.name != DEFAULT_PATH:
+        return None
+    wal = path.with_name(f"{FORMER_PATH}-wal")
+    if not former.exists() and wal.exists() and wal.stat().st_size > 0:
+        # The main file was renamed and its WAL left behind: the store opens
+        # without the writes that live there, and would mint a new key when the
+        # key was the last thing written.
+        return (f"{wal} sits beside {path} without {former}: it holds writes to the "
+                f"store that never reached the main file, possibly its signing key. "
+                f"With nothing holding the store open, rename it to {DEFAULT_PATH}-wal "
+                f"(and {FORMER_PATH}-shm to {DEFAULT_PATH}-shm, if there) before running "
+                f"anything. If {DEFAULT_PATH}-wal already exists, touchstone has written "
+                f"since and the former file can no longer be replayed: restore "
+                f"{FORMER_PATH} with its -wal from a backup, or move {wal.name} aside "
+                f"to go on without those writes")
+    if path.exists() or not former.exists():
+        return None
+    # The store runs in WAL mode: committed writes not yet checkpointed live in
+    # the -wal file, and renaming the main file alone loses them — the signing
+    # key among them, when it was minted last.
+    sidecars = [s for s in (f"{FORMER_PATH}-wal", f"{FORMER_PATH}-shm")
+                if former.with_name(s).exists()]
+    return (f"no store at {path}, but {former} exists — the store's name before the "
+            f"project was renamed touchstone. It holds the signing key and the history: "
+            f"with nothing holding it open, rename it to {DEFAULT_PATH}"
+            + (f" together with {' and '.join(sidecars)} (renamed to match)"
+               if sidecars else "")
+            + f", or pass --db {former}")
+
+
+class Store:
+    def __init__(self, path: str | Path):
+        self.path = str(path)
+        refusal = former_store(self.path)
+        if refusal:
+            raise ValueError(refusal)
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        # A scan of a real estate holds its write transaction for minutes, so
+        # two CI jobs on two PRs meant one died with a bare
+        # `sqlite3.OperationalError: database is locked`. WAL lets readers
+        # (concepts, attest, the MCP server) run against a store mid-scan, and
+        # busy_timeout makes a competing WRITER wait its turn instead of
+        # failing instantly.
+        self._conn = sqlite3.connect(self.path, timeout=120.0)
+        self._conn.row_factory = sqlite3.Row
+        self._readonly = False
+        try:
+            # Retried: the journal-mode CONVERSION during concurrent first
+            # creation raced a second scan and one died with a raw "database
+            # is locked" — the exact two-CI-jobs shape WAL exists to serve,
+            # unprotected only during the store's first moments.
+            for attempt in range(6):
+                try:
+                    self._conn.execute("PRAGMA busy_timeout=120000")
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                    self._conn.executescript(SCHEMA)
+                    self._migrate_timestamp_width()
+                    self._conn.commit()
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < 5:
+                        import time as _time
+                        _time.sleep(0.25 * (attempt + 1))
+                        continue
+                    raise
+        except sqlite3.OperationalError as e:
+            message = str(e).lower()
+            readonly = "readonly" in message or "read-only" in message
+            unopenable = "unable to open" in message
+            if not (readonly or unopenable):
+                raise
+            # A store on a read-only mount (locked-down CI, a build artifact)
+            # must still OPEN for the read paths. Reconnect with mode=ro —
+            # which honors WAL recovery read-only where possible. NEVER
+            # immutable=1: it silently ignores an unapplied -wal tail, so a
+            # store from an unclean shutdown served SUPERSEDED state with no
+            # error from every read surface. If even mode=ro cannot open it
+            # (a WAL tail on a filesystem where the -shm cannot be created),
+            # refuse with the reason rather than serve stale data.
+            self._readonly = True
+            self._conn.close()
+            try:
+                self._conn = sqlite3.connect(
+                    f"file:{self.path}?mode=ro", uri=True, timeout=120.0
+                )
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            except sqlite3.Error as ro_err:
+                # mode=ro needs the -shm for a WAL-journal store, which a
+                # read-only filesystem cannot create. immutable=1 avoids that
+                # but silently IGNORES an unapplied -wal tail — a store from
+                # an unclean shutdown served superseded state with no error.
+                # So immutable is used ONLY when no -wal exists (nothing to
+                # miss); with a tail present, refuse rather than serve stale.
+                if Path(f"{self.path}-wal").exists():
+                    raise ValueError(
+                        f"{self.path}: the store is on read-only storage and "
+                        f"carries an unapplied WAL tail that cannot be read "
+                        f"there ({ro_err}) — copy it to writable storage, open "
+                        f"it once, and retry"
+                    ) from ro_err
+                self._conn = sqlite3.connect(
+                    f"file:{self.path}?immutable=1", uri=True, timeout=120.0
+                )
+                self._conn.row_factory = sqlite3.Row
+
+    def _migrate_timestamp_width(self) -> None:
+        """One-time canonicalization of pre-millisecond timestamps.
+
+        The millisecond form does NOT text-order against the whole-second
+        rows already in existing stores: '…:00Z' sorts AFTER '…:00.500Z' of
+        the same second ('Z' = 0x5A > '.' = 0x2E) — the OPPOSITE of what the
+        first version of this change claimed. On any store written before the
+        change, `as_of` at a recorded instant returned the superseded
+        definition, `attest --as-of` signed the previous scan's verdict for
+        the whole transition second, and `restatement_check` missed recorded
+        restatements. Comparisons happen as TEXT in SQL and Python alike, so
+        the only sound state is ONE width everywhere.
+
+        This rewrites REPRESENTATION, not history: the instant each row
+        records is unchanged, so the append-only doctrine (no semantic
+        mutation) holds. Receipt payload_json is deliberately untouched —
+        receipts are signed bytes.
+        """
+        for table, column in (
+            ("scans", "started_at"),
+            ("observations", "observed_at"),
+            ("verdicts", "created_at"),
+            ("receipts", "issued_at"),
+            ("relationship_observations", "observed_at"),
+            ("relationship_checks", "checked_at"),
+            ("signing_keys", "created_at"),
+        ):
+            self._conn.execute(
+                f"UPDATE {table} SET {column} = substr({column}, 1, 19) || '.000Z' "
+                f"WHERE length({column}) = 20"
+            )
+
+    def close(self) -> None:
+        self._conn.close()
+
+    # ------------------------------------------------------------------ scans
+
+    def begin_scan(self, label: str | None, dialect: str) -> tuple[str, str]:
+        scan_id = "scan_" + uuid.uuid4().hex[:12]
+        # Normalized at the WRITE boundary, not only on read. Valid time is
+        # compared as TEXT, so a store holding two representations of the same
+        # instant ('...00Z' and '...00.000Z') orders them wrongly and an as-of
+        # query at exactly that instant returns the previous definition.
+        started_at = normalize_ts(utcnow())
+        self._conn.execute(
+            "INSERT INTO scans (scan_id, label, dialect, started_at) VALUES (?, ?, ?, ?)",
+            (scan_id, label, dialect, started_at),
+        )
+        self._conn.commit()
+        return scan_id, started_at
+
+    def finish_scan(self, scan_id: str, stats: dict) -> None:
+        # stats are set exactly once at scan end; the row is otherwise immutable
+        self._conn.execute(
+            "UPDATE scans SET stats_json = ? WHERE scan_id = ? AND stats_json IS NULL",
+            (json.dumps(stats), scan_id),
+        )
+        self._conn.commit()
+
+    def latest_scan(self) -> dict | None:
+        """The newest scan that actually FINISHED.
+
+        A scan that died partway wrote no stats and describes nothing, but it
+        is still the newest row — so every "current health" interface
+        (`concepts`, `attest`, `publish`, the MCP tools) answered from it and
+        reported a CLEAN ESTATE. The store held a recorded CONTRADICTION at
+        that moment; `concepts` printed an empty verdict list, which reads as
+        "nothing is wrong". `completed_scans` already applied this filter and
+        `diff` already used it; the rest of the read paths did not.
+        """
+        # rowid = insertion order: two scans inside the same second must not
+        # tie-break on the random scan_id (recent_scans already does this).
+        row = self._conn.execute(
+            "SELECT * FROM scans WHERE stats_json IS NOT NULL ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def finished_scan(self, scan_id: str) -> dict | None:
+        """One FINISHED scan by id (a scan that died partway describes nothing)."""
+        row = self._conn.execute(
+            "SELECT * FROM scans WHERE scan_id = ? AND stats_json IS NOT NULL", (scan_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def scans(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute("SELECT * FROM scans ORDER BY started_at")]
+
+    def scan_as_of(self, ts: str) -> dict | None:
+        """The scan that was current at `ts` — the one whose verdicts described
+        the estate at that instant. None if the store had not yet scanned.
+
+        Completed scans only, like `latest_scan`: an interrupted begin-and-die
+        row describes nothing, and serving it made `attest --as-of` refuse
+        with a message that was itself false ("no verdicts recorded") while
+        the completed scan's verdicts sat one row earlier.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM scans WHERE started_at <= ? AND stats_json IS NOT NULL "
+            "ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (normalize_ts(ts),),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def snapshot_digest(self, scan_id: str) -> str:
+        """Content fingerprint of the estate a scan observed. Two scans of an
+        unchanged estate share a digest, which is what lets `diff` tell a
+        re-run apart from a genuine change."""
+        shas = sorted(
+            f"{r['system']}:{r['object_id']}:{r['raw_sha']}"
+            for r in self.scan_snapshot(scan_id)
+        )
+        return hashlib.sha256("|".join(shas).encode()).hexdigest() if shas else ""
+
+    def completed_scans(self, limit: int = 50) -> list[dict]:
+        """Scans that finished, newest first. A scan that died partway wrote
+        no stats and describes nothing, so it must never serve as a baseline."""
+        rows = self._conn.execute(
+            "SELECT * FROM scans WHERE stats_json IS NOT NULL ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def recent_scans(self, limit: int = 2) -> list[dict]:
+        """Most recent scans in insertion order (newest first). rowid breaks
+        started_at ties, which matter in CI where two scans share a second."""
+        rows = self._conn.execute(
+            "SELECT * FROM scans ORDER BY rowid DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -------------------------------------------------------------- artifacts
+
+    def record_artifact(
+        self,
+        kind: str,
+        system: str,
+        object_id: str,
+        relation: str | None,
+        path: str | None,
+        raw_text: str,
+        canon_level: str,
+        error: str | None,
+        scan_id: str | None = None,
+    ) -> str:
+        raw_sha = hashlib.sha256(raw_text.encode()).hexdigest()
+        artifact_id = hashlib.sha256(f"{system}|{object_id}|{raw_sha}".encode()).hexdigest()
+        self._conn.execute(
+            """INSERT OR IGNORE INTO artifacts
+               (artifact_id, kind, system, object_id, relation, path, raw_sha, canon_level, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (artifact_id, kind, system, object_id, relation, path, raw_sha, canon_level, error),
+        )
+        if scan_id is not None:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO scan_artifacts VALUES (?, ?)",
+                (scan_id, artifact_id),
+            )
+        return artifact_id
+
+    def scan_snapshot(self, scan_id: str) -> list[dict]:
+        """The estate as one scan observed it: every artifact's identity and
+        content hash. Empty for scans that predate snapshot recording."""
+        rows = self._conn.execute(
+            """SELECT a.system, a.object_id, a.kind, a.relation, a.path, a.raw_sha
+               FROM scan_artifacts sa
+               JOIN artifacts a ON a.artifact_id = sa.artifact_id
+               WHERE sa.scan_id = ?
+               ORDER BY a.system, a.object_id""",
+            (scan_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ----------------------------------------------------------- fingerprints
+
+    def record_fingerprint(self, fp: Fingerprint, scan_id: str, observed_at: str) -> None:
+        self._conn.execute(
+            """INSERT OR IGNORE INTO fingerprints VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                fp.fingerprint_id,
+                fp.concept_candidate,
+                fp.core.hash(),
+                fp.relation,
+                fp.dialect,
+                fp.canon_level,
+                fp.core.measure_expr,
+                json.dumps(list(fp.core.filters)),
+                json.dumps(list(fp.core.grain)),
+                json.dumps(list(fp.core.join_nodes)),
+                json.dumps(list(fp.core.join_edges)),
+                json.dumps(list(fp.core.source_columns)),
+                fp.canonical_sql,
+                json.dumps(fp.provenance.as_dict()),
+            ),
+        )
+        self._observe(scan_id, observed_at, "fingerprint", fp.object_key, fp.fingerprint_id)
+
+    def record_claim(self, claim: Claim, scan_id: str, observed_at: str) -> None:
+        core = claim.core
+        self._conn.execute(
+            """INSERT OR IGNORE INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                claim.claim_id,
+                claim.name,
+                claim.description,
+                claim.owner,
+                claim.model,
+                claim.expr_raw,
+                1 if claim.expressible else 0,
+                core.hash() if core else None,
+                claim.canon_level,
+                core.measure_expr if core else None,
+                json.dumps(list(core.filters)) if core else None,
+                json.dumps(list(core.grain)) if core else None,
+                json.dumps(list(core.join_nodes)) if core else None,
+                json.dumps(list(core.join_edges)) if core else None,
+                json.dumps(list(core.source_columns)) if core else None,
+                claim.canonical_sql,
+                claim.error,
+                json.dumps(claim.provenance.as_dict()),
+            ),
+        )
+        self._observe(scan_id, observed_at, "claim", claim.object_key, claim.claim_id)
+
+    def _observe(self, scan_id: str, observed_at: str, kind: str, object_key: str, ref_id: str) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO observations VALUES (?, ?, ?, ?, ?)",
+            (scan_id, normalize_ts(observed_at), kind, object_key, ref_id),
+        )
+
+    # ------------------------------------------------------ concepts/verdicts
+
+    def save_results(self, scan_id: str, concepts: list[Concept], verdicts: list[Verdict]) -> None:
+        for concept in concepts:
+            members = {
+                "fingerprints": [fp.fingerprint_id for fp in concept.fingerprints],
+                "claims": [cl.claim_id for cl in concept.claims],
+                # Every NAME this concept goes by. The label is only one of
+                # them and is chosen from the members, so it moves when the
+                # ontology gains an alias — after which `attest <the old name>`
+                # returned nothing with no explanation. Recorded so a receipt
+                # can be found by any name the estate actually uses.
+                "names": sorted({fp.concept_candidate for fp in concept.fingerprints}
+                                | {cl.name for cl in concept.claims}),
+            }
+            # (scan_id, concept_id) is unique per scan, so this is a pure append;
+            # OR IGNORE only makes a crashed-and-retried save idempotent.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO concepts VALUES (?, ?, ?, ?)",
+                (scan_id, concept.concept_id, concept.label, json.dumps(members)),
+            )
+        created_at = utcnow()
+        for verdict in verdicts:
+            verdict_id = "v_" + uuid.uuid4().hex[:12]
+            self._conn.execute(
+                "INSERT INTO verdicts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    verdict_id,
+                    scan_id,
+                    verdict.concept_id,
+                    verdict.concept_label,
+                    verdict.verdict_type.value,
+                    verdict.severity,
+                    verdict.summary,
+                    json.dumps(verdict.evidence),
+                    created_at,
+                ),
+            )
+        self._conn.commit()
+
+    def verdicts_for_scan(self, scan_id: str) -> list[dict]:
+        """The scan's verdicts as the policy in force reports them
+        (touchstone.conclusions). The ONE read path for every consumer — mcp,
+        cli, diff, publish, propose, report, receipts — so a store written
+        before the policy can never surface a suspended claim. Stored rows
+        are not rewritten; a mapped row carries `stored_verdict`."""
+        from touchstone.conclusions import effective_row
+
+        rows = self._conn.execute(
+            "SELECT * FROM verdicts WHERE scan_id = ? ORDER BY severity DESC, concept_label",
+            (scan_id,),
+        )
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["evidence"] = json.loads(d.pop("evidence_json") or "{}")
+            out.append(effective_row(d))
+        return out
+
+    def fingerprint_row(self, fingerprint_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM fingerprints WHERE fingerprint_id = ?", (fingerprint_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def claim_row(self, claim_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def concepts_for_scan(self, scan_id: str) -> list[dict]:
+        """Every concept one scan resolved, members parsed. The monitor's
+        reference set: which definitions the estate is known to hold."""
+        rows = self._conn.execute(
+            "SELECT concept_id, label, members_json FROM concepts "
+            "WHERE scan_id = ? ORDER BY label",
+            (scan_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["members"] = json.loads(d.pop("members_json") or "{}")
+            out.append(d)
+        return out
+
+    # ------------------------------------------------------------ valid time
+
+    def record_artifact_state(self, scan_id: str, system: str, object_id: str,
+                              readable: bool) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO scan_artifact_state VALUES (?, ?, ?)",
+            (scan_id, f"{system}:{object_id}", 1 if readable else 0),
+        )
+
+    def issued(self, receipt: dict) -> bool:
+        """Whether THIS store issued exactly this receipt. A signature only
+        shows some key signed it: a receipt re-signed with another key, or
+        rewritten and re-signed, verifies — and was accepted for current use
+        against this store's estate."""
+        rid = receipt.get("receipt_id") if isinstance(receipt, dict) else None
+        if not isinstance(rid, str):
+            return False
+        row = self._conn.execute(
+            "SELECT payload_json FROM receipts WHERE receipt_id = ?", (rid,)).fetchone()
+        if row is None:
+            return False
+        try:
+            return json.loads(row["payload_json"]) == receipt
+        except ValueError:
+            return False
+
+    def unreadable_artifacts(self, scan_id: str) -> list[tuple[str, str]]:
+        """(system, object_id) of every artifact the scan enumerated but
+        could not read."""
+        return sorted(tuple(key.split(":", 1))  # type: ignore[misc]
+                      for key, readable in self.artifact_states().get(scan_id, {}).items()
+                      if not readable)
+
+    def artifact_states(self) -> dict[str, dict[str, bool]]:
+        """scan_id -> {artifact_key: readable}.
+
+        Memoized like scan_coverage, and for the same reason: history() runs
+        per concept per attest, and rebuilding this full-table map each call
+        kept read cost linear in ALL store history — attest latency doubled
+        with every doubling of accumulated scans, on the MCP answer path.
+        """
+        stamp = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM scan_artifact_state"
+        ).fetchone()
+        key = (stamp[0], stamp[1])
+        cached = getattr(self, "_states_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        out: dict[str, dict[str, bool]] = {}
+        for r in self._conn.execute("SELECT * FROM scan_artifact_state"):
+            out.setdefault(r["scan_id"], {})[r["artifact_key"]] = bool(r["readable"])
+        self._states_cache = (key, out)
+        return out
+
+    def _observation_rows(self) -> list:
+        """The fingerprint-observation join, memoized like its siblings —
+        history() re-ran it per concept per attest, the third of the three
+        full-history walks behind linear attest-latency growth."""
+        stamp = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM observations"
+        ).fetchone()
+        key = (stamp[0], stamp[1])
+        cached = getattr(self, "_obs_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        rows = self._conn.execute(
+            """SELECT o.scan_id, o.object_key, o.observed_at, o.ref_id,
+                      f.concept_candidate, f.semantic_hash, f.relation
+               FROM observations o
+               JOIN fingerprints f ON f.fingerprint_id = o.ref_id
+               WHERE o.kind = 'fingerprint'
+               ORDER BY o.object_key, o.observed_at, o.ref_id"""
+        ).fetchall()
+        self._obs_cache = (key, rows)
+        return rows
+
+    def scan_coverage(self) -> list[tuple[str, str, set[str]]]:
+        # Memoized per completed-scan count: history() calls this for every
+        # concept, and rebuilding the full scans x artifacts map each time made
+        # read cost grow with all store history per query. A new scan (or a
+        # write from another process observed on re-read) changes the count
+        # and invalidates.
+        stamp = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM scan_artifacts"
+        ).fetchone()
+        key = (stamp[0], stamp[1])
+        cached = getattr(self, "_coverage_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        result = self._scan_coverage_uncached()
+        self._coverage_cache = (key, result)
+        return result
+
+    def _scan_coverage_uncached(self) -> list[tuple[str, str, set[str]]]:
+        """[(scan_id, started_at, OBJECT KEYS this scan actually read)], oldest
+        first.
+
+        Absence is only concludable for an artifact the scan ENUMERATED. This
+        used to answer "which SYSTEMS did it touch", which is not evidence
+        about an individual artifact: pointing a second scan at an unrelated
+        dbt project — or at a subdirectory, or running per-team CI jobs against
+        one store — retired every definition the other project had, because
+        both are `system == "dbt"`. The models were still on disk. Re-scanning
+        then produced a second interval, so the store permanently recorded a
+        fictitious death-and-rebirth cycle.
+        """
+        covered: dict[str, set[str]] = {}
+        for r in self._conn.execute(
+            """SELECT sa.scan_id, a.system, a.object_id FROM scan_artifacts sa
+               JOIN artifacts a ON a.artifact_id = sa.artifact_id"""
+        ):
+            covered.setdefault(r["scan_id"], set()).add(
+                f"{r['system']}:{r['object_id']}")
+        # started_at, not rowid: intervals are stamped from observed_at, so a
+        # walk in insertion order produced intervals that do not contain the
+        # instants the definition was observed when a clock moved backwards.
+        return [
+            (r["scan_id"], r["started_at"], covered.get(r["scan_id"], set()))
+            for r in self._conn.execute(
+                "SELECT scan_id, started_at FROM scans ORDER BY started_at, rowid")
+        ]
+
+    def concept_labels_containing(self, name: str, scan_id: str) -> list[str]:
+        """Concept labels in this scan whose MEMBERS include `name`.
+
+        Concept labels are derived from member names, so an ontology addition
+        that changes nothing about a concept's meaning can rename it. Without
+        this, the documented `attest <metric>` flow simply stopped returning
+        anything the day someone declared an alias.
+        """
+        target = normalize_name(name)
+        out = []
+        for r in self._conn.execute(
+            "SELECT label, members_json FROM concepts WHERE scan_id = ?", (scan_id,)
+        ):
+            members = json.loads(r["members_json"] or "{}")
+            names = {normalize_name(n) for n in members.get("names", [])}
+            if target in names:
+                out.append(r["label"])
+        return out
+
+    def _relation_for(self, scan_id: str, object_key: str) -> str | None:
+        """The relation the ARTIFACT at this definition site reported.
+
+        `fingerprints.relation` is on a content-addressed row shared by every
+        site computing the same thing (record_fingerprint is INSERT OR IGNORE),
+        so the first site to be recorded won and history, asof, the HTML report
+        and the signed receipt all attributed the other sites' definitions to
+        its table — two teams' models rendering as one duplicated row.
+        """
+        system, _, rest = object_key.partition(":")
+        object_id = rest.rsplit(":", 1)[0] if ":" in rest else rest
+        row = self._conn.execute(
+            """SELECT a.relation FROM scan_artifacts sa
+               JOIN artifacts a ON a.artifact_id = sa.artifact_id
+               WHERE sa.scan_id = ? AND a.system = ? AND a.object_id = ?
+               LIMIT 1""",
+            (scan_id, system, object_id),
+        ).fetchone()
+        return row["relation"] if row else None
+
+    def concept_members(self, concept_label: str) -> tuple[set[str], set[str]]:
+        """(fingerprint ids, claim ids) ever clustered under this concept.
+
+        Concept resolution runs at scan time and records its clustering in
+        `concepts.members_json`. Re-deriving membership by matching the
+        concept LABEL against member names throws that work away and fails on
+        exactly the case clustering exists for: an aliased concept whose
+        members are all spelled differently from the label (`gmv` clustering
+        `total_gmv` and `gross_merchandise_value`). A label also resolves via
+        any of its members, so asking about a name you saw in a report finds
+        the whole concept rather than a fragment.
+        """
+        target = normalize_name(concept_label)
+        fingerprints: set[str] = set()
+        claims: set[str] = set()
+        rows = self._conn.execute("SELECT label, members_json FROM concepts").fetchall()
+
+        matched_labels = {
+            r["label"] for r in rows if normalize_name(r["label"]) == target
+        }
+        if not matched_labels:
+            # Fall back to membership: the caller may have named a member.
+            # The recorded `names` list carries EVERY name the concept goes by
+            # — including claim-only names. Deriving names from fingerprint
+            # candidates alone missed exactly those, so after an alias rename
+            # `history`/`asof` went dark for the estate's own declared metric
+            # name while `issue_receipt` (which had its own fallback) signed a
+            # receipt asserting "no definition was live" — a false statement
+            # about a concept with two live definitions.
+            for r in rows:
+                members = json.loads(r["members_json"] or "{}")
+                names = set(members.get("names") or []) \
+                    or self._names_for(members.get("fingerprints", []))
+                if any(normalize_name(n) == target for n in names):
+                    matched_labels.add(r["label"])
+
+        for r in rows:
+            if r["label"] in matched_labels:
+                members = json.loads(r["members_json"] or "{}")
+                fingerprints.update(members.get("fingerprints", []))
+                claims.update(members.get("claims", []))
+        return fingerprints, claims
+
+    def _names_for(self, fingerprint_ids: list[str]) -> list[str]:
+        if not fingerprint_ids:
+            return []
+        marks = ",".join("?" * len(fingerprint_ids))
+        return [
+            r["concept_candidate"]
+            for r in self._conn.execute(
+                f"SELECT concept_candidate FROM fingerprints WHERE fingerprint_id IN ({marks})",
+                fingerprint_ids,
+            )
+        ]
+
+    def history(self, concept_label: str) -> list[ValidInterval]:
+        """Derived valid-time intervals for every definition site whose
+        measure name matches the concept label.
+
+        Absence is evidence. A scan that read a site's system and did NOT find
+        the definition there ends its validity — without that, a deleted or
+        renamed model stays `live` forever and keeps appearing in the current
+        receipt as though it were still computing. Reading absence from scan
+        coverage (rather than a mutable end-date column) keeps the store
+        append-only: the observation log remains the only temporal truth.
+        """
+        member_ids, _ = self.concept_members(concept_label)
+        # Membership recorded PER SCAN. Judging every observation against the
+        # union across all scans meant a fingerprint that left a concept kept
+        # being attributed to it, so a receipt could name definitions the
+        # current scan no longer clusters together.
+        per_scan: dict[str, set[str]] = {}
+        for r in self._conn.execute("SELECT scan_id, label, members_json FROM concepts"):
+            if normalize_name(r["label"]) == normalize_name(concept_label):
+                members = json.loads(r["members_json"] or "{}")
+                per_scan.setdefault(r["scan_id"], set()).update(
+                    members.get("fingerprints", [])
+                )
+        target = normalize_name(concept_label)
+        rows = self._observation_rows()
+
+        seen: dict[str, dict[str, sqlite3.Row]] = {}
+        for r in rows:
+            # Membership recorded at scan time is authoritative. The name
+            # match is only a fallback for stores written before concepts
+            # were persisted.
+            scan_members = per_scan.get(r["scan_id"])
+            if scan_members is not None:
+                belongs = r["ref_id"] in scan_members
+            elif member_ids:
+                belongs = r["ref_id"] in member_ids
+            else:
+                belongs = normalize_name(r["concept_candidate"]) == target
+            if not belongs:
+                continue
+            seen.setdefault(r["object_key"], {})[r["scan_id"]] = r
+
+        coverage = self.scan_coverage()
+        covered_by = {scan_id: keys for scan_id, _, keys in coverage}
+        states = self.artifact_states()
+        intervals: list[ValidInterval] = []
+        for object_key, by_scan in seen.items():
+            system, _, rest = object_key.partition(":")
+            artifact_key = f"{system}:{rest.rsplit(':', 1)[0]}" if ":" in rest else object_key
+            runs: list[ValidInterval] = []
+            last_seen_scan: str | None = None
+            for scan_id, started_at, enumerated in coverage:
+                observed = by_scan.get(scan_id)
+                if observed is None:
+                    # Absence is only evidence when the scan (a) covered the
+                    # SAME ESTATE and (b) either found the artifact gone, or
+                    # read it and found this measure gone. An artifact the scan
+                    # LISTED but could not read — an uncompiled dbt model after
+                    # `--select`, an unparseable file — says nothing at all,
+                    # and must not fabricate a retirement date.
+                    #
+                    # "Same estate" cannot be "same system": pointing a second
+                    # scan at an unrelated dbt project retired every definition
+                    # of the first, because both are system == "dbt", while the
+                    # models sat untouched on disk. A deleted model and a model
+                    # in some other project look identical in isolation — both
+                    # are simply absent — so the discriminator is OVERLAP: this
+                    # scan is speaking about the same estate only if it re-read
+                    # something the scan that last saw this definition also
+                    # read.
+                    #
+                    # Scoped to the artifact's OWN system: a rescan that read
+                    # only the metrics YAML overlaps on the claims side while
+                    # having examined no dbt model at all, which is precisely
+                    # the `dbt --select` case that must say nothing.
+                    # MAJORITY overlap, not any-overlap. Boolean overlap made
+                    # ONE shared artifact turn a foreign scan into absence-
+                    # proof for everything it never enumerated: two teams
+                    # syncing a single staging model into both repos retired
+                    # each other's estates on every CI run. A scan is speaking
+                    # about the same estate only if it re-read MOST of what
+                    # the last-seen scan read (same system). The cost is that
+                    # deleting half of a two-model estate is unprovable and
+                    # stays live — absence requires proof, and 50% overlap is
+                    # not proof.
+                    prefix = f"{system}:"
+                    def _same_system(keys, _p=prefix):
+                        return {k for k in keys if k.startswith(_p)}
+                    cohort = _same_system(covered_by.get(last_seen_scan, set())) \
+                        if last_seen_scan else set()
+                    covers_same_estate = bool(cohort) and (
+                        len(_same_system(enumerated) & cohort) * 2 > len(cohort)
+                    )
+                    if not (covers_same_estate and runs and runs[-1].valid_to is None):
+                        continue
+                    known = states.get(scan_id, {})
+                    if known and artifact_key in known and not known[artifact_key]:
+                        continue  # listed but unreadable -> no information
+                    runs[-1].valid_to = started_at
+                    continue
+                last_seen_scan = scan_id
+                if runs and runs[-1].valid_to is None and runs[-1].ref_id == observed["ref_id"]:
+                    continue  # unchanged, still live
+                runs.append(
+                    ValidInterval(
+                        object_key=object_key,
+                        ref_id=observed["ref_id"],
+                        concept_candidate=observed["concept_candidate"],
+                        semantic_hash=observed["semantic_hash"],
+                        valid_from=observed["observed_at"],
+                        valid_to=None,
+                        # The relation the ARTIFACT reported, not whatever the
+                        # content-addressed fingerprints row happens to hold:
+                        # two sites computing the same thing share one
+                        # fingerprint_id (INSERT OR IGNORE), so the first
+                        # site's relation won and a signed receipt attributed
+                        # one team's definition to the other team's table.
+                        relation=self._relation_for(observed["scan_id"], object_key)
+                        or observed["relation"],
+                    )
+                )
+            for i, run in enumerate(runs[:-1]):
+                if run.valid_to is None:
+                    run.valid_to = runs[i + 1].valid_from
+            intervals.extend(runs)
+        return intervals
+
+    def as_of(self, concept_label: str, ts: str) -> list[ValidInterval]:  # noqa: D401
+        """What did this concept mean at time ts — the live definition at each
+        site whose interval contains ts. Caller timestamps are normalized
+        first: valid time is compared as text, so an offset-form instant would
+        otherwise sort before its own 'Z' form and return the superseded
+        definition."""
+        ts = normalize_ts(ts)
+        live = []
+        for interval in self.history(concept_label):
+            if interval.valid_from <= ts and (interval.valid_to is None or ts < interval.valid_to):
+                live.append(interval)
+        return live
+
+    def restatement_check(self, concept_label: str, t0: str, t1: str) -> list[ValidInterval]:
+        """Definition *changes* inside (t0, t1] that a comparison over
+        [t0, t1] would silently span. A site's first-ever definition is a
+        birth, not a restatement, so it never counts."""
+        t0, t1 = normalize_ts(t0), normalize_ts(t1)
+        history = self.history(concept_label)
+        first_seen: dict[str, str] = {}
+        for iv in history:
+            if iv.object_key not in first_seen or iv.valid_from < first_seen[iv.object_key]:
+                first_seen[iv.object_key] = iv.valid_from
+        return [
+            iv
+            for iv in history
+            if t0 < iv.valid_from <= t1 and iv.valid_from != first_seen[iv.object_key]
+        ]
+
+    # ---------------------------------------------------------- signing keys
+
+    def latest_signing_key(self) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM signing_keys ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_signing_key(self, key_id: str, private_key: str, public_key: str) -> None:
+        self._conn.execute(
+            "INSERT INTO signing_keys VALUES (?, ?, ?, ?)",
+            (key_id, utcnow(), public_key, private_key),
+        )
+        self._conn.commit()
+
+    # --------------------------------------------------------- relationships
+
+    def record_relationship_edge(
+        self, edge_id: str, left_relation: str, left_column: str,
+        right_relation: str, right_column: str,
+    ) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO relationship_edges VALUES (?, ?, ?, ?, ?)",
+            (edge_id, left_relation, left_column, right_relation, right_column),
+        )
+
+    def observe_relationship(
+        self, edge_id: str, kind: str, source: str, stats: dict, observed_at: str,
+    ) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO relationship_observations VALUES (?, ?, ?, ?, ?)",
+            (observed_at, edge_id, kind, source, json.dumps(stats)),
+        )
+        self._conn.commit()
+
+    def record_relationship_check(
+        self, edge_id: str, warehouse: str, passed: bool, evidence: dict,
+    ) -> str:
+        check_id = "chk_" + uuid.uuid4().hex[:12]
+        self._conn.execute(
+            "INSERT INTO relationship_checks VALUES (?, ?, ?, ?, ?, ?)",
+            (check_id, edge_id, utcnow(), warehouse, 1 if passed else 0,
+             json.dumps(evidence)),
+        )
+        self._conn.commit()
+        return check_id
+
+    def relationship_graph(self) -> list[dict]:
+        """Read model: every edge with its accumulated mined usage, declared
+        flag, and latest verification check."""
+        edges = {
+            r["edge_id"]: dict(r)
+            for r in self._conn.execute("SELECT * FROM relationship_edges")
+        }
+        for edge in edges.values():
+            edge.update(mined_queries=0, mined_sources=[], declared_sources=[],
+                        first_mined=None, last_mined=None, check=None)
+
+        obs = self._conn.execute(
+            "SELECT * FROM relationship_observations ORDER BY observed_at"
+        ).fetchall()
+        for r in obs:
+            edge = edges.get(r["edge_id"])
+            if edge is None:
+                continue
+            stats = json.loads(r["stats_json"] or "{}")
+            if r["kind"] == "mined":
+                edge["mined_queries"] += int(stats.get("queries", 0))
+                if r["source"] not in edge["mined_sources"]:
+                    edge["mined_sources"].append(r["source"])
+                edge["first_mined"] = edge["first_mined"] or r["observed_at"]
+                edge["last_mined"] = r["observed_at"]
+            elif r["kind"] == "declared" and r["source"] not in edge["declared_sources"]:
+                edge["declared_sources"].append(r["source"])
+
+        # rowid tiebreak: two checks in the same millisecond otherwise pick a
+        # winner by unguaranteed scan order (latest_scan learned this first).
+        checks = self._conn.execute(
+            "SELECT * FROM relationship_checks ORDER BY checked_at, rowid"
+        ).fetchall()
+        for r in checks:  # later rows overwrite: latest check wins the read model
+            edge = edges.get(r["edge_id"])
+            if edge is not None:
+                edge["check"] = {
+                    "checked_at": r["checked_at"],
+                    "warehouse": r["warehouse"],
+                    "passed": bool(r["passed"]),
+                    "evidence": json.loads(r["evidence_json"]),
+                }
+        return sorted(edges.values(), key=lambda e: (-e["mined_queries"], e["edge_id"]))
+
+    # -------------------------------------------------------------- receipts
+
+    def issue_receipt(
+        self,
+        concept_label: str,
+        as_of: str | None = None,
+        freshness: dict | None = None,
+    ) -> Receipt | None:
+        # An as-of receipt must carry the verdicts that were true AT that
+        # instant, not today's. Stamping the current status onto a historical
+        # definition produces a SIGNED "CERTIFIED" for a moment the store
+        # itself records as contradicted — the receipt would be evidence for
+        # exactly the wrong claim.
+        if self._readonly:
+            # Advertised as a read-only-store service, but attest SIGNS and
+            # PERSISTS a receipt (and mints a key on a never-attested store).
+            # Without this guard it died with a raw "attempt to write a
+            # readonly database" traceback.
+            raise ValueError(
+                "this store is read-only — attest signs and persists a receipt; "
+                "copy the store to writable storage to attest")
+        scan = self.scan_as_of(as_of) if as_of else self.latest_scan()
+        if scan is None:
+            return None
+        all_verdicts = self.verdicts_for_scan(scan["scan_id"])
+        verdicts = [
+            v
+            for v in all_verdicts
+            if normalize_name(v["concept_label"]) == normalize_name(concept_label)
+        ]
+        if not verdicts:
+            # A concept's LABEL is chosen from its members, so declaring a new
+            # alias renames the concept — after which `attest revenue` returned
+            # nothing at all, with no error explaining why, though the ontology
+            # still declares `revenue`. Fall back to membership: the concept
+            # this name belongs to is the concept to attest.
+            for label in self.concept_labels_containing(concept_label,
+                                                        scan["scan_id"]):
+                verdicts = [v for v in all_verdicts
+                            if normalize_name(v["concept_label"]) == normalize_name(label)]
+                if verdicts:
+                    break
+        if not verdicts:
+            return None
+        # EVIDENCE must be gathered under the label of the concept whose
+        # verdicts we just resolved — the RECEIPT SCAN's label. Gathering it
+        # under the raw query name let a member-name query union membership
+        # ACROSS scans and concepts, so a receipt certified by one scan's
+        # verdicts bound a definition that scan never clustered into the
+        # attested concept — a signed CERTIFIED naming foreign evidence.
+        concept_label = verdicts[0]["concept_label"]
+
+        # The status answers "can I trust this number", so precedence — not
+        # raw severity — is the right order: CONTRADICTION always wins, then
+        # the verification result. Reconciliation makes ORPHAN_CLAIM (claims
+        # and no fingerprints) and SHADOW_METRIC (fingerprints and no claims)
+        # mutually exclusive with CERTIFIED, so the only real co-occurrence is
+        # CERTIFIED+ALIASING — where CERTIFIED is genuinely the headline and
+        # aliasing is housekeeping. The defect was never the choice of primary;
+        # it was that every OTHER verdict was silently dropped. They are all
+        # carried in `verdicts` below.
+        # Every guard below decides on what the ENGINE concluded, so its
+        # disclosures still reach the receipt; the conclusions policy is
+        # applied once, at the end (touchstone.conclusions).
+        from touchstone.conclusions import effective_scan_fields, engine_row
+
+        verdicts = [engine_row(v) for v in verdicts]
+        primary = min(
+            verdicts,
+            key=lambda v: VERDICT_PRECEDENCE.index(VerdictType(v["verdict"])),
+        )
+
+        # The freshness block was computed against a specific scan; if another
+        # scan landed since, its claim no longer describes this receipt's
+        # verdicts — degrade rather than attach a stale freshness claim.
+        # ONLY for a current-instant receipt: an as-of receipt is issued
+        # against a PAST scan by construction, and this check used to fire on
+        # every historical attest with a factually false note ("a new scan
+        # landed" when nothing had landed).
+        if (freshness and not as_of
+                and freshness.get("scan_id") not in (None, scan["scan_id"])):
+            freshness = {
+                **freshness,
+                "status": "unknown",
+                "note": "a new scan landed between the freshness check and "
+                        "receipt issuance — re-attest",
+            }
+        elif (freshness and as_of
+                and freshness.get("scan_id") not in (None, scan["scan_id"])):
+            freshness = {
+                **freshness,
+                "note": "freshness describes the CURRENT estate, not the "
+                        "as-of instant this receipt is about",
+            }
+
+        # An `as_of` in the FUTURE is not a question we can answer. `attest X
+        # --as-of 2099-01-01` — and the MCP `attest` tool, whose schema invites
+        # an agent to pass "the timestamp the answer refers to" — produced a
+        # signed CERTIFIED for 73 years of unobserved time, with no divergence
+        # noted. Evidence cannot describe a moment nobody has looked at.
+        now = utcnow()
+        ts = as_of or now
+        future = normalize_ts(ts) > normalize_ts(now)
+        live = self.as_of(concept_label, ts)
+
+        # For a CURRENT receipt, split "live" into sites the receipt's own
+        # scan actually OBSERVED and sites that are live only because absence
+        # could not be proven (the majority-overlap rule refuses to retire
+        # after a >50% estate shrink — deliberately, absence requires proof).
+        # Binding the unconfirmed ones into definition_version produced an
+        # internally contradictory signed receipt: "definition live at
+        # <deleted site>" beside "freshness: fresh" — the freshness check
+        # having just proven that very file absent. Unconfirmed sites move to
+        # a scope disclosure; as-of receipts keep full history semantics.
+        unconfirmed: list = []
+        if not as_of:
+            enumerated = {
+                f"{r['system']}:{r['object_id']}"
+                for r in self._conn.execute(
+                    """SELECT a.system, a.object_id FROM scan_artifacts sa
+                       JOIN artifacts a ON a.artifact_id = sa.artifact_id
+                       WHERE sa.scan_id = ?""",
+                    (scan["scan_id"],),
+                )
+            }
+            systems = {key.split(":", 1)[0] for key in enumerated}
+            confirmed = []
+            for iv in live:
+                artifact_key = _artifact_key(iv.object_key)
+                system = artifact_key.split(":", 1)[0]
+                if artifact_key in enumerated or system not in systems:
+                    confirmed.append(iv)
+                else:
+                    unconfirmed.append(iv)
+            live = confirmed
+
+        definition_version = [
+            {
+                "fingerprint_id": iv.ref_id,
+                "semantic_hash": iv.semantic_hash,
+                "site": iv.object_key,
+                "relation": iv.relation,
+                "valid_from": iv.valid_from,
+            }
+            for iv in live
+        ]
+
+        lineage: set[str] = set()
+        for iv in live:
+            row = self.fingerprint_row(iv.ref_id)
+            if row:
+                lineage.update(json.loads(row["source_columns_json"] or "[]"))
+
+        divergences = [
+            v["effective_summary"]
+            for v in verdicts
+            if v["verdict"] in (VerdictType.CONTRADICTION.value,
+                                VerdictType.SUSPECTED_DIVERGENCE.value,
+                                VerdictType.UNRESOLVED.value)
+        ]
+
+        # Scope limitation. A scan that could not read part of the estate
+        # cannot issue a clean opinion over it. Two levels, deliberately:
+        # every receipt discloses what the scan could not read, and a receipt
+        # is DOWNGRADED only when an unreadable artifact is one this very
+        # concept has previously been defined in — there the gap is known to
+        # be relevant, rather than merely possible.
+        unreadable = sorted(
+            key for key, ok in self.artifact_states().get(scan["scan_id"], {}).items()
+            if not ok
+        )
+        concept_sites = {_artifact_key(iv.object_key) for iv in self.history(concept_label)}
+        known_relevant = sorted(concept_sites & set(unreadable))
+        scope = {
+            "complete": not unreadable,
+            "unreadable": unreadable,
+            # Named separately from `known_relevant` because an EMPTY list of
+            # known-relevant sites is not proof of irrelevance — on a first
+            # scan there is no history to consult, and reporting `[]` there
+            # asserted "no relevant gap" when the truth was "we cannot say".
+            "known_relevant": known_relevant,
+            "relevance_determinable": bool(concept_sites),
+        }
+        if unconfirmed:
+            scope["unconfirmed_sites"] = sorted(iv.object_key for iv in unconfirmed)
+            divergences = divergences + [
+                f"{len(unconfirmed)} historical definition site(s) were not observed "
+                f"by this receipt's scan and their absence could not be proven "
+                f"(scan overlap below majority): "
+                + ", ".join(sorted(iv.object_key for iv in unconfirmed))
+            ]
+
+        # A receipt asserting verification must name what it verified. If the
+        # evidence is empty, the assertion is unsupported no matter why —
+        # degrade rather than sign it. Statuses that legitimately have no
+        # computed definition (ORPHAN_CLAIM: declared, never computed) are
+        # unaffected; the incoherent combination is "certified, but of what?"
+        status = primary["verdict"]
+        # Any unread estate blocks a signed certification, whether or not we
+        # can show the gap is relevant to THIS concept. Requiring proof of
+        # relevance inverted the burden: it certified by default and objected
+        # only when history happened to contain a counterexample.
+        if unreadable and status in (VerdictType.CERTIFIED.value, VerdictType.ALIASING.value):
+            status = VerdictType.UNRESOLVED.value
+            detail = (", ".join(known_relevant) + " (known to define this concept)"
+                      if known_relevant else ", ".join(unreadable[:3]))
+            divergences = divergences + [
+                f"cannot certify: {len(unreadable)} artifact(s) in this estate could "
+                f"not be read — {detail}"
+            ]
+        # What counts as evidence depends on what the verdict ASSERTS. A
+        # contradiction between two DECLARED definitions is fully substantiated
+        # by the claims themselves — requiring computed definitions there
+        # silenced a real disagreement down to "unresolved".
+        _, claim_ids = self.concept_members(concept_label)
+        has_evidence = bool(definition_version) or (
+            status in (VerdictType.CONTRADICTION.value,
+                       VerdictType.SUSPECTED_DIVERGENCE.value) and bool(claim_ids)
+        )
+        # SHADOW_METRIC asserts "computed at N sites in the estate" — an
+        # EXISTENCE claim about a computed definition. Omitting it from this
+        # set let a receipt make that claim while showing definition_version:
+        # [] and lineage: [], a signed statement its own evidence contradicts.
+        evidence_required = status in (
+            VerdictType.CERTIFIED.value,
+            VerdictType.ALIASING.value,
+            VerdictType.CONTRADICTION.value,
+            VerdictType.SUSPECTED_DIVERGENCE.value,
+            VerdictType.SHADOW_METRIC.value,
+        )
+        if evidence_required and not has_evidence:
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                f"cannot substantiate {primary['verdict']}: no definition was live "
+                f"at {ts} for this concept — refusing to certify without evidence"
+            ]
+
+        if future and status in (VerdictType.CERTIFIED.value,
+                                 VerdictType.ALIASING.value):
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                f"cannot certify for {ts}: that instant is in the future and no "
+                f"evidence describes it (last observation {now})"
+            ]
+
+        # Verdicts computed under another proof policy are not this policy's
+        # verdicts. touchstone-proof/2 withdrew the optimizer from proof: an
+        # unchanged estate scanned before it must not carry its old
+        # certification — or any other verdict — into a newly signed receipt.
+        policy = scan_policy(scan)
+        policy_changed = not policy_in_force(policy)
+        if policy_changed:
+            status = VerdictType.UNRESOLVED.value
+            divergences = divergences + [
+                f"computed under proof policy {policy or 'before touchstone-proof/2'}; "
+                f"the policy in force is {POLICY_ID} — rescan under it"
+            ]
+
+        # A receipt whose OWN freshness block reports a definition removed, or
+        # the estate drifted, cannot also assert a clean certification. One
+        # signed document said "this definition is live at issue time" and
+        # "this definition no longer exists in the estate" in the same breath;
+        # stale freshness reached neither `status`, `known_divergences`, nor
+        # `scope`.
+        fresh_status = (freshness or {}).get("status")
+        if fresh_status in ("stale", "partial", "unknown"):
+            # check_freshness nests its lists under `estate_drift`; reading
+            # top-level keys made this a dead guard — `known_divergences`
+            # always said bare "freshness is stale" with no drift detail, and
+            # the blocking-by-drift term could never fire.
+            drift_src = (freshness or {}).get("estate_drift") or (freshness or {})
+            drift = {key: sorted(drift_src[key])
+                     for key in ("removed", "changed", "added")
+                     if drift_src.get(key)}
+            detail = [f"{key}: {', '.join(vals)}" for key, vals in drift.items()]
+            note = f"freshness is {fresh_status}" + (
+                f" — {'; '.join(detail)}" if detail else "")
+            divergences = divergences + [note]
+            scope = {**scope, "freshness": fresh_status}
+            # What actually blocks certification:
+            #   stale             — the estate demonstrably drifted;
+            #   unknown           — a check was ATTEMPTED and could not answer;
+            #   partial + drift   — the re-checked half demonstrably drifted.
+            # `partial` with NO drift found used to downgrade too, which
+            # punished the operator for supplying evidence: passing --dbt
+            # yielded a strictly worse receipt than passing nothing. And an
+            # as-of receipt is never downgraded by CURRENT-estate freshness —
+            # "was certified at T; the estate has since drifted" is precisely
+            # what an as-of receipt exists to say, with the drift disclosed
+            # above and the vintage carried in verified_as_of.
+            blocking = fresh_status in ("stale", "unknown") or bool(drift)
+            if (blocking and not as_of
+                    and status in (VerdictType.CERTIFIED.value,
+                                   VerdictType.ALIASING.value)):
+                status = VerdictType.UNRESOLVED.value
+
+        # The emitted verdict list must agree with the status. Leaving a
+        # CERTIFIED entry in `verdicts` while the status was downgraded made
+        # the signed receipt contradict itself, and a reader taking the more
+        # favourable of the two would be back where they started.
+        #
+        # The policy in force is applied to each ENGINE verdict first — a
+        # positive is an experimental comparison (its proof record kept,
+        # labelled as such), a definitive negative a suspected divergence —
+        # and a downgrade is applied to that. Downgrading first (round
+        # seventeen's audit) skipped the mapping on every downgrade path: a
+        # pre-policy store signed "[downgraded] … canonically identical" with
+        # "superseded: CERTIFIED" and no experimental label.
+        effective_status = effective_scan_fields(status, 0, "", {})[0]
+        emitted = []
+        for v in sorted(verdicts, key=lambda v: -v["severity"]):
+            proof = (v.get("evidence") or {}).get("proof")
+            value, _, text, ev = effective_scan_fields(
+                v["verdict"], v["severity"], v["summary"],
+                {"proof": proof} if proof else {})
+            entry = {"verdict": value, "severity": v["severity"], "summary": text}
+            if status != primary["verdict"] and (policy_changed or v["verdict"] in (
+                    VerdictType.CERTIFIED.value, VerdictType.ALIASING.value)):
+                if effective_status != value:
+                    entry["superseded"] = value
+                entry = {**entry, "verdict": effective_status,
+                         "summary": f"[downgraded] {text}"}
+            for key in ("experimental", "suspected"):
+                if key in ev:
+                    entry[key] = ev[key]
+            emitted.append(entry)
+        status = effective_status
+
+        receipt = Receipt(
+            receipt_id="rcpt_" + uuid.uuid4().hex[:12],
+            concept=concept_label,
+            status=status,
+            definition_version=definition_version,
+            lineage=sorted(lineage),
+            known_divergences=divergences,
+            scope=scope,
+            verdicts=emitted,
+            as_of=as_of,
+            issued_at=utcnow(),
+            scan_id=scan["scan_id"],
+            verified_as_of=scan["started_at"],
+            # "unchecked", not "unknown": no check was ATTEMPTED. A checked-
+            # but-inconclusive result ("unknown") blocks certification; the
+            # plain `attest <concept>` flow — no estate sources — must not,
+            # or the documented default workflow always refuses. The
+            # distinction is disclosed either way.
+            freshness=freshness
+            or {
+                "status": "unchecked",
+                "note": "estate not re-checked at attest time — pass estate "
+                        "sources to attest to enable the freshness check",
+            },
+            proof_policy=policy,
+        )
+        # Sign before persisting so the stored payload IS the certificate.
+        from touchstone.signing import sign_receipt
+
+        sign_receipt(self, receipt)
+        self._conn.execute(
+            "INSERT INTO receipts VALUES (?, ?, ?, ?, ?)",
+            (
+                receipt.receipt_id,
+                receipt.concept,
+                receipt.as_of,
+                receipt.issued_at,
+                json.dumps(receipt.as_dict()),
+            ),
+        )
+        self._conn.commit()
+        return receipt
+
+
+def scan_policy(scan: dict) -> str | None:
+    """The proof policy a finished scan's verdicts were computed under; None
+    for a scan that predates policy versioning."""
+    try:
+        return (json.loads(scan.get("stats_json") or "{}") or {}).get("proof_policy")
+    except (TypeError, ValueError):
+        return None
+
+
+def _artifact_key(object_key: str) -> str:
+    """`<system>:<object_id>:<measure>` -> `<system>:<object_id>`."""
+    parts = object_key.split(":")
+    return ":".join(parts[:-1]) if len(parts) > 2 else object_key
+
+
+def normalize_ts(ts: str) -> str:
+    """Caller timestamps -> the store's canonical '%Y-%m-%dT%H:%M:%SZ'.
+
+    Valid time is compared as TEXT (SQLite has no date type here), which is
+    only correct when every timestamp shares one representation. An RFC-3339
+    offset like '2026-03-01T00:00:00+00:00' sorts before the 'Z' form of the
+    same instant, so an as-of query would silently return the previous,
+    superseded definition.
+
+    Unparseable input RAISES. Passing it through was the wrong call: text
+    comparison against a value like '03/01/2026' does not fail, it silently
+    answers with the wrong definition — and then signs it. An error the
+    caller must handle is strictly better than a confident wrong answer.
+    """
+    try:
+        parsed = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+    except (ValueError, AttributeError) as e:
+        raise ValueError(
+            f"unparseable timestamp {ts!r}: expected an ISO-8601 instant such as "
+            "2026-03-01T00:00:00Z"
+        ) from e
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    # Millisecond precision, matching utcnow. Text ordering is only sound at
+    # ONE width — '…:00Z' sorts AFTER '…:00.500Z' of the same second, NOT
+    # before as an earlier comment claimed — so stores written before this
+    # change are migrated to this width on open (_migrate_timestamp_width).
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"

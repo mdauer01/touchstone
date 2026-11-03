@@ -24,7 +24,7 @@ raw:
 
 # Declared keys and relationships — the ERD as the organization states it.
 # Unenforced in every cloud warehouse, so these are claims, not facts:
-# `semantix verify-relationships` is what upgrades them.
+# `touchstone verify-relationships` is what upgrades them.
 primary_keys:
   raw.orders: [order_id]
   raw.customers: [customer_id]

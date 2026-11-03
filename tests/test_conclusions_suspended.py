@@ -1,6 +1,6 @@
 """Acceptance: no suspended claim can authorize reliance through any consumer.
 
-Positive verdicts are suspended (semantix.conclusions). This file checks
+Positive verdicts are suspended (touchstone.conclusions). This file checks
 trust DECISIONS, not labels, for legacy records — stored CERTIFIED and
 CONTRADICTION rows, an old signed CERTIFIED receipt, an already-published
 warehouse table — and for newly generated results, through the CLI, JSON,
@@ -18,20 +18,20 @@ from pathlib import Path
 
 import pytest
 
-from semantix.cli import main
-from semantix.conclusions import POSITIVE_VERDICTS, reliance
-from semantix.engine import run_scan
-from semantix.mcp import McpServer
-from semantix.models import Receipt, VerdictType
-from semantix.services.writeback import publish_receipts
-from semantix.signing import assess_receipt, sign_receipt
-from semantix.store import Store
+from touchstone.cli import main
+from touchstone.conclusions import POSITIVE_VERDICTS, reliance
+from touchstone.engine import run_scan
+from touchstone.mcp import McpServer
+from touchstone.models import Receipt, VerdictType
+from touchstone.services.writeback import publish_receipts
+from touchstone.signing import assess_receipt, sign_receipt
+from touchstone.store import Store
 
 from .policy import engine_kinds
 
 SUSPENDED = {"CERTIFIED", "ALIASING"}
 DEFINITIVE = {"CONTRADICTION"}
-MACROS = Path(__file__).resolve().parent.parent / "integrations/dbt/semantix/macros/tests.sql"
+MACROS = Path(__file__).resolve().parent.parent / "integrations/dbt/touchstone/macros/tests.sql"
 
 
 def _estate(acme, tmp_path):
@@ -150,7 +150,7 @@ def _legacy_receipt(db: Path, status: str = "CERTIFIED") -> dict:
                     issued_at=scan["started_at"], scan_id=scan["scan_id"],
                     verdicts=[{"verdict": status, "severity": 5, "summary": "legacy"}],
                     scope={}, verified_as_of=scan["started_at"],
-                    freshness={"status": "fresh"}, proof_policy="semantix-proof/2")
+                    freshness={"status": "fresh"}, proof_policy="touchstone-proof/2")
         sign_receipt(store, r)
         store._conn.execute("INSERT INTO receipts VALUES (?, ?, ?, ?, ?)",
                             (r.receipt_id, r.concept, r.as_of, r.issued_at,
@@ -195,7 +195,7 @@ def test_reliance_never_follows_from_authenticity_and_an_unchanged_estate():
                    "CONTRADICTION", None):
         r = reliance(status, signature_authentic=True, estate_unchanged=True)
         assert r.semantic_claim_usable is False and r.current_use is False, status
-    a = assess_receipt({"status": "CERTIFIED", "scan_id": "s", "proof_policy": "semantix-proof/2",
+    a = assess_receipt({"status": "CERTIFIED", "scan_id": "s", "proof_policy": "touchstone-proof/2",
                         "freshness": {"status": "fresh"}}, {"status": "fresh", "scan_id": "s"})
     assert (a.signature_authentic, a.estate_unchanged, a.semantic_claim_usable,
             a.current_use) == (True, True, False, False)
@@ -214,9 +214,9 @@ def test_publish_writes_effective_verdicts_and_policy_rows(acme_scan):
         store.close()
     con = duckdb.connect(str(warehouse))
     rows = con.execute("SELECT verdict, policy_status, usable_for_reliance "
-                       "FROM semantix.verdicts").fetchall()
+                       "FROM touchstone.verdicts").fetchall()
     root = dict(con.execute("SELECT key, content FROM agents.root "
-                            "WHERE provider = 'semantix'").fetchall())
+                            "WHERE provider = 'touchstone'").fetchall())
     con.close()
     assert rows and not {r[0] for r in rows} & (SUSPENDED | DEFINITIVE)
     assert {r[1] for r in rows} == {POSITIVE_VERDICTS} and {r[2] for r in rows} == {False}
@@ -230,26 +230,26 @@ def test_an_already_published_table_is_refreshed_without_touching_receipts(acme_
     duckdb = pytest.importorskip("duckdb")
     warehouse = acme_scan["tmp"] / "old.duckdb"
     con = duckdb.connect(str(warehouse))
-    # The projection as an older semantix wrote it.
-    con.execute("CREATE SCHEMA semantix")
-    con.execute("CREATE TABLE semantix.verdicts (scan_id VARCHAR, scanned_at TIMESTAMPTZ, "
+    # The projection as an older touchstone wrote it.
+    con.execute("CREATE SCHEMA touchstone")
+    con.execute("CREATE TABLE touchstone.verdicts (scan_id VARCHAR, scanned_at TIMESTAMPTZ, "
                 "published_at TIMESTAMPTZ, concept VARCHAR, verdict VARCHAR, severity INTEGER, "
                 "summary VARCHAR, relation VARCHAR)")
-    con.execute("INSERT INTO semantix.verdicts VALUES ('s', now(), now(), 'gmv', 'CERTIFIED', "
+    con.execute("INSERT INTO touchstone.verdicts VALUES ('s', now(), now(), 'gmv', 'CERTIFIED', "
                 "5, 'identical', 'analytics.total_gmv'), ('s', now(), now(), 'net_revenue', "
                 "'CONTRADICTION', 94, 'differs', NULL)")
     legacy = _legacy_receipt(acme_scan["db"])
     con.execute("CREATE SCHEMA agents")
     con.execute("CREATE TABLE agents.root (provider VARCHAR, key VARCHAR, content VARCHAR)")
     content = json.dumps(legacy)
-    con.execute("INSERT INTO agents.root VALUES ('semantix', 'receipt/gmv', ?)", (content,))
+    con.execute("INSERT INTO agents.root VALUES ('touchstone', 'receipt/gmv', ?)", (content,))
     con.close()
 
     assert main(["publish", "--refresh-policy", "--warehouse", str(warehouse),
                  "--db", str(acme_scan["db"])]) == 0
     con = duckdb.connect(str(warehouse))
     rows = con.execute("SELECT concept, verdict, published_verdict, usable_for_reliance "
-                       "FROM semantix.verdicts ORDER BY concept").fetchall()
+                       "FROM touchstone.verdicts ORDER BY concept").fetchall()
     root = dict(con.execute("SELECT key, content FROM agents.root").fetchall())
     con.close()
     assert rows == [("gmv", "UNRESOLVED", "CERTIFIED", False),
@@ -285,7 +285,7 @@ def test_scan_and_diff_gates_still_fail_on_suspected_divergence(acme_scan, tmp_p
 
 
 def test_a_legacy_baseline_does_not_make_mapped_verdicts_new(acme_scan):
-    from semantix.services.diff import diff_verdicts
+    from touchstone.services.diff import diff_verdicts
 
     _legacy(acme_scan["db"])           # baseline holds raw legacy rows
     _scan(acme_scan["estate"], acme_scan["db"])[1].close()
@@ -316,7 +316,7 @@ def test_receipt_guards_still_disclose_on_a_suspended_claim(acme_scan):
 
 
 def test_breaking_an_experimental_equality_is_lost_not_resolved(acme_scan, tmp_path):
-    from semantix.services.diff import diff_verdicts, markdown_comment
+    from touchstone.services.diff import diff_verdicts, markdown_comment
 
     estate, db = acme_scan["estate"], acme_scan["db"]
     gmv = next((estate / "dbt_project/target/compiled").rglob("total_gmv.sql"))
@@ -339,7 +339,7 @@ def test_attest_without_estate_sources_says_not_checked(acme_scan, capsys):
 
 
 def test_monitor_evidence_never_names_a_match_as_conforming():
-    from semantix.conclusions import effective_finding
+    from touchstone.conclusions import effective_finding
 
     f = effective_finding({"kind": "definition_violation", "conformance": "violation",
                            "summary": "x", "calculation_matches":
@@ -362,7 +362,7 @@ def _as_of_receipt(db: Path, *, issued_at: str | None = None,
                     issued_at=issued_at or scan["started_at"], scan_id=scan["scan_id"],
                     verdicts=[{"verdict": "CERTIFIED", "severity": 5, "summary": "legacy"}],
                     scope={}, verified_as_of=scan["started_at"],
-                    freshness={"status": "fresh"}, proof_policy="semantix-proof/2")
+                    freshness={"status": "fresh"}, proof_policy="touchstone-proof/2")
         sign_receipt(store, r)
         store._conn.execute("INSERT INTO receipts VALUES (?, ?, ?, ?, ?)",
                             (r.receipt_id, r.concept, r.as_of, r.issued_at,
@@ -454,7 +454,7 @@ def test_a_pre_policy_store_signs_no_raw_engine_verdict(tmp_path, acme):
 
 
 def test_a_suspected_divergence_states_no_equality_as_fact(acme_scan, tmp_path):
-    from semantix.conclusions import effective_scan_fields
+    from touchstone.conclusions import effective_scan_fields
 
     store = Store(str(acme_scan["db"]))
     try:
@@ -510,25 +510,25 @@ def test_refresh_policy_refuses_a_target_with_nothing_published(acme_scan, capsy
 
 def test_refresh_policy_survives_odd_rows_and_is_idempotent(acme_scan):
     duckdb = pytest.importorskip("duckdb")
-    from semantix.services.writeback import refresh_published_policy
+    from touchstone.services.writeback import refresh_published_policy
 
     warehouse = acme_scan["tmp"] / "old.duckdb"
     con = duckdb.connect(str(warehouse))
-    con.execute("CREATE SCHEMA semantix")
-    con.execute("CREATE TABLE semantix.verdicts (scan_id VARCHAR, concept VARCHAR, "
+    con.execute("CREATE SCHEMA touchstone")
+    con.execute("CREATE TABLE touchstone.verdicts (scan_id VARCHAR, concept VARCHAR, "
                 "verdict VARCHAR, severity INTEGER, summary VARCHAR)")
-    con.execute("INSERT INTO semantix.verdicts VALUES ('s', 'gmv', 'CERTIFIED', 5, "
+    con.execute("INSERT INTO touchstone.verdicts VALUES ('s', 'gmv', 'CERTIFIED', 5, "
                 "'identical'), ('s', 'net_revenue', 'CONTRADICTION', 94, "
                 "'Declared definition matches a; b diverges')")
     con.execute("CREATE SCHEMA agents")
     con.execute("CREATE TABLE agents.root (provider VARCHAR, key VARCHAR, content VARCHAR)")
-    con.execute("INSERT INTO agents.root VALUES ('semantix', 'receipt/x', '[1, 2]'), "
-                "('semantix', 'receipt/y', 'not json')")
+    con.execute("INSERT INTO agents.root VALUES ('touchstone', 'receipt/x', '[1, 2]'), "
+                "('touchstone', 'receipt/y', 'not json')")
     con.close()
     for _ in range(2):
         refresh_published_policy(str(warehouse))
     con = duckdb.connect(str(warehouse))
-    rows = dict(con.execute("SELECT concept, summary FROM semantix.verdicts").fetchall())
+    rows = dict(con.execute("SELECT concept, summary FROM touchstone.verdicts").fetchall())
     keys = {r[0] for r in con.execute("SELECT key FROM agents.root").fetchall()}
     con.close()
     assert rows["gmv"].count("Experimental comparison, not a conclusion") == 1
@@ -554,8 +554,8 @@ def test_monitor_states_no_match_or_dispute_as_fact(tmp_path):
 
 
 def test_withheld_and_contested_wording_is_qualified():
-    from semantix.conclusions import effective_finding
-    from semantix.services.monitor import _withhold
+    from touchstone.conclusions import effective_finding
+    from touchstone.services.monitor import _withhold
 
     contested = {"kind": "contested_use", "conformance": "conforming", "severity": 55,
                  "summary": "conforms to X, but …", "concept": "c"}
@@ -564,7 +564,7 @@ def test_withheld_and_contested_wording_is_qualified():
     assert w["withheld_kind"] == "contested_use"
     assert w["withheld"].startswith("experimental at most, not a conclusion")
     text = Path(__file__).resolve().parent.parent.joinpath(
-        "src/semantix/services/monitor.py").read_text()
+        "src/touchstone/services/monitor.py").read_text()
     assert "disagree with each other — " not in text and "open contradiction" not in text
 
 

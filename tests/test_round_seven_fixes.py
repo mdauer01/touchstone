@@ -8,12 +8,12 @@ pins shut, so a future refactor that reopens it fails by name.
 from __future__ import annotations
 
 
-from semantix.engine import run_scan
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, Fingerprint, Provenance, SemanticCore, VerdictType
-from semantix.signing import receipt_trust
+from touchstone.engine import run_scan
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, Fingerprint, Provenance, SemanticCore, VerdictType
+from touchstone.signing import receipt_trust
 
 CATALOG = {"raw.orders": {"customer_id": "INT", "amount": "DOUBLE",
                           "status": "TEXT", "order_date": "DATE"}}
@@ -72,7 +72,7 @@ def _mixed_depth_estate(tmp_path):
     body = "SELECT SUM(amount) AS net_revenue FROM {ref} WHERE status = 'completed'\n"
     for name, ref in (("m1", "raw.orders"), ("m3", "PROD.raw.orders"), ("m2", "orders")):
         (estate / f"{name}.sql").write_text(
-            f"-- semantix: relation=PROD.analytics.{name}\n" + body.format(ref=ref),
+            f"-- touchstone: relation=PROD.analytics.{name}\n" + body.format(ref=ref),
             encoding="utf-8")
     catalog = tmp_path / "catalog.yml"
     catalog.write_text("raw:\n  orders:\n    amount: DOUBLE\n    status: TEXT\n",
@@ -95,7 +95,7 @@ def test_pin_placeholder_never_leaks_into_cores(tmp_path):
     by_rel = {fp.relation.rsplit(".", 1)[-1]: fp for fp in result.fingerprints}
     # The short ones depend on the session and say so. The explicitly
     # qualified one names PROD.raw.orders, which the two-part catalog does not
-    # describe: under semantix-proof/2 its columns are not borrowed from
+    # describe: under touchstone-proof/2 its columns are not borrowed from
     # `raw.orders` (that would assume they are one table), so it is refused
     # with the reason. Nothing certifies across them.
     assert by_rel["m3"].canon_level not in PROOF_LEVELS
@@ -152,7 +152,7 @@ def test_two_sites_same_math_both_reach_the_store(tmp_path):
     estate.mkdir()
     for name in ("rev_mart", "rev_mart_v2"):
         (estate / f"{name}.sql").write_text(
-            f"-- semantix: relation=db.main.{name}\n"
+            f"-- touchstone: relation=db.main.{name}\n"
             "SELECT SUM(amount) AS total_revenue FROM db.main.orders\n", encoding="utf-8")
     (tmp_path / "catalog.yml").write_text(
         "db:\n  main:\n    orders:\n      amount: DOUBLE\n", encoding="utf-8")
@@ -169,7 +169,7 @@ def test_level_change_records_a_new_row(tmp_path):
     estate = tmp_path / "estate"
     estate.mkdir()
     model = estate / "rev_mart.sql"
-    clean = ("-- semantix: relation=db.main.rev_mart\n"
+    clean = ("-- touchstone: relation=db.main.rev_mart\n"
              "SELECT SUM(amount) AS total_revenue FROM db.main.orders\n")
     model.write_text(clean, encoding="utf-8")
     (tmp_path / "catalog.yml").write_text(
@@ -188,8 +188,8 @@ def test_level_change_records_a_new_row(tmp_path):
 
 
 def test_claim_identity_covers_model_and_refusal(tmp_path):
-    from semantix.adapters.base import DeclaredSpec
-    from semantix.engine import build_claim
+    from touchstone.adapters.base import DeclaredSpec
+    from touchstone.engine import build_claim
 
     registry = SchemaRegistry({})
     a = build_claim(DeclaredSpec("s", "rev", model="db.a", expr="SUM(x)"), registry, "duckdb")
@@ -208,7 +208,7 @@ def test_receipt_trust_unknown_freshness_as_of_is_disclosed_not_blocked():
     trusted, warnings = receipt_trust(receipt)
     # Disclosed, not blocked: still a historical record. Untrusted only
     # because the claim is suspended under the conclusions policy.
-    from semantix.signing import assess_receipt
+    from touchstone.signing import assess_receipt
     assert assess_receipt(receipt).historical
     assert any("a record of that instant only" in w for w in warnings)
     assert trusted is False and any("suspended" in w for w in warnings)

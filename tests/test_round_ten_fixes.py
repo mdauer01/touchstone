@@ -27,7 +27,7 @@ import json
 
 import pytest
 
-from semantix.cli import main
+from touchstone.cli import main
 
 from .policy import engine_codes, engine_conformance, engine_funnel, engine_kind
 from .test_monitor_conformance import GOVERNED, T_IN, VIEW, _rows, codes, make_pilot, run
@@ -92,12 +92,12 @@ def test_recurrence_still_gates_on_the_calculation_not_the_name(tmp_path):
     rows = [row("A1", GROSS.format(name="gross_revenue"), "analyst_a"),
             row("B1", GROSS.format(name="net_revenue"), "analyst_b")]
     root, models = make_pilot(tmp_path, rows, view_text=TWO)
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
-    from semantix.services.pilot import load_pilot
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
+    from touchstone.services.pilot import load_pilot
 
     _, store = run_scan(sql_dir=str(models), uc_metrics_path=str(root / "views"),
                         catalog_path=str(root / "catalog.yml"),
@@ -279,7 +279,7 @@ def test_agg_is_read_in_both_parser_shapes():
     whichever parser is installed."""
     from sqlglot import exp
 
-    from semantix.services.conformance import measure_calls, measure_ref
+    from touchstone.services.conformance import measure_calls, measure_ref
 
     shapes = [exp.Anonymous(this="AGG", expressions=[exp.column("net_revenue")]),
               exp.Anonymous(this="MEASURE", expressions=[exp.column("net_revenue")])]

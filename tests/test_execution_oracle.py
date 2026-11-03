@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("duckdb")
 
-import semantix.oracle as oracle  # noqa: E402
+import touchstone.oracle as oracle  # noqa: E402
 
 
 def test_every_pair_the_engine_equates_executes_identically():
@@ -23,7 +23,7 @@ def test_every_pair_the_engine_equates_executes_identically():
 
 
 def test_every_proof_form_executes_as_its_original():
-    """semantix-proof/2: each proof-grade query's trusted transformed SQL is
+    """touchstone-proof/2: each proof-grade query's trusted transformed SQL is
     run against the query as written, on every dataset — NULLs, duplicates,
     empty input, float cancellation and overflow, integer extremes."""
     report = oracle.run_oracle()
@@ -82,7 +82,7 @@ def test_every_conforming_verdict_executes_as_definition_plus_variation():
 def test_conformance_challenger_catches_a_planted_wrong_verdict(monkeypatch):
     """Plant a rule bug — a dropped required filter judged conforming — and
     execution must expose it, whatever the rules currently do."""
-    from semantix.services import conformance
+    from touchstone.services import conformance
 
     real = conformance.check_raw
 

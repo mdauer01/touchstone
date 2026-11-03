@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, CanonLevel, Provenance
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, CanonLevel, Provenance
 
 duckdb = pytest.importorskip("duckdb")
 
@@ -171,7 +171,7 @@ SEED = ("CREATE SCHEMA raw; CREATE TABLE raw.orders (amount DOUBLE, refund DOUBL
 def test_a_chain_is_refused_or_read_as_the_engine_reads_it(sql):
     import sqlglot
 
-    from semantix.extraction.parse_agreement import NO_DISAGREEMENT_FOUND, check_parse
+    from touchstone.extraction.parse_agreement import NO_DISAGREEMENT_FOUND, check_parse
 
     canon, _ = _fps(sql, CAT)
     if sqlglot.__version__ == "30.12.0":
@@ -225,7 +225,7 @@ def test_a_quoted_cte_name_is_matched_exactly_as_the_dialect_folds_it():
            'SELECT SUM(amount) AS m FROM orders')
     registry = SchemaRegistry(catalog)
     registry.set_estate_depth(list(catalog))
-    from semantix.extraction.proof import certify
+    from touchstone.extraction.proof import certify
 
     result = certify(sql, registry, "snowflake")
     # The CTE is unused; `orders` is a bare table name, not the CTE.
@@ -242,7 +242,7 @@ HOISTED = ("WITH t AS (SELECT * FROM orders) SELECT SUM(amount) AS m FROM ("
 def test_the_spark_generator_rewrite_is_never_judged_as_the_statement():
     import sqlglot
 
-    from semantix.extraction.sqlutil import faithful_render
+    from touchstone.extraction.sqlutil import faithful_render
 
     tree = sqlglot.parse_one(HOISTED, read="databricks")
     assert faithful_render(tree, "databricks") is None          # it hoists the WITH
@@ -250,7 +250,7 @@ def test_the_spark_generator_rewrite_is_never_judged_as_the_statement():
 
 
 def test_a_view_dump_body_the_generator_rewrites_is_reported_not_scanned(tmp_path):
-    from semantix.adapters.sql_dir import load_views_file
+    from touchstone.adapters.sql_dir import load_views_file
 
     dump = tmp_path / "views.sql"
     dump.write_text(f"CREATE VIEW main.finance.v AS {HOISTED};\n"
@@ -262,7 +262,7 @@ def test_a_view_dump_body_the_generator_rewrites_is_reported_not_scanned(tmp_pat
 
 
 def test_execution_never_sends_the_generator_rewrite():
-    from semantix.services.execute import _single_statement
+    from touchstone.services.execute import _single_statement
 
     with pytest.raises(ValueError, match="faithfully"):
         _single_statement(HOISTED, "databricks")
@@ -274,7 +274,7 @@ def test_a_rename_touches_the_name_it_makes_readable():
     unaffected by the session."""
     import sqlglot
 
-    from semantix.services.session import affects, classify
+    from touchstone.services.session import affects, classify
 
     for sql in ("ALTER VIEW main.finance.staging RENAME TO main.finance.orders",
                 "ALTER TABLE main.finance.staging RENAME TO orders"):
@@ -354,7 +354,7 @@ def test_a_grouping_key_computed_by_an_unknown_function_is_not_a_measure(tmp_pat
 
 
 def test_the_exclusion_list_matches_what_the_rules_judge():
-    from semantix.services.conformance import EXCLUDED
+    from touchstone.services.conformance import EXCLUDED
 
     assert "CTEs, subqueries and derived tables around a variation" not in EXCLUDED
     assert any("outside the supported grammar" in e for e in EXCLUDED)
@@ -373,9 +373,9 @@ def test_a_statement_the_generator_rewrites_is_unreadable_to_the_monitor(tmp_pat
 # ---------------------------- relationships: checks passed on observed data
 
 def _passed_edge(tmp_path, monkeypatch=None):
-    from semantix.services.relationships import mine_sql_text, record_mined, verify_edges
-    from semantix.store import Store
-    from semantix.warehouse import DuckDBWarehouse
+    from touchstone.services.relationships import mine_sql_text, record_mined, verify_edges
+    from touchstone.store import Store
+    from touchstone.warehouse import DuckDBWarehouse
 
     from .test_relationships import CATALOG, SEED
 
@@ -395,8 +395,8 @@ def _passed_edge(tmp_path, monkeypatch=None):
     if monkeypatch is not None:
         # The check must not touch the SQL interpretation path whose readings
         # are suspended: no canonicalize, no optimizer, no proof grammar.
-        import semantix.extraction.canonicalize as C
-        import semantix.extraction.proof as P
+        import touchstone.extraction.canonicalize as C
+        import touchstone.extraction.proof as P
 
         def refuse(*a, **k):
             raise AssertionError("the relationship check used the interpretation path")
@@ -410,7 +410,7 @@ def _passed_edge(tmp_path, monkeypatch=None):
 
 
 def test_a_passed_check_is_named_for_what_it_shows_with_its_scope(tmp_path):
-    from semantix.services.relationships import (CHECKS_PASSED, LIMITATION,
+    from touchstone.services.relationships import (CHECKS_PASSED, LIMITATION,
                                                  relationships_for_agent)
 
     store, rows, _ = _passed_edge(tmp_path)
@@ -441,7 +441,7 @@ def test_the_check_sql_is_built_from_the_stated_edge_only(tmp_path, monkeypatch)
 def test_a_check_recorded_before_scopes_is_presented_as_the_record_it_is(tmp_path):
     """Historical rows keep what they stored; the read model names their
     as-of time and the scope the method implies, never a current guarantee."""
-    from semantix.services.relationships import CHECKS_PASSED, relationships_for_agent
+    from touchstone.services.relationships import CHECKS_PASSED, relationships_for_agent
 
     store, rows, _ = _passed_edge(tmp_path)
     try:

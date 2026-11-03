@@ -10,11 +10,11 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from semantix.adapters.infoschema import generate_catalog, write_catalog_yaml
-from semantix.adapters.uc_metrics import load_uc_metrics
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.freshness import SOURCE_SYSTEMS, current_estate_shas
+from touchstone.adapters.infoschema import generate_catalog, write_catalog_yaml
+from touchstone.adapters.uc_metrics import load_uc_metrics
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.freshness import SOURCE_SYSTEMS, current_estate_shas
 
 from .policy import engine_verdict
 
@@ -199,7 +199,7 @@ def test_scan_certifies_agreeing_metric_view(tmp_path):
     estate = tmp_path / "estate"
     estate.mkdir()
     (estate / "mart.sql").write_text(
-        "-- semantix: relation=db.main.rev_mart\n"
+        "-- touchstone: relation=db.main.rev_mart\n"
         "SELECT SUM(amount) AS total_revenue FROM db.main.orders "
         "WHERE status = 'F'\n", encoding="utf-8")
     catalog = tmp_path / "catalog.yml"
@@ -232,7 +232,7 @@ def test_freshness_covers_uc_metrics(tmp_path):
 
 def test_generate_catalog_roundtrips_through_scan(tmp_path):
     duckdb = pytest.importorskip("duckdb")
-    from semantix.adapters.catalog import load_catalog
+    from touchstone.adapters.catalog import load_catalog
 
     db = tmp_path / "wh.db"
     conn = duckdb.connect(str(db))
@@ -241,7 +241,7 @@ def test_generate_catalog_roundtrips_through_scan(tmp_path):
                  "(order_id INTEGER, amount DOUBLE, status VARCHAR)")
     conn.close()
 
-    from semantix.warehouse import connect_warehouse
+    from touchstone.warehouse import connect_warehouse
     wh = connect_warehouse(f"duckdb://{db}")
     try:
         catalog = generate_catalog(wh)
@@ -260,7 +260,7 @@ def test_generate_catalog_refuses_empty(tmp_path):
     db = tmp_path / "empty.db"
     duckdb.connect(str(db)).close()
 
-    from semantix.warehouse import connect_warehouse
+    from touchstone.warehouse import connect_warehouse
     wh = connect_warehouse(f"duckdb://{db}")
     try:
         with pytest.raises(ValueError, match="no user tables"):

@@ -15,9 +15,9 @@ import json
 
 import pytest
 
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.mcp import McpServer
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.mcp import McpServer
 
 
 @pytest.fixture()
@@ -26,7 +26,7 @@ def edited_estate(tmp_path):
     models = tmp_path / "models"
     models.mkdir()
     model = models / "m.sql"
-    model.write_text("-- semantix: relation=db.main.m\nSELECT SUM(amount) AS m FROM db.main.t\n")
+    model.write_text("-- touchstone: relation=db.main.m\nSELECT SUM(amount) AS m FROM db.main.t\n")
     (tmp_path / "catalog.yml").write_text("db:\n  main:\n    t:\n      amount: DOUBLE\n")
     (tmp_path / "metrics.yml").write_text(
         "version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n    expr: \"sum(amount)\"\n")
@@ -35,7 +35,7 @@ def edited_estate(tmp_path):
                         metrics_path=str(tmp_path / "metrics.yml"), db_path=str(db))
     as_of = store.latest_scan()["started_at"]
     store.close()
-    model.write_text("-- semantix: relation=db.main.m\nSELECT SUM(amount) * 2 AS m FROM db.main.t\n")
+    model.write_text("-- touchstone: relation=db.main.m\nSELECT SUM(amount) * 2 AS m FROM db.main.t\n")
     return {"db": str(db), "as_of": as_of, "sql_dir": str(models),
             "metrics": str(tmp_path / "metrics.yml"), "tmp": tmp_path}
 
@@ -127,7 +127,7 @@ def test_cli_verify_receipt_require_current_rejects_historical(edited_estate, ca
 
 def test_oracle_comparator_is_exact_for_every_numeric_type():
     pytest.importorskip("duckdb")
-    from semantix.oracle import _norm, _same
+    from touchstone.oracle import _norm, _same
 
     def same(a, b):
         return _same(("rows", [(_norm(a),)]), ("rows", [(_norm(b),)]))

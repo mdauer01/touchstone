@@ -17,7 +17,7 @@ syntax of every condition whatever columns it touches, dimensions of the
 rest, every grouping term — before any violation is judged. This file
 crosses each violation kind with each boundary condition.
 
-Under the conclusions policy (semantix.conclusions) a definition violation
+Under the conclusions policy (touchstone.conclusions) a definition violation
 surfaces as a suspected difference; the tests below pin the monitor's own
 judgment through tests/policy.py and the policy-facing kind beside it.
 """
@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import pytest
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.engine import run_scan
-from semantix.services.history import read_history
-from semantix.services.monitor import build_registry, monitor_history
-from semantix.services.pilot import load_pilot
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.engine import run_scan
+from touchstone.services.history import read_history
+from touchstone.services.monitor import build_registry, monitor_history
+from touchstone.services.pilot import load_pilot
 
 from .policy import engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import CATALOG, GOVERNED, _rows, codes, make_pilot

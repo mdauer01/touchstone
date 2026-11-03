@@ -1,6 +1,6 @@
 """Verdict matrix over synthetic concepts."""
 
-from semantix.models import (
+from touchstone.models import (
     Claim,
     Concept,
     Fingerprint,
@@ -8,8 +8,8 @@ from semantix.models import (
     SemanticCore,
     VerdictType,
 )
-from semantix.services.reconcile import reconcile
-from semantix.services.resolution import resolve_concepts
+from touchstone.services.reconcile import reconcile
+from touchstone.services.resolution import resolve_concepts
 
 PROV = Provenance(system="dbt", object_id="model.x")
 CLAIM_PROV = Provenance(system="metrics_yaml", object_id="metrics.x")

@@ -3,7 +3,7 @@
 Sweep 2 (after 6e831d0) confirmed 35 extraction and optimizer findings in
 which two queries executing differently were certified equal. The pairs here
 were recorded from the finders' own scripts: each executed differently on its
-seed. Under semantix-proof/2 none of them may be equal at proof grade — most
+seed. Under touchstone-proof/2 none of them may be equal at proof grade — most
 are now outside the grammar and refused by name; the rest are distinguished.
 One of them (#3, an aggregate only in a derived table's ORDER BY) also broke
 the first version of the proof path, and is the reason the `inline` and
@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, Provenance
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, Provenance
 
 duckdb = pytest.importorskip("duckdb")
 

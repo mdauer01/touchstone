@@ -13,7 +13,7 @@ Now both paths settle the boundary first. Outside it, the use is
 unverifiable and what would have been a violation travels as `suspected`
 context, never as a verdict and never in the headline.
 
-Under the conclusions policy (semantix.conclusions) a violation the rules do
+Under the conclusions policy (touchstone.conclusions) a violation the rules do
 find inside the boundary is reported as a suspected difference; these tests
 pin the engine's judgment through tests.policy and the reported kind beside it.
 """

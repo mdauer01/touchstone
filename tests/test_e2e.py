@@ -1,14 +1,14 @@
-from semantix.store import normalize_ts
+from touchstone.store import normalize_ts
 """End-to-end: scan the acme demo estate and check every verdict lands."""
 
 import json
 import shutil
 
 
-import semantix.store as store_mod
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.report.html import render_report, report_json
+import touchstone.store as store_mod
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.report.html import render_report, report_json
 
 from .policy import engine_verdict
 
@@ -29,11 +29,11 @@ def test_acme_estate_produces_all_verdict_types(acme, tmp_path):
     assert result.artifacts == 7
     assert len(result.fingerprints) == 5
     # ops_refund_rate joins refunds to orders: outside the proof grammar
-    # (semantix-proof/2), so 4 of 5 definitions are proof grade and the fifth
+    # (touchstone-proof/2), so 4 of 5 definitions are proof grade and the fifth
     # names its reason.
     assert result.coverage == 80.0
     (joined,) = [fp for fp in result.fingerprints if fp.concept_candidate == "refund_rate"]
-    assert joined.gaps == ("outside the supported grammar (semantix-proof/2): uses a join",)
+    assert joined.gaps == ("outside the supported grammar (touchstone-proof/2): uses a join",)
 
     # The engine's verdicts (read through tests/policy.py) …
     by_concept = {}

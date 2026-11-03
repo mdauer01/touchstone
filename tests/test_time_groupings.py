@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from semantix.services.pilot import load_pilot
+from touchstone.services.pilot import load_pilot
 
 from .policy import engine_codes, engine_kind
 from .test_monitor_conformance import GOVERNED, VIEW, _rows, make_pilot, run
@@ -42,11 +42,11 @@ def _approve(root, approvals):
 
 
 def _run_with(tmp_path, sql, approvals=None, view_text=None):
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
 
     root, models = make_pilot(tmp_path, _rows(sql), view_text=view_text)
     if approvals is not None:
@@ -180,7 +180,7 @@ def test_duckdb_reads_its_own_spellings():
     truncates exactly as its grain does, and the Databricks-only spellings are
     not DuckDB's."""
     duckdb = pytest.importorskip("duckdb")
-    from semantix.extraction.sqlutil import _DUCKDB_DATE_TRUNC, canonical_unit
+    from touchstone.extraction.sqlutil import _DUCKDB_DATE_TRUNC, canonical_unit
 
     con = duckdb.connect()
     ts = "TIMESTAMP '2026-11-17 13:45:12.345678'"   # no two grains coincide
@@ -228,11 +228,11 @@ def test_exported_session_history_follows_time_and_carries_statement_text(tmp_pa
              f"SELECT {GOVERNED} AS net_revenue FROM main.finance.orders "
              f"WHERE status = 'completed' AND country = 'US'"}]
     assert T_IN
-    from semantix.adapters.catalog import load_catalog
-    from semantix.adapters.sql_dir import load_sql_dir
-    from semantix.engine import run_scan
-    from semantix.services.history import read_history
-    from semantix.services.monitor import build_registry, monitor_history
+    from touchstone.adapters.catalog import load_catalog
+    from touchstone.adapters.sql_dir import load_sql_dir
+    from touchstone.engine import run_scan
+    from touchstone.services.history import read_history
+    from touchstone.services.monitor import build_registry, monitor_history
 
     root, models = make_pilot(tmp_path, rows)
     _, store = run_scan(sql_dir=str(models), uc_metrics_path=str(root / "views"),
@@ -339,7 +339,7 @@ def test_a_unit_is_not_trimmed(tmp_path, unit):
 def test_units_are_read_per_dialect_as_written(dialect, call, grain):
     import sqlglot
 
-    from semantix.extraction.sqlutil import (annotate_truncations, truncation_of,
+    from touchstone.extraction.sqlutil import (annotate_truncations, truncation_of,
                                              unaccepted_truncation)
 
     sql = f"SELECT {call} FROM t"
@@ -365,7 +365,7 @@ def test_a_metric_view_query_names_the_unit_it_was_written_with(tmp_path):
 
 
 def test_a_definition_unit_databricks_rejects_is_not_read_as_a_grain(tmp_path):
-    from semantix.adapters.uc_metrics import load_uc_metrics
+    from touchstone.adapters.uc_metrics import load_uc_metrics
 
     view = VIEW.format(extra="").replace(
         "filter: status = 'completed'",
@@ -377,7 +377,7 @@ def test_a_definition_unit_databricks_rejects_is_not_read_as_a_grain(tmp_path):
 
 
 def test_nested_merge_overrides_load_and_duplicates_still_refuse(tmp_path):
-    from semantix.adapters.loadutil import load_yaml
+    from touchstone.adapters.loadutil import load_yaml
 
     ok = tmp_path / "ok.yml"
     ok.write_text("defaults: &D {k: 0, j: 9}\nfirst: {inner: &N {<<: *D, k: 1}}\n"

@@ -1,4 +1,4 @@
-# Proof policy `semantix-proof/2`
+# Proof policy `touchstone-proof/2`
 
 A positive verdict (CERTIFIED, ALIASING, monitor `conforming_use`) says two
 definitions compute the same thing. That statement must come from rules whose
@@ -27,7 +27,7 @@ hold:
 - **Definitive negatives become suspected.** CONTRADICTION and definition violations
   rest on the same interpretation, so they are **suspected divergences / differences**.
   Their reasons are unverified observations.
-- **Reliance is decided by one policy** (`semantix.conclusions.reliance`). It gives
+- **Reliance is decided by one policy** (`touchstone.conclusions.reliance`). It gives
   three separate answers:
   1. signature authentic: this store issued exactly this payload;
   2. estate unchanged: a live re-check against the receipt's scan;
@@ -40,7 +40,7 @@ hold:
 - **Records are not rewritten.** Original signed receipts and stored rows stay as they
   are, and today's assessment is reported beside them. Stores written earlier are read
   under the policy (`Store.verdicts_for_scan`). Warehouse tables published earlier are
-  brought under it with `semantix publish --refresh-policy`, which maps the verdicts,
+  brought under it with `touchstone publish --refresh-policy`, which maps the verdicts,
   sets `usable_for_reliance = false`, and adds an `assessment/<concept>` row beside each
   unchanged receipt.
 
@@ -234,7 +234,7 @@ about general correctness.
 
 ## How it is challenged
 
-- **`semantix oracle`.**
+- **`touchstone oracle`.**
   - Executes every pair the engine equates, compared exactly on adversarial DuckDB
     datasets.
   - Executes **each proof-grade query against its own trusted transformed SQL**
@@ -274,7 +274,7 @@ about general correctness.
 
 ## Measured cost of the narrower scope
 
-| Measure | Before (optimizer as proof) | `semantix-proof/2` (round 16) | after round 17 |
+| Measure | Before (optimizer as proof) | `touchstone-proof/2` (round 16) | after round 17 |
 |---|---|---|---|
 | bench equivalence detection | 40/40 | 40/40 | 39/39 (two BigQuery runs scoped out: that SQL is not BigQuery) |
 | bench near-misses distinguished | 80/80 | 44/80 distinguished, 36 refused by name, 0 unproven | 43/79 distinguished, 36 refused by name, 0 unproven |
@@ -287,7 +287,7 @@ about general correctness.
 These figures challenge the rules on the generated and recorded cases. They do not
 establish soundness, and positive verdicts stay suspended.
 
-The bench lists every refused pair with its reason (`semantix bench`). These
+The bench lists every refused pair with its reason (`touchstone bench`). These
 refusals are the coverage backlog. A construct joins the grammar only with:
 
 - a stated rule;

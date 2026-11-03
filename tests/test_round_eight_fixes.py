@@ -15,13 +15,13 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
-from semantix.engine import run_scan
-from semantix.extraction.canonicalize import _resolve_group_ordinals, canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.extraction.sqlutil import split_group
-from semantix.models import PROOF_LEVELS, Provenance, VerdictType
-from semantix.signing import receipt_trust
+from touchstone.engine import run_scan
+from touchstone.extraction.canonicalize import _resolve_group_ordinals, canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.extraction.sqlutil import split_group
+from touchstone.models import PROOF_LEVELS, Provenance, VerdictType
+from touchstone.signing import receipt_trust
 
 from .policy import engine_kinds, engine_verdict
 
@@ -30,7 +30,7 @@ def _estate(tmp_path, models: dict, catalog: str, metrics: str | None = None, **
     root = tmp_path / "estate"
     (root / "models").mkdir(parents=True, exist_ok=True)
     for name, (rel, sql) in models.items():
-        (root / "models" / f"{name}.sql").write_text(f"-- semantix: relation={rel}\n{sql}\n")
+        (root / "models" / f"{name}.sql").write_text(f"-- touchstone: relation={rel}\n{sql}\n")
     (root / "catalog.yml").write_text(catalog)
     args = dict(sql_dir=str(root / "models"), catalog_path=str(root / "catalog.yml"),
                 db_path=str(tmp_path / "s.db"), **kw)
@@ -72,7 +72,7 @@ def test_execution_context_resolves_the_short_declaration(tmp_path):
     """With the catalog at the estate's depth, the short declaration resolves
     through the supplied context to prod.raw.orders — and dev's model then
     provably reads another table. (Over the two-part catalog, dev.raw.orders
-    has no columns of its own; semantix-proof/2 does not borrow raw.orders'
+    has no columns of its own; touchstone-proof/2 does not borrow raw.orders'
     for it, so that variant is unresolved rather than a contradiction.)"""
     result, store = run_scan(**_estate(tmp_path, PROD_DEV, FULL_CATALOG, DECLARED_M,
                                        default_database="prod"))
@@ -153,7 +153,7 @@ def test_rollup_ordinals_resolve_in_the_newer_ast_shape():
 
 
 def test_unqualified_parser_version_withholds_certification(tmp_path, monkeypatch, acme):
-    import semantix.engine as engine
+    import touchstone.engine as engine
     monkeypatch.setattr(engine, "toolchain_status",
                         lambda: {"sqlglot": "99.0.0", "qualified": False, "qualifying": False})
     result, store = run_scan(dbt_path=str(acme / "dbt_project"),
@@ -169,10 +169,10 @@ def test_unqualified_parser_version_withholds_certification(tmp_path, monkeypatc
 
 
 def test_qualification_override_names_one_exact_version(monkeypatch):
-    from semantix.toolchain import sqlglot_version, toolchain_status
-    monkeypatch.setenv("SEMANTIX_QUALIFY_SQLGLOT", "0.0.0-not-this-one")
+    from touchstone.toolchain import sqlglot_version, toolchain_status
+    monkeypatch.setenv("TOUCHSTONE_QUALIFY_SQLGLOT", "0.0.0-not-this-one")
     assert toolchain_status()["qualifying"] is False
-    monkeypatch.setenv("SEMANTIX_QUALIFY_SQLGLOT", sqlglot_version())
+    monkeypatch.setenv("TOUCHSTONE_QUALIFY_SQLGLOT", sqlglot_version())
     status = toolchain_status()
     assert status["qualifying"] is True and status["qualified"] is True
 
@@ -180,7 +180,7 @@ def test_qualification_override_names_one_exact_version(monkeypatch):
 def test_dependency_pin_matches_the_qualified_set():
     from pathlib import Path
 
-    from semantix.toolchain import QUALIFIED_SQLGLOT
+    from touchstone.toolchain import QUALIFIED_SQLGLOT
     pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
     pinned = [line for line in pyproject.splitlines() if '"sqlglot==' in line]
     assert pinned, "sqlglot must be pinned exactly, not ranged"
@@ -191,14 +191,14 @@ def test_dependency_pin_matches_the_qualified_set():
 # ------------------------------------------ finding 4: current-use reliance
 
 def test_edited_sql_without_recheck_is_not_valid_for_current_use(tmp_path):
-    from semantix.services.freshness import check_freshness
+    from touchstone.services.freshness import check_freshness
 
     args = _estate(tmp_path, {"m": ("db.main.m", "SELECT SUM(amount) AS m FROM db.main.t")},
                    "db:\n  main:\n    t:\n      amount: DOUBLE\n",
                    "version: 1\nmetrics:\n  - name: m\n    model: db.main.t\n    expr: \"sum(amount)\"\n")
     _, store = run_scan(**args)
     model = tmp_path / "estate/models/m.sql"
-    model.write_text("-- semantix: relation=db.main.m\nSELECT SUM(amount) * 2 AS m FROM db.main.t\n")
+    model.write_text("-- touchstone: relation=db.main.m\nSELECT SUM(amount) * 2 AS m FROM db.main.t\n")
     unchecked = store.issue_receipt("m").as_dict()
     trusted, warnings = receipt_trust(unchecked)
     assert not trusted and "historical attestation" in warnings[0]
@@ -220,7 +220,7 @@ def test_as_of_receipts_remain_historical_attestations():
     assert "a record of that instant only" in warnings[0]
     # Still a valid historical record; not valid for its stated use only
     # because its claim (CERTIFIED) is suspended under the conclusions policy.
-    from semantix.signing import assess_receipt
+    from touchstone.signing import assess_receipt
     a = assess_receipt(receipt)
     assert a.historical and not a.semantic_claim_usable
     assert trusted is False and any("suspended" in w for w in warnings)

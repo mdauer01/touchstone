@@ -11,7 +11,7 @@ claimed metric, (2) the supported-SQL boundary, (3) the claimed metric,
 (4) the primary finding from those conclusions. A suspected naming
 mismatch is kept as context when an earlier step fails.
 
-Under the conclusions policy (semantix.conclusions) a definition violation
+Under the conclusions policy (touchstone.conclusions) a definition violation
 surfaces as a suspected difference; the tests pin the monitor's own judgment
 through tests/policy.py and the policy-facing kind beside it.
 """
@@ -24,12 +24,12 @@ import json
 import pytest
 import yaml
 
-from semantix.adapters.catalog import load_catalog
-from semantix.adapters.sql_dir import load_sql_dir
-from semantix.engine import run_scan
-from semantix.services.history import read_history
-from semantix.services.monitor import build_registry, monitor_history
-from semantix.services.pilot import load_pilot
+from touchstone.adapters.catalog import load_catalog
+from touchstone.adapters.sql_dir import load_sql_dir
+from touchstone.engine import run_scan
+from touchstone.services.history import read_history
+from touchstone.services.monitor import build_registry, monitor_history
+from touchstone.services.pilot import load_pilot
 
 from .policy import engine_codes, engine_funnel, engine_kind
 from .test_monitor_conformance import CATALOG, MODEL, T_IN, VIEW, codes, run

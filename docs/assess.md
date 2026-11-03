@@ -1,6 +1,6 @@
 # Advisory drift assessment (first delivery)
 
-semantix's own reading of SQL is fallible evidence. While positive verdicts are
+touchstone's own reading of SQL is fallible evidence. While positive verdicts are
 suspended (`docs/proof-policy.md`), the monitor reports matches as experimental and
 differences as suspected. This package is a separate **advisory** second opinion, built
 and evaluated before anyone relies on it.
@@ -14,11 +14,11 @@ an exit code.
 
 | part | where | what it does |
 |---|---|---|
-| Evidence record `semantix-comparison/1` | `src/semantix/assess/schema.json`, `record.py` | One record per metric use, produced by `semantix monitor --export-comparisons out.jsonl`. It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, and the session statements before it. semantix's reading follows **last**, as `unverified_observations`, and can be removed for the ablation. |
+| Evidence record `touchstone-comparison/1` | `src/touchstone/assess/schema.json`, `record.py` | One record per metric use, produced by `touchstone monitor --export-comparisons out.jsonl`. It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, and the session statements before it. touchstone's reading follows **last**, as `unverified_observations`, and can be removed for the ablation. |
 | Criteria v1 | `assess/criteria/v1.yaml` | One narrow question per component (identity, formula, population, grain, source), each answerable `unknown`. Fixed code turns the answers into `suspected_drift`, `insufficient_evidence` or `likely_permitted`; the model never chooses the label. |
 | Providers | `assess/providers/` | `assess(records, criteria) -> assessments`, a config model, `render_prompt` (the evidence order every model-backed provider uses), the deterministic `fake`, and **Databricks** (`databricks.py`, described below). |
-| Labeled metric uses | `src/semantix/benchmark/metric_uses/` | 60 synthetic items in 9 query families. Labels are written from the business definitions and policy in its README, never from semantix output. They are model-authored and model-reviewed (a blind model pass, adjudicated in `adjudication.yaml`), and have not yet been reviewed by a human. The split is by family: tune on `dev`, report `test`. |
-| Runner | `assess/runner.py`, `semantix assess benchmark` | For drift: flagged, labeled permitted and undecided, always reported together. For permitted uses: confirmed, flagged as drift and undecided. Also abstention, calibration (reliability table and ECE), cost and latency, overall and per family. With `--with-observations` it adds the ablation and the semantix-alone baseline. |
+| Labeled metric uses | `src/touchstone/benchmark/metric_uses/` | 60 synthetic items in 9 query families. Labels are written from the business definitions and policy in its README, never from touchstone output. They are model-authored and model-reviewed (a blind model pass, adjudicated in `adjudication.yaml`), and have not yet been reviewed by a human. The split is by family: tune on `dev`, report `test`. |
+| Runner | `assess/runner.py`, `touchstone assess benchmark` | For drift: flagged, labeled permitted and undecided, always reported together. For permitted uses: confirmed, flagged as drift and undecided. Also abstention, calibration (reliability table and ECE), cost and latency, overall and per family. With `--with-observations` it adds the ablation and the touchstone-alone baseline. |
 
 ## Human review of the labels
 
@@ -30,8 +30,8 @@ validation. A blind human review is the next step, especially of the four adjudi
 and of the grouping policy:
 
 ```bash
-semantix assess review-sheet --out sheet.csv      # writes sheet.csv and sheet.guide.md
-semantix assess compare-labels sheet.csv
+touchstone assess review-sheet --out sheet.csv      # writes sheet.csv and sheet.guide.md
+touchstone assess compare-labels sheet.csv
 ```
 
 Label the sheet from `sheet.guide.md` (the definitions, the data, the policy) and the
@@ -40,7 +40,7 @@ next section reports results by family, which would tell you labels.
 
 ## First numbers (what they are, and are not)
 
-- **semantix's own observations alone** is the only baseline that runs today. On the
+- **touchstone's own observations alone** is the only baseline that runs today. On the
   30-item `test` split:
 
   | label class | result |
@@ -88,13 +88,13 @@ workload.
   as unknown, never dropped; a name nothing resolved to a full name is listed in
   `session_evidence.unresolved` and described as unresolved.
 
-semantix's observations come last. The benchmark's records and the monitor baseline share
+touchstone's observations come last. The benchmark's records and the monitor baseline share
 one execution context.
 
 ## Two datasets, kept apart
 
 - **Engine correctness**: `tests/data/engine_counterexamples.json` and the sweep
-  replays. Pairs that execute differently, used to test how semantix reads SQL. They are
+  replays. Pairs that execute differently, used to test how touchstone reads SQL. They are
   never drift labels.
 - **Metric-use drift**: this dataset. Business judgments about whether a use preserves
   a governed metric.
@@ -108,7 +108,7 @@ yet run against a real workspace**.
 ```bash
 export DATABRICKS_HOST=https://<workspace>.cloud.databricks.com
 export DATABRICKS_TOKEN=...          # a PAT or OAuth access token; read from the environment only
-semantix assess benchmark --provider databricks --model system.ai.<chat model> \
+touchstone assess benchmark --provider databricks --model system.ai.<chat model> \
   --endpoint <sql-warehouse-id> --split test --with-observations --json report.json
 ```
 
@@ -192,6 +192,6 @@ semantix assess benchmark --provider databricks --model system.ai.<chat model> \
   difference is recorded as an *observed discrepancy*, which still needs interpretation.
 
 ```bash
-.venv/bin/semantix assess benchmark --split test --with-observations --json report.json
-.venv/bin/semantix monitor --pilot <package> --sql-dir <models> --export-comparisons uses.jsonl
+.venv/bin/touchstone assess benchmark --split test --with-observations --json report.json
+.venv/bin/touchstone monitor --pilot <package> --sql-dir <models> --export-comparisons uses.jsonl
 ```

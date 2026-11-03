@@ -1,12 +1,12 @@
-"""semantix diff: only newly introduced verdicts reach the PR comment."""
+"""touchstone diff: only newly introduced verdicts reach the PR comment."""
 
 import shutil
 
-from semantix.cli import main
-from semantix.engine import run_scan
-from semantix.models import VerdictType
-from semantix.services.diff import diff_verdicts, markdown_comment
-from semantix.store import Store
+from touchstone.cli import main
+from touchstone.engine import run_scan
+from touchstone.models import VerdictType
+from touchstone.services.diff import diff_verdicts, markdown_comment
+from touchstone.store import Store
 
 from .policy import engine_verdict
 

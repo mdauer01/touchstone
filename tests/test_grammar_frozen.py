@@ -14,9 +14,9 @@ upper bound, checked as a subset.
 
 from __future__ import annotations
 
-from semantix.extraction import proof
+from touchstone.extraction import proof
 
-FROZEN_POLICY = "semantix-proof/2"
+FROZEN_POLICY = "touchstone-proof/2"
 FROZEN_RULES = {"between", "commutative", "conjuncts", "group_all", "group_ordinal",
                 "identifiers", "inline", "not_equality", "order", "output_alias", "parens",
                 "star", "table_alias", "unused_cte"}

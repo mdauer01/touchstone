@@ -16,10 +16,10 @@ without a test here re-opens a false-certification path.
 
 import pytest
 
-from semantix.extraction.canonicalize import canonicalize
-from semantix.extraction.fingerprint import extract_fingerprints
-from semantix.extraction.registry import SchemaRegistry
-from semantix.models import PROOF_LEVELS, Provenance
+from touchstone.extraction.canonicalize import canonicalize
+from touchstone.extraction.fingerprint import extract_fingerprints
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.models import PROOF_LEVELS, Provenance
 
 CATALOG = {
     "raw.orders": {"order_id": "bigint", "customer_id": "bigint", "status": "varchar",
@@ -190,7 +190,7 @@ def test_ordinary_sql_is_still_proof_grade():
         _, level, gaps = core(sql)
         assert level in PROOF_LEVELS, f"{sql!r} -> {level} {gaps}"
         assert gaps == (), f"{sql!r} -> {gaps}"
-    # Joins and ordered LIMIT left the proof grammar in semantix-proof/2:
+    # Joins and ordered LIMIT left the proof grammar in touchstone-proof/2:
     # refused by name — coverage backlog, not proof.
     for sql, construct in [
         ("select sum(o.amount) as m from raw.orders o join raw.refunds r "
@@ -259,8 +259,8 @@ def test_a_declared_definition_is_held_to_the_completeness_gate():
     never copied back. reconcile reads exactly this field to decide proof
     grade, so a declaration using an unmodeled construct was fed straight into
     the CERTIFIED gate."""
-    from semantix.adapters.base import DeclaredSpec
-    from semantix.engine import build_claim
+    from touchstone.adapters.base import DeclaredSpec
+    from touchstone.engine import build_claim
 
     registry = SchemaRegistry(CATALOG)
     ok = build_claim(DeclaredSpec(system="yaml", name="m", model="raw.orders",

@@ -8,17 +8,17 @@ the one thing that distinguishes it.
 
 import pytest
 
-from semantix.cli import main
-from semantix.extraction.registry import SchemaRegistry
-from semantix.services.relationships import (
+from touchstone.cli import main
+from touchstone.extraction.registry import SchemaRegistry
+from touchstone.services.relationships import (
     graph_with_status,
     mine_sql_text,
     record_declared,
     relationships_for_agent,
     verify_edges,
 )
-from semantix.store import Store
-from semantix.warehouse import DuckDBWarehouse
+from touchstone.store import Store
+from touchstone.warehouse import DuckDBWarehouse
 
 pytest.importorskip("duckdb")
 
@@ -138,7 +138,7 @@ def test_cli_never_counts_unverified_edges_as_certified(store, tmp_path, capsys,
 def test_schema_names_are_quoted_when_building_an_ephemeral_warehouse():
     """CREATE SCHEMA used a hand-rolled quote instead of qident, so a schema
     needing escaping was silently skipped and every model in it failed."""
-    from semantix.adapters.base import ComputedArtifact
+    from touchstone.adapters.base import ComputedArtifact
 
     artifact = ComputedArtifact(
         system="sql", object_id="m", relation="raw.orders_v",
