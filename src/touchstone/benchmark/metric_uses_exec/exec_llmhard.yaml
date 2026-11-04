@@ -1,0 +1,560 @@
+family: exec_llmhard
+split: test
+items:
+- id: llmhard-01
+  metric: net_revenue
+  sql: |
+    SELECT
+      SUM(amount) FILTER (WHERE status = 'completed')
+        - SUM(refund_amount) FILTER (WHERE status = 'completed') AS net_revenue
+    FROM main.finance.orders
+    WHERE order_date >= DATE '2026-01-01'
+      AND order_date < DATE '2026-04-01'
+  label: permitted_variation
+  rationale: The required filter is moved from WHERE into a FILTER clause on each aggregate. Both aggregates still range over exactly the completed orders, and the outer WHERE is a time window on order_date (a declared dimension). There is no GROUP BY, so the query returns one row in both forms, and an empty window gives NULL in both.
+  counterpart_sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+      AND order_date < DATE '2026-04-01'
+- id: llmhard-02
+  metric: net_revenue
+  sql: |
+    WITH completed AS (
+      SELECT country,
+             amount - refund_amount AS net_amount
+      FROM main.finance.orders
+      WHERE status = 'completed'
+    )
+    SELECT country,
+           SUM(net_amount) AS net_revenue
+    FROM completed
+    GROUP BY country
+  label: formula_drift
+  rationale: The query subtracts per row and then sums, which is SUM(amount - refund_amount), not SUM(amount) - SUM(refund_amount). refund_amount is declared nullable. For a completed order with a NULL refund, amount - NULL is NULL, so that order's amount drops out of the total, while the governed formula keeps the amount and ignores only the NULL refund. The arithmetic is different.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-03
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    GROUP BY country, status
+    HAVING status = 'completed'
+  label: permitted_variation
+  rationale: Grouping by status looks like a change of grain. But HAVING status = 'completed' keeps only the completed groups, so status is constant in what survives and each country has exactly one row. A HAVING predicate on a grouping key filters the same rows as the matching WHERE predicate (NULL and other-case statuses are dropped either way). The rows and values are identical to the governed query grouped by country.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-04
+  metric: net_revenue
+  sql: |
+    WITH completed_orders AS (
+      SELECT order_id, channel, amount, refund_amount
+      FROM main.finance.orders
+      WHERE status <> 'cancelled'
+    )
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM completed_orders
+    GROUP BY channel
+    ORDER BY channel
+  label: population_drift
+  rationale: The CTE is named completed_orders, but its filter is status <> 'cancelled'. That replaces the required filter with an exclusion, so pending, refunded, returned and any other non-cancelled statuses are counted too. The required filter is broadened.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+    ORDER BY channel
+- id: llmhard-05
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND (discount = discount OR discount IS NULL)
+    GROUP BY country
+  label: permitted_variation
+  rationale: This is a predicate on discount, which is not a declared dimension, but it is a tautology. For a non-NULL discount, discount = discount is TRUE (NaN = NaN is also TRUE in both Databricks and DuckDB). For a NULL discount, the IS NULL branch is TRUE. No row is ever removed, so the population is unchanged.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-06
+  metric: gross_revenue
+  sql: |
+    SELECT channel,
+           SUM(COALESCE(amount, 0)) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: insufficient_evidence
+  rationale: 'COALESCE(amount, 0) changes the result only when every completed amount in a channel is NULL: the governed SUM gives NULL there and this query gives 0. Nothing else differs, because SUM already skips NULLs and adding 0 is exact. Only refund_amount is declared nullable; whether amount can be NULL is not stated. So equivalence depends on unstated nullability.'
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: llmhard-07
+  metric: net_revenue
+  sql: |
+    SELECT country,
+           channel,
+           SUM(amount) - SUM(COALESCE(refund_amount, 0)) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country, channel
+  label: formula_drift
+  rationale: COALESCE inside SUM looks like a no-op because SUM skips NULLs, but it is not one. When every refund_amount in a group is NULL (refund_amount is declared nullable), the governed SUM(refund_amount) is NULL and net_revenue is NULL. This query returns SUM(amount) for that group instead. The arithmetic differs from the declared formula.
+  counterpart_sql: |
+    SELECT country,
+           channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country, channel
+- id: llmhard-08
+  metric: net_revenue
+  sql: |
+    SELECT DATE_TRUNC('MON', order_date) AS month,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY ALL
+    ORDER BY month
+  label: permitted_variation
+  rationale: '''MON'' is a documented synonym for ''MONTH'' in DATE_TRUNC in Databricks (and DuckDB), not Monday or week, so the key is the declared month dimension. GROUP BY ALL groups by that one non-aggregate expression. The grain and values are the same as the declared month grouping.'
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+    ORDER BY month
+- id: llmhard-09
+  metric: net_revenue
+  sql: |
+    -- Governed definition: revenue_mv.net_revenue (status = 'completed'), North America
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND country = 'US' OR country = 'CA'
+    GROUP BY country
+  label: population_drift
+  rationale: AND binds tighter than OR, so the WHERE clause is (status = 'completed' AND country = 'US') OR country = 'CA'. The required filter does not apply to the CA branch, so Canadian orders of every status are counted. The comment calling this the governed definition is not evidence.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND country IN ('US', 'CA')
+    GROUP BY country
+- id: llmhard-10
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(CASE WHEN status = 'completed' THEN amount END) AS gross_revenue
+    FROM main.finance.orders
+    GROUP BY country
+    HAVING SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) > 0
+  label: permitted_variation
+  rationale: With no ELSE, the CASE yields NULL for non-completed rows, and SUM skips them, so each group's value is the sum over its completed orders (NULL if all of their amounts are NULL). The HAVING counts completed rows with a constant 1, not a nullable column, so it removes exactly the countries that have no completed orders. Those are the countries the governed WHERE would never produce. Same rows, same values.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-11
+  metric: gross_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) OVER (PARTITION BY channel) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    ORDER BY channel
+  label: grain_drift
+  rationale: Each partition total equals the channel's gross revenue, but there is no GROUP BY, DISTINCT or QUALIFY, so the query returns one row per completed order with its channel total repeated. That returns the value once per row, which changes the grain.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+    ORDER BY channel
+- id: llmhard-12
+  metric: net_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) OVER (PARTITION BY channel)
+             - SUM(refund_amount) OVER (PARTITION BY channel) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY channel ORDER BY order_id) = 1
+  label: permitted_variation
+  rationale: The window has no ORDER BY, so its frame is the whole partition, and the two window sums equal the per-channel aggregate sums. QUALIFY ROW_NUMBER() = 1 keeps exactly one row per channel. The window value is the same on every row of the partition, so it does not matter which row is kept or how order_id ties break. The result is one row per channel with the governed value.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: llmhard-13
+  metric: gross_revenue
+  sql: |
+    WITH order_lines AS (
+      SELECT o.order_id, o.country, o.status, o.amount, i.sku
+      FROM main.finance.orders o
+      LEFT JOIN main.finance.order_items i
+        ON i.order_id = o.order_id
+    )
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM order_lines
+    WHERE status = 'completed'
+    GROUP BY country
+  label: source_drift
+  rationale: The LEFT JOIN keeps every order, but it does not keep one row per order. An order with several order_items rows appears once per item, so its amount is added several times. Joining to another relation that fans out changes which rows are counted.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-14
+  metric: gross_revenue
+  sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status LIKE 'completed'
+    GROUP BY 1
+    ORDER BY 1
+  label: permitted_variation
+  rationale: The LIKE pattern has no wildcard (% or _), and LIKE is case-sensitive in both Databricks and DuckDB. So status LIKE 'completed' matches exactly the strings equal to 'completed', and NULL status gives NULL in both forms. The required filter holds exactly as declared.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+    ORDER BY 1
+- id: llmhard-15
+  metric: gross_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status ILIKE 'completed'
+    GROUP BY channel
+  label: population_drift
+  rationale: ILIKE is case-insensitive, so 'Completed' and 'COMPLETED' also qualify. The required filter is the exact string 'completed', so this broadens the population.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: llmhard-16
+  metric: net_revenue
+  sql: |
+    WITH completed (country, refund_amount, amount) AS (
+      SELECT country, amount, refund_amount
+      FROM main.finance.orders
+      WHERE status = 'completed'
+    )
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM completed
+    GROUP BY country
+  label: formula_drift
+  rationale: 'The CTE column list renames by position: the inner amount is exposed as refund_amount and the inner refund_amount as amount. The outer SUM(amount) - SUM(refund_amount) therefore computes SUM(refund_amount) - SUM(orders.amount), the negation of net revenue. The columns are the right ones, but the arithmetic is reversed.'
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-17
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE order_id NOT IN (
+      SELECT order_id
+      FROM main.finance.orders
+      WHERE status <> 'completed'
+    )
+    GROUP BY country
+  label: insufficient_evidence
+  rationale: The required filter is expressed as an anti-join on order_id. If order_id is unique and non-NULL and status is non-NULL, this keeps exactly the completed orders. Otherwise it does not. A NULL order_id among non-completed orders makes NOT IN yield no rows at all. A NULL-status order is never in the subquery and so is kept. A completed row sharing its order_id with a non-completed row is dropped. Uniqueness and nullability of order_id and status are not stated, so the text cannot decide.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-18
+  metric: gross_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND CAST(order_date AS TIMESTAMP)
+          BETWEEN TIMESTAMP '2026-01-01 00:00:00' AND TIMESTAMP '2026-03-31 00:00:00'
+    GROUP BY channel
+  label: permitted_variation
+  rationale: This is a time window on order_date, which is a declared dimension. The upper bound looks as if it cuts off March 31, but a DATE cast to TIMESTAMP is midnight, and BETWEEN is inclusive, so 2026-03-31 00:00:00 still qualifies. The cast and the literal use the same session zone, so the timestamp window selects exactly the dates 2026-01-01 through 2026-03-31.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date BETWEEN DATE '2026-01-01' AND DATE '2026-03-31'
+    GROUP BY channel
+- id: llmhard-19
+  metric: net_revenue
+  sql: |
+    -- Refunds are booked against the order, so amount is already net of refunds.
+    SELECT channel,
+           SUM(amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: identity_mismatch
+  rationale: SUM(amount) over completed orders is exactly the declared gross_revenue, presented under the name net_revenue. The comment's claim about how refunds are booked is not part of the definitions. The declared net_revenue subtracts SUM(refund_amount). This is one metric's correct definition under another metric's name.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: llmhard-20
+  metric: net_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE NOT (status <> 'completed')
+    GROUP BY channel
+    ORDER BY channel
+  label: permitted_variation
+  rationale: NOT (status <> 'completed') is a double negation of the required filter. It is TRUE only for 'completed' and FALSE for other values. For NULL status, <> gives NULL and NOT NULL is NULL, so the row is excluded, just as status = 'completed' excludes it. Under three-valued logic it is the same predicate.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+    ORDER BY channel
+- id: llmhard-21
+  metric: gross_revenue
+  sql: |
+    SELECT MONTH(order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY MONTH(order_date)
+    ORDER BY month
+  label: grain_drift
+  rationale: MONTH(order_date) is the month of the year (1-12), not the declared month dimension DATE_TRUNC('MONTH', order_date). The output column is still aliased month, but March 2025 and March 2026 fall into one group. Grouping by a non-declared expression changes the grain.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+    ORDER BY month
+- id: llmhard-22
+  metric: net_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+    HAVING country IN ('US', 'DE', 'FR')
+    ORDER BY net_revenue DESC, country
+  label: permitted_variation
+  rationale: The HAVING predicate is on country, which is both the grouping key and a declared dimension. Filtering the country groups after aggregation removes the same rows as filtering on country before it, and NULL country is excluded either way. Each surviving group's value is unchanged.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND country IN ('US', 'DE', 'FR')
+    GROUP BY country
+    ORDER BY net_revenue DESC, country
+- id: llmhard-23
+  metric: gross_revenue
+  sql: |
+    -- DISTINCT guards against duplicate order rows from the CDC feed
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(DISTINCT amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+  label: formula_drift
+  rationale: SUM(DISTINCT amount) de-duplicates amount values, not orders. Two different completed orders in the same month with the same amount (for example two 49.99 orders) count once. This is a different aggregation from SUM(amount) whether or not order rows are duplicated.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+- id: llmhard-24
+  metric: gross_revenue
+  sql: |
+    WITH all_orders AS (
+      SELECT order_id, country, channel, amount
+      FROM main.finance.orders
+      WHERE status IS NOT DISTINCT FROM 'completed'
+    ),
+    eu_orders AS (
+      SELECT order_id, channel, amount
+      FROM all_orders
+      WHERE country IN ('DE', 'FR', 'NL')
+    )
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM eu_orders
+    GROUP BY channel
+  label: permitted_variation
+  rationale: 'The CTE name all_orders suggests no filter, but the CTE applies the required filter. In a WHERE clause, IS NOT DISTINCT FROM ''completed'' keeps exactly the rows status = ''completed'' keeps: it is FALSE rather than NULL for a NULL status, and both drop the row. The second CTE adds a filter on country, a declared dimension. Both steps only select, project and filter main.finance.orders.'
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND country IN ('DE', 'FR', 'NL')
+    GROUP BY channel
+- id: llmhard-25
+  metric: net_revenue
+  sql: |
+    SELECT o.channel,
+           SUM(o.amount) - SUM(o.refund_amount) AS net_revenue
+    FROM main.finance.orders o
+    LEFT JOIN main.finance.customers c
+      ON c.customer_id = o.customer_id
+    WHERE o.status = 'completed'
+      AND o.customer_id = c.customer_id
+    GROUP BY o.channel
+  label: insufficient_evidence
+  rationale: 'The WHERE clause repeats the join key against the customers side. That rejects the NULL-extended rows, so the LEFT JOIN behaves as an inner join: orders with no matching customer (or a NULL customer_id) are dropped. Duplicate customer_ids in customers would also fan out orders. Reading another relation through a join that can change which orders are counted changes the source.'
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: llmhard-26
+  metric: net_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND customer_id = customer_id
+    GROUP BY country
+  label: insufficient_evidence
+  rationale: customer_id = customer_id looks like a tautology, but for a NULL customer_id it evaluates to NULL, so the predicate removes completed orders with no customer. If customer_id is never NULL, nothing is removed and the query equals the governed one. The definitions do not state whether customer_id is nullable.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-27
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(CAST(amount AS FLOAT)) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+  label: formula_drift
+  rationale: FLOAT in Databricks (and DuckDB) is a 4-byte single-precision type. Casting a DOUBLE amount to FLOAT rounds it to about 7 significant digits (19.99 becomes 19.9899997711...), so the sum changes. Only casts that cannot change a DOUBLE's value count as the same formula.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-28
+  metric: net_revenue
+  sql: |
+    SELECT order_date,
+           -(SUM(refund_amount) - SUM(CAST(amount AS DOUBLE))) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY order_date
+    ORDER BY order_date
+  label: permitted_variation
+  rationale: '-(R - A) equals A - R exactly in IEEE double arithmetic: subtraction is correctly rounded, round-to-nearest is symmetric under negation, and NULL propagates the same way. CAST(amount AS DOUBLE) is a no-op on a DOUBLE column. The grouping and the window are both on order_date, a declared dimension.'
+  counterpart_sql: |
+    SELECT order_date,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY order_date
+    ORDER BY order_date
+- id: llmhard-29
+  metric: gross_revenue
+  sql: |
+    -- Gross revenue (before discounts)
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+  label: identity_mismatch
+  rationale: 'The comment frames gross as "before discounts", which is true here, since no discount is involved. But the formula subtracts refunds: it is exactly the declared net_revenue definition presented as gross_revenue. That is a correct definition of a different metric under this metric''s name.'
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: llmhard-30
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           RANK() OVER (ORDER BY SUM(amount) DESC) AS revenue_rank,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status IN ('completed')
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY country
+    QUALIFY RANK() OVER (ORDER BY SUM(amount) DESC) <= 3
+    ORDER BY revenue_rank, country
+  label: permitted_variation
+  rationale: IN with a single value is the same predicate as equality, so the required filter holds. The rank column and the QUALIFY only rank and limit the country groups computed over the governed population. Each surviving group's value is unchanged, and ranking and limiting groups is permitted.
+  counterpart_sql: |
+    SELECT country,
+           RANK() OVER (ORDER BY SUM(amount) DESC) AS revenue_rank,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY country
+    QUALIFY RANK() OVER (ORDER BY SUM(amount) DESC) <= 3
+    ORDER BY revenue_rank, country

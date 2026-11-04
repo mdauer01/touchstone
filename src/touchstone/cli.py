@@ -1392,7 +1392,8 @@ def _assess_review_sheet(args: argparse.Namespace) -> int:
     flagged = sum(1 for r in rows if r["priority"])
     print(f"review sheet: {len(rows)} item(s), {flagged} marked priority → {out}")
     print(f"  instructions, definitions and policy → {guide}")
-    print("  then: touchstone assess compare-labels " + str(out))
+    print("  then: touchstone assess compare-labels " + str(out)
+          + (f" --dataset {args.dataset}" if args.dataset else ""))
     return 0
 
 

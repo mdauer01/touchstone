@@ -1,0 +1,19 @@
+pass: execution-check
+label_provenance:
+  authored_by: model (five independent authoring agents, 2026-11-04)
+  reviewed_by: execution in DuckDB against each item's counterpart_sql (clean and dirty datasets); 3 decided by the written policy
+  human_review: none yet
+  note: execution establishes differences, not business intent; agreement of a model author and an execution check is not independent validation
+decisions:
+- id: llmhard-25
+  authored: source_drift
+  decision: insufficient_evidence
+  why: 'differs only when RI/uniqueness fail (execution: targeted_nulls/dirty only); the repo labels the same shape (joins-04) insufficient_evidence under the policy clause on unstated integrity'
+- id: llmhard-06
+  authored: insufficient_evidence
+  decision: insufficient_evidence
+  why: execution found no difference because no channel had all-NULL completed amounts; the difference (NULL vs 0 for an all-NULL group) is verified by reasoning and depends on unstated nullability of amount
+- id: longnb-04
+  authored: formula_drift
+  decision: formula_drift
+  why: executed identically on the generated datasets (they barely cover calendar 2025, its window); SUM(amount - refund_amount) differs on targeted data with a NULL refund (90 vs 140)

@@ -982,3 +982,20 @@ def test_the_benchmark_dataset_refuses_a_key_written_twice(tmp_path):
     family.write_text(text[:end + 1] + "    label: permitted_variation\n" + text[end + 1:])
     with pytest.raises(ValueError, match="appears twice"):
         load_dataset(copy)
+
+
+def test_the_execution_checked_dataset_loads_and_keeps_its_counterparts():
+    """The 114 uses of the 2026-11-04 study: every item keeps the counterpart
+    its label was executed against, and every recorded decision matches."""
+    from touchstone.assess.runner import DATASET_DIR
+
+    root = DATASET_DIR.parent / "metric_uses_exec"
+    ds = load_dataset(root)
+    chosen = items(ds)
+    assert len(chosen) == 114
+    assert all(it["counterpart_sql"].strip() for _, it in chosen)
+    long = [it for fam, it in chosen if fam.startswith("long_")]
+    assert len(long) == 24 and all(it["key_columns"] and it["metric_column"] for it in long)
+    labels = {it["id"]: it["label"] for _, it in chosen}
+    for d in ds["adjudication"]["decisions"]:
+        assert labels[d["id"]] == d["decision"] and d["why"]

@@ -1,0 +1,1792 @@
+family: long_longnb
+split: test
+items:
+- id: longnb-01
+  metric: net_revenue
+  sql: |
+    -- =====================================================================
+    -- Board pack FY2025 | Section 2.1  Net revenue by country and month
+    -- notebook: fpa/board_pack_fy25/02_country_monthly  (scheduled, weekly)
+    -- Revenue follows the governed revenue view: completed orders only,
+    -- net = order amounts less refunds. Customer-mix and prior-year columns
+    -- are informational and are NOT reconciled to the GL.
+    -- =====================================================================
+    WITH
+    -- ---------------------------------------------------------------------
+    -- 1. Completed orders in FY2025 (calendar year for this entity).
+    --    This CTE is the ONLY input to the revenue figures below.
+    -- ---------------------------------------------------------------------
+    completed_fy25 AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.amount,
+            o.refund_amount,
+            o.discount,
+            o.country,
+            o.channel,
+            o.order_date,
+            DATE_TRUNC('MONTH', o.order_date) AS month
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND o.order_date >= DATE '2025-01-01'
+          AND o.order_date <  DATE '2026-01-01'
+    ),
+
+    -- ---------------------------------------------------------------------
+    -- 2. Revenue cube at month x country.
+    -- ---------------------------------------------------------------------
+    revenue_cube AS (
+        SELECT
+            month,
+            country,
+            SUM(amount) - SUM(refund_amount)          AS net_revenue,
+            SUM(refund_amount)                        AS refunds_total,
+            SUM(discount)                             AS discount_total,
+            COUNT(*)                                  AS completed_order_rows,
+            COUNT(DISTINCT order_id)                  AS completed_orders,
+            COUNT(DISTINCT customer_id)               AS buying_customers
+        FROM completed_fy25
+        GROUP BY month, country
+    ),
+
+    -- ---------------------------------------------------------------------
+    -- 3. Customer mix from the CRM extract. The LEFT JOIN here can fan out
+    --    if CRM has duplicate customer rows, which is why it only feeds
+    --    distinct-customer counts and never the revenue cube.
+    -- ---------------------------------------------------------------------
+    crm_mix AS (
+        SELECT
+            f.month,
+            f.country,
+            COUNT(DISTINCT CASE WHEN c.segment = 'enterprise' THEN f.customer_id END) AS enterprise_customers,
+            COUNT(DISTINCT CASE WHEN c.segment = 'smb'        THEN f.customer_id END) AS smb_customers,
+            COUNT(DISTINCT CASE WHEN c.customer_id IS NULL    THEN f.customer_id END) AS crm_unmatched_customers
+        FROM completed_fy25 AS f
+        LEFT JOIN main.finance.customers AS c
+               ON c.customer_id = f.customer_id
+        GROUP BY f.month, f.country
+    ),
+
+    -- ---------------------------------------------------------------------
+    -- 4. Prior-year comparative (FY2024), aligned forward by 12 months so it
+    --    can be joined on the FY2025 month key. Comparative only.
+    -- ---------------------------------------------------------------------
+    prior_year AS (
+        SELECT
+            DATE_TRUNC('MONTH', o.order_date) + INTERVAL 12 MONTH AS month_aligned,
+            o.country,
+            SUM(o.amount) - SUM(o.refund_amount)                 AS py_net_revenue,
+            COUNT(*)                                              AS py_orders
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND o.order_date >= DATE '2024-01-01'
+          AND o.order_date <  DATE '2025-01-01'
+        GROUP BY 1, 2
+    ),
+
+    -- ---------------------------------------------------------------------
+    -- 5. All-status order volume (ops context: cancellation pressure).
+    -- ---------------------------------------------------------------------
+    ops_volume AS (
+        SELECT
+            DATE_TRUNC('MONTH', o.order_date)                     AS month,
+            o.country,
+            COUNT(*)                                              AS all_status_orders,
+            COUNT_IF(o.status = 'cancelled')                      AS cancelled_orders
+        FROM main.finance.orders AS o
+        WHERE o.order_date >= DATE '2025-01-01'
+          AND o.order_date <  DATE '2026-01-01'
+        GROUP BY 1, 2
+    ),
+
+    -- ---------------------------------------------------------------------
+    -- 6. Assemble. revenue_cube drives the row set; everything else is a
+    --    LEFT JOIN onto it at the same month x country key.
+    -- ---------------------------------------------------------------------
+    assembled AS (
+        SELECT
+            r.month,
+            r.country,
+            r.net_revenue,
+            r.refunds_total,
+            r.discount_total,
+            r.completed_orders,
+            r.buying_customers,
+            m.enterprise_customers,
+            m.smb_customers,
+            m.crm_unmatched_customers,
+            py.py_net_revenue,
+            py.py_orders,
+            v.all_status_orders,
+            v.cancelled_orders
+        FROM revenue_cube AS r
+        LEFT JOIN crm_mix    AS m  ON m.month = r.month AND m.country = r.country
+        LEFT JOIN prior_year AS py ON py.month_aligned = r.month AND py.country = r.country
+        LEFT JOIN ops_volume AS v  ON v.month = r.month AND v.country = r.country
+    )
+
+    SELECT
+        a.month,
+        a.country,
+        a.net_revenue,
+        a.net_revenue / NULLIF(a.completed_orders, 0)                                AS net_aov,
+        a.refunds_total,
+        a.discount_total,
+        a.completed_orders,
+        a.buying_customers,
+        a.enterprise_customers,
+        a.enterprise_customers / NULLIF(CAST(a.buying_customers AS DOUBLE), 0)       AS enterprise_customer_share,
+        a.crm_unmatched_customers,
+        a.net_revenue / NULLIF(SUM(a.net_revenue) OVER (PARTITION BY a.month), 0)    AS share_of_month,
+        a.net_revenue - LAG(a.net_revenue) OVER (PARTITION BY a.country ORDER BY a.month) AS mom_change,
+        a.py_net_revenue,
+        (a.net_revenue - a.py_net_revenue) / NULLIF(ABS(a.py_net_revenue), 0)        AS yoy_growth,
+        a.cancelled_orders / NULLIF(CAST(a.all_status_orders AS DOUBLE), 0)          AS cancel_rate,
+        CASE
+            WHEN a.py_net_revenue IS NULL THEN 'new market'
+            WHEN a.net_revenue >= a.py_net_revenue THEN 'growing'
+            ELSE 'declining'
+        END                                                                           AS trend_flag
+    FROM assembled AS a
+    ORDER BY a.month, a.country NULLS LAST
+  label: permitted_variation
+  rationale: 'net_revenue = SUM(amount) - SUM(refund_amount) over completed_fy25. That CTE is main.finance.orders with only a select, a projection and a filter: status = ''completed'' plus an order_date window on a declared dimension. It is grouped by month (DATE_TRUNC(''MONTH'', order_date)) and country, exactly as declared. The CRM LEFT JOIN (which can fan out), the prior-year CTE and the all-status ops CTE feed only other columns. Each is aggregated to a key that is unique per month x country and LEFT JOINed onto revenue_cube, so none of them can add, drop or duplicate a revenue row. The window functions (share, MoM, YoY) are separate, ungoverned columns.'
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, country, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date >= DATE '2025-01-01' AND order_date < DATE '2026-01-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date), country
+  key_columns:
+  - month
+  - country
+  metric_column: net_revenue
+- id: longnb-02
+  metric: net_revenue
+  sql: |
+    /* ---------------------------------------------------------------------------
+       Channel economics deep-dive | H2 2025 | net revenue, discount depth, refunds
+       model: analytics.marts.fct_channel_month_economics (dbt, materialized=view)
+       Layering follows the house convention:
+           src_  -> raw projection of the warehouse table
+           stg_  -> typing / renaming / derived row-level fields
+           int_  -> business-rule filtering shared with the pricing models
+           mart  -> aggregates consumed by the dashboard
+       --------------------------------------------------------------------------- */
+    WITH
+
+    /* src: raw projection, H2 2025, completed orders only */
+    src_orders AS (
+        SELECT
+            order_id,
+            customer_id,
+            amount,
+            refund_amount,
+            discount,
+            status,
+            country,
+            channel,
+            order_date
+        FROM main.finance.orders
+        WHERE status = 'completed'
+          AND order_date BETWEEN DATE '2025-07-01' AND DATE '2025-12-31'
+    ),
+
+    /* stg: row-level derived fields used by several marts */
+    stg_orders AS (
+        SELECT
+            s.order_id,
+            s.customer_id,
+            s.channel,
+            s.country,
+            s.order_date,
+            DATE_TRUNC('MONTH', s.order_date)                        AS order_month,
+            CAST(s.amount AS DOUBLE)                                 AS amount,
+            CAST(s.refund_amount AS DOUBLE)                          AS refund_amount,
+            CAST(s.discount AS DOUBLE)                               AS discount,
+            s.discount / NULLIF(s.amount + s.discount, 0)            AS discount_rate,
+            CASE WHEN s.refund_amount > 0 THEN 1 ELSE 0 END          AS has_refund,
+            CASE
+                WHEN s.amount >= 500 THEN 'L'
+                WHEN s.amount >= 100 THEN 'M'
+                ELSE 'S'
+            END                                                      AS basket_band
+        FROM src_orders AS s
+    ),
+
+    /* int: shared pricing-model rules (same predicate block as int_orders_priced
+       in the pricing project so the two marts tie out) */
+    int_orders_priced AS (
+        SELECT
+            g.*,
+            g.amount - COALESCE(g.discount, 0)                      AS amount_after_discount
+        FROM stg_orders AS g
+        WHERE g.order_month IS NOT NULL
+          AND g.discount_rate > 0
+          AND g.basket_band IN ('S', 'M', 'L')
+    ),
+
+    /* mart-1: net revenue and refund mix by month x channel */
+    mart_revenue AS (
+        SELECT
+            p.order_month                                            AS month,
+            p.channel,
+            SUM(p.amount) - SUM(p.refund_amount)                     AS net_revenue,
+            SUM(p.refund_amount)                                     AS refunds,
+            SUM(p.has_refund)                                        AS refunded_orders,
+            AVG(p.discount_rate)                                     AS avg_discount_rate,
+            SUM(p.discount)                                          AS discount_dollars
+        FROM int_orders_priced AS p
+        GROUP BY p.order_month, p.channel
+    ),
+
+    /* mart-2: basket mix from the stg layer (all completed orders) */
+    mart_baskets AS (
+        SELECT
+            g.order_month                                            AS month,
+            g.channel,
+            COUNT(*)                                                 AS orders,
+            COUNT_IF(g.basket_band = 'L')                            AS large_baskets,
+            COUNT_IF(g.basket_band = 'S')                            AS small_baskets,
+            COUNT(DISTINCT g.customer_id)                            AS customers
+        FROM stg_orders AS g
+        GROUP BY g.order_month, g.channel
+    ),
+
+    /* mart-3: customer segment coverage (informational) */
+    mart_segments AS (
+        SELECT
+            g.order_month                                            AS month,
+            g.channel,
+            COUNT(DISTINCT CASE WHEN c.segment = 'enterprise' THEN g.customer_id END) AS enterprise_customers,
+            COUNT(DISTINCT CASE WHEN c.segment = 'consumer'   THEN g.customer_id END) AS consumer_customers
+        FROM stg_orders AS g
+        LEFT JOIN main.finance.customers AS c
+               ON c.customer_id = g.customer_id
+        GROUP BY g.order_month, g.channel
+    ),
+
+    /* final assembly */
+    channel_month AS (
+        SELECT
+            r.month,
+            r.channel,
+            r.net_revenue,
+            r.refunds,
+            r.refunded_orders,
+            r.avg_discount_rate,
+            r.discount_dollars,
+            b.orders,
+            b.large_baskets,
+            b.small_baskets,
+            b.customers,
+            s.enterprise_customers,
+            s.consumer_customers
+        FROM mart_revenue AS r
+        LEFT JOIN mart_baskets  AS b ON b.month = r.month AND b.channel = r.channel
+        LEFT JOIN mart_segments AS s ON s.month = r.month AND s.channel = r.channel
+    )
+
+    SELECT
+        cm.month                                                                   AS month,
+        cm.channel                                                                 AS channel,
+        cm.net_revenue                                                             AS net_revenue,
+        cm.refunds                                                                 AS refunds,
+        cm.refunds / NULLIF(cm.net_revenue + cm.refunds, 0)                        AS refund_rate,
+        cm.avg_discount_rate                                                       AS avg_discount_rate,
+        cm.discount_dollars                                                        AS discount_dollars,
+        cm.orders                                                                  AS orders,
+        cm.large_baskets / NULLIF(CAST(cm.orders AS DOUBLE), 0)                    AS large_basket_share,
+        cm.customers                                                               AS customers,
+        cm.enterprise_customers                                                    AS enterprise_customers,
+        cm.net_revenue / NULLIF(SUM(cm.net_revenue) OVER (PARTITION BY cm.month), 0) AS channel_share_of_month,
+        RANK() OVER (PARTITION BY cm.month ORDER BY cm.net_revenue DESC NULLS LAST)   AS channel_rank_in_month,
+        AVG(cm.net_revenue) OVER (
+            PARTITION BY cm.channel ORDER BY cm.month
+            ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+        )                                                                          AS net_revenue_3m_avg
+    FROM channel_month AS cm
+    ORDER BY cm.month, cm.channel NULLS LAST
+  label: population_drift
+  rationale: 'src_orders applies the required status = ''completed'' filter and an H2 order_date window, both governed. Three layers down, int_orders_priced keeps only rows with discount_rate > 0, where discount_rate = discount / NULLIF(amount + discount, 0). That is a filter on discount and amount, which are not declared dimensions. mart_revenue computes net_revenue = SUM(amount) - SUM(refund_amount) from int_orders_priced, so completed orders with zero or NULL discount (and those with NULL or zero amount+discount) are dropped from the metric. The other int predicates do not change the result: order_month IS NOT NULL is already implied by the window, and basket_band IN (''S'',''M'',''L'') is always true. The formula and the month x channel grouping are as declared.'
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, channel, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date BETWEEN DATE '2025-07-01' AND DATE '2025-12-31'
+    GROUP BY DATE_TRUNC('MONTH', order_date), channel
+  key_columns:
+  - month
+  - channel
+  metric_column: net_revenue
+- id: longnb-03
+  metric: gross_revenue
+  sql: |
+    -- ============================================================================
+    -- North America + UK channel deep-dive, H1 2025
+    -- Q: which channels carry the gross revenue, and how do basket size and
+    --    item depth differ by channel?
+    -- Generated by: Looker (explore: orders_channel_deep_dive) + hand edits by @ana
+    -- ============================================================================
+    WITH
+    -- --- item depth, collapsed to ONE row per order_id before joining ----------
+    item_rollup AS (
+        SELECT
+            oi.order_id,
+            COUNT(*)                                       AS line_count,
+            SUM(oi.qty)                                    AS units,
+            COUNT(DISTINCT oi.sku)                         AS distinct_skus,
+            MAX(CASE WHEN oi.sku LIKE 'GIFT%' THEN 1 ELSE 0 END) AS has_gift_sku
+        FROM main.finance.order_items AS oi
+        GROUP BY oi.order_id
+    ),
+
+    -- --- order header in scope: completed, NA+UK, Jan-Jun 2025 ----------------
+    orders_in_scope AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.channel,
+            o.country,
+            o.amount,
+            o.refund_amount,
+            o.discount,
+            o.order_date,
+            DATE_TRUNC('MONTH', o.order_date)              AS month
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND o.country IN ('US', 'CA', 'GB')
+          AND DATE_TRUNC('MONTH', o.order_date) BETWEEN DATE '2025-01-01' AND DATE '2025-06-01'
+    ),
+
+    -- --- header + item depth. LEFT JOIN onto a one-row-per-order rollup, so
+    --     every header row survives exactly once (orders without items get NULLs)
+    orders_x_depth AS (
+        SELECT
+            h.*,
+            r.line_count,
+            r.units,
+            r.distinct_skus,
+            COALESCE(r.has_gift_sku, 0)                    AS has_gift_sku,
+            CASE WHEN r.order_id IS NULL THEN 1 ELSE 0 END AS missing_items
+        FROM orders_in_scope AS h
+        LEFT JOIN item_rollup AS r
+               ON r.order_id = h.order_id
+    ),
+
+    -- --- channel-level measures ---------------------------------------------
+    channel_measures AS (
+        SELECT
+            d.channel                                      AS orders_channel,
+            SUM(d.amount)                                  AS orders_gross_revenue,
+            COUNT(*)                                       AS orders_count,
+            SUM(d.units)                                   AS orders_units,
+            SUM(d.line_count)                              AS orders_lines,
+            AVG(d.distinct_skus)                           AS orders_avg_distinct_skus,
+            SUM(d.has_gift_sku)                            AS orders_gift_orders,
+            SUM(d.missing_items)                           AS orders_missing_item_rows,
+            SUM(d.discount)                                AS orders_discount_total,
+            COUNT(DISTINCT d.month)                        AS orders_active_months
+        FROM orders_x_depth AS d
+        GROUP BY d.channel
+    ),
+
+    -- --- customer segment reach per channel (CRM; may contain duplicate rows,
+    --     so only distinct-customer counts are taken from it) ------------------
+    channel_reach AS (
+        SELECT
+            h.channel                                      AS orders_channel,
+            COUNT(DISTINCT h.customer_id)                  AS customers_count,
+            COUNT(DISTINCT CASE WHEN c.region = 'NA' THEN h.customer_id END)   AS customers_na,
+            COUNT(DISTINCT CASE WHEN c.region = 'EMEA' THEN h.customer_id END) AS customers_emea,
+            COUNT(DISTINCT CASE WHEN c.segment IS NULL THEN h.customer_id END) AS customers_unsegmented
+        FROM orders_in_scope AS h
+        LEFT JOIN main.finance.customers AS c
+               ON c.customer_id = h.customer_id
+        GROUP BY h.channel
+    ),
+
+    -- --- peak month per channel (by order count; display only) ---------------
+    channel_peak AS (
+        SELECT orders_channel, peak_month, peak_month_orders
+        FROM (
+            SELECT
+                h.channel                                  AS orders_channel,
+                h.month                                    AS peak_month,
+                COUNT(*)                                   AS peak_month_orders,
+                ROW_NUMBER() OVER (
+                    PARTITION BY h.channel
+                    ORDER BY COUNT(*) DESC, h.month
+                )                                          AS rn
+            FROM orders_in_scope AS h
+            GROUP BY h.channel, h.month
+        ) AS x
+        WHERE x.rn = 1
+    )
+
+    SELECT
+        m.orders_channel                                                   AS orders_channel,
+        m.orders_gross_revenue                                             AS orders_gross_revenue,
+        m.orders_gross_revenue / NULLIF(m.orders_count, 0)                 AS orders_aov,
+        m.orders_units / NULLIF(CAST(m.orders_count AS DOUBLE), 0)         AS orders_units_per_order,
+        m.orders_lines / NULLIF(CAST(m.orders_count AS DOUBLE), 0)         AS orders_lines_per_order,
+        m.orders_avg_distinct_skus                                         AS orders_avg_distinct_skus,
+        m.orders_gift_orders / NULLIF(CAST(m.orders_count AS DOUBLE), 0)   AS orders_gift_share,
+        m.orders_missing_item_rows                                         AS orders_missing_item_rows,
+        m.orders_discount_total                                            AS orders_discount_total,
+        r.customers_count                                                  AS customers_count,
+        r.customers_na                                                     AS customers_na,
+        r.customers_emea                                                   AS customers_emea,
+        r.customers_unsegmented                                            AS customers_unsegmented,
+        p.peak_month                                                       AS orders_peak_month,
+        p.peak_month_orders                                                AS orders_peak_month_orders,
+        m.orders_gross_revenue
+            / NULLIF(SUM(m.orders_gross_revenue) OVER (), 0)               AS orders_gross_revenue_share,
+        DENSE_RANK() OVER (ORDER BY m.orders_gross_revenue DESC NULLS LAST) AS orders_channel_rank
+    FROM channel_measures AS m
+    LEFT JOIN channel_reach AS r ON r.orders_channel = m.orders_channel
+    LEFT JOIN channel_peak  AS p ON p.orders_channel = m.orders_channel
+    ORDER BY orders_channel_rank, m.orders_channel NULLS LAST
+  label: permitted_variation
+  rationale: orders_gross_revenue = SUM(amount) over completed orders. The filters are country IN ('US','CA','GB') and month BETWEEN 2025-01-01 and 2025-06-01, both on declared dimensions, and the result is grouped by channel (aliased orders_channel). The revenue CTE reads orders_x_depth, which LEFT JOINs order headers to item_rollup. item_rollup is order_items grouped by order_id, so each header row has at most one match, and NULL order_ids never match. Every completed order row therefore survives exactly once, whatever duplicates or orphans order_items contains, so this join cannot change which rows are counted. The customers join (channel_reach) and the peak-month CTE feed only other columns. They are channel-unique aggregates LEFT JOINed onto channel_measures. DENSE_RANK and share are separate columns.
+  counterpart_sql: |
+    SELECT channel AS orders_channel, SUM(amount) AS orders_gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND country IN ('US', 'CA', 'GB')
+      AND DATE_TRUNC('MONTH', order_date) BETWEEN DATE '2025-01-01' AND DATE '2025-06-01'
+    GROUP BY channel
+  key_columns:
+  - orders_channel
+  metric_column: orders_gross_revenue
+- id: longnb-04
+  metric: net_revenue
+  sql: |
+    -- ##########################################################################
+    -- Refund leakage review — country x channel — calendar 2025
+    -- Requested by: Controller (Q4 close memo, appendix C)
+    -- Notes:
+    --   * revenue rows = completed orders, Jan 1 – Dec 31 2025
+    --   * "leakage" = refunds above 25% of the order amount
+    --   * discount + refund columns are diagnostic only
+    -- ##########################################################################
+    WITH
+    base_orders AS (
+        -- completed orders, 2025
+        SELECT
+            order_id,
+            customer_id,
+            country,
+            channel,
+            order_date,
+            amount,
+            refund_amount,
+            discount
+        FROM main.finance.orders
+        WHERE status = 'completed'
+          AND order_date >= DATE '2025-01-01'
+          AND order_date <= DATE '2025-12-31'
+    ),
+
+    order_values AS (
+        -- row-level value decomposition used by every downstream CTE
+        SELECT
+            b.order_id,
+            b.customer_id,
+            b.country,
+            b.channel,
+            b.order_date,
+            b.amount                                                AS gross_amount,
+            COALESCE(b.refund_amount, 0)                            AS refund_amount_filled,
+            COALESCE(b.discount, 0)                                 AS discount_filled,
+            b.amount - b.refund_amount                              AS net_amount,
+            CASE
+                WHEN b.refund_amount IS NULL              THEN 'no refund record'
+                WHEN b.refund_amount = 0                  THEN 'not refunded'
+                WHEN b.refund_amount > 0.25 * b.amount    THEN 'leakage'
+                ELSE 'partial'
+            END                                                     AS refund_class,
+            CASE
+                WHEN b.amount IS NULL OR b.amount = 0 THEN NULL
+                ELSE COALESCE(b.refund_amount, 0) / b.amount
+            END                                                     AS refund_ratio
+        FROM base_orders AS b
+    ),
+
+    refund_profile AS (
+        SELECT
+            v.country,
+            v.channel,
+            COUNT(*)                                                AS orders,
+            COUNT_IF(v.refund_class = 'leakage')                    AS leakage_orders,
+            COUNT_IF(v.refund_class = 'partial')                    AS partial_refund_orders,
+            COUNT_IF(v.refund_class = 'no refund record')           AS missing_refund_records,
+            SUM(v.refund_amount_filled)                             AS refunds,
+            SUM(CASE WHEN v.refund_class = 'leakage'
+                     THEN v.refund_amount_filled END)               AS leakage_refunds,
+            AVG(v.refund_ratio)                                     AS avg_refund_ratio,
+            MAX(v.refund_ratio)                                     AS max_refund_ratio,
+            SUM(v.discount_filled)                                  AS discounts
+        FROM order_values AS v
+        GROUP BY v.country, v.channel
+    ),
+
+    revenue AS (
+        SELECT
+            v.country,
+            v.channel,
+            SUM(v.net_amount)                                       AS net_revenue,
+            SUM(v.gross_amount)                                     AS gross_amount_ref
+        FROM order_values AS v
+        GROUP BY v.country, v.channel
+    ),
+
+    repeat_refunders AS (
+        -- customers with 2+ leakage refunds in the year (fraud review queue)
+        SELECT
+            v.country,
+            v.channel,
+            COUNT(*)                                                AS repeat_refunder_customers
+        FROM (
+            SELECT country, channel, customer_id, COUNT(*) AS n_leak
+            FROM order_values
+            WHERE refund_class = 'leakage'
+            GROUP BY country, channel, customer_id
+            HAVING COUNT(*) >= 2
+        ) AS v
+        GROUP BY v.country, v.channel
+    ),
+
+    crm AS (
+        SELECT
+            v.country,
+            v.channel,
+            COUNT(DISTINCT CASE WHEN c.segment = 'enterprise' THEN v.customer_id END) AS enterprise_customers,
+            COUNT(DISTINCT v.customer_id)                           AS customers
+        FROM order_values AS v
+        LEFT JOIN main.finance.customers AS c ON c.customer_id = v.customer_id
+        GROUP BY v.country, v.channel
+    ),
+
+    scorecard AS (
+        SELECT
+            r.country,
+            r.channel,
+            r.net_revenue,
+            r.gross_amount_ref,
+            p.orders,
+            p.refunds,
+            p.leakage_orders,
+            p.partial_refund_orders,
+            p.missing_refund_records,
+            p.leakage_refunds,
+            p.avg_refund_ratio,
+            p.max_refund_ratio,
+            p.discounts,
+            COALESCE(rr.repeat_refunder_customers, 0)               AS repeat_refunder_customers,
+            c.customers,
+            c.enterprise_customers
+        FROM revenue AS r
+        LEFT JOIN refund_profile   AS p  ON p.country  = r.country AND p.channel  = r.channel
+        LEFT JOIN repeat_refunders AS rr ON rr.country = r.country AND rr.channel = r.channel
+        LEFT JOIN crm              AS c  ON c.country  = r.country AND c.channel  = r.channel
+    )
+
+    SELECT
+        s.country,
+        s.channel,
+        s.net_revenue,
+        s.refunds,
+        s.refunds / NULLIF(s.gross_amount_ref, 0)                   AS refund_rate,
+        s.leakage_refunds,
+        s.leakage_orders,
+        s.leakage_orders / NULLIF(CAST(s.orders AS DOUBLE), 0)      AS leakage_order_rate,
+        s.partial_refund_orders,
+        s.missing_refund_records,
+        s.avg_refund_ratio,
+        s.max_refund_ratio,
+        s.discounts,
+        s.repeat_refunder_customers,
+        s.customers,
+        s.enterprise_customers,
+        CASE
+            WHEN s.leakage_orders / NULLIF(CAST(s.orders AS DOUBLE), 0) >= 0.10 THEN 'RED'
+            WHEN s.leakage_orders / NULLIF(CAST(s.orders AS DOUBLE), 0) >= 0.05 THEN 'AMBER'
+            ELSE 'GREEN'
+        END                                                         AS rag_status,
+        RANK() OVER (PARTITION BY s.country ORDER BY s.net_revenue DESC NULLS LAST) AS channel_rank_in_country
+    FROM scorecard AS s
+    ORDER BY s.country NULLS LAST, s.net_revenue DESC NULLS LAST
+  label: formula_drift
+  rationale: The population is governed (status = 'completed', a 2025 order_date window) and so is the grain (country, channel). However, order_values computes net_amount = amount - refund_amount row by row, and the revenue CTE takes SUM(net_amount), which is SUM(amount - refund_amount) rather than the declared SUM(amount) - SUM(refund_amount). refund_amount is nullable. Any completed order with a NULL refund gives a NULL net_amount, so its whole amount drops out of net_revenue. COALESCE is applied to refund_amount in the same CTE, but only for the diagnostic refund columns, which hides the fact that the revenue expression lacks it.
+  counterpart_sql: |
+    SELECT country, channel, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date >= DATE '2025-01-01' AND order_date <= DATE '2025-12-31'
+    GROUP BY country, channel
+  key_columns:
+  - country
+  - channel
+  metric_column: net_revenue
+- id: longnb-05
+  metric: net_revenue
+  sql: |
+    -- --------------------------------------------------------------------------
+    -- Ops review: order funnel and net revenue by country — digital channels,
+    -- H1 2025. One pass over the order table; status-specific measures use
+    -- aggregate FILTER clauses so the funnel and the revenue line come from the
+    -- same scan.  (cell 7 of notebooks/ops/funnel_by_country.sql)
+    -- --------------------------------------------------------------------------
+    WITH
+    orders_h1_digital AS (
+        -- every status: the funnel needs cancelled/pending rows too
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.status,
+            o.country,
+            o.channel,
+            o.order_date,
+            o.amount,
+            o.refund_amount,
+            o.discount
+        FROM main.finance.orders AS o
+        WHERE o.order_date >= DATE '2025-01-01'
+          AND o.order_date <  DATE '2025-07-01'
+          AND o.channel IN ('web', 'app', 'marketplace')
+    ),
+
+    funnel AS (
+        SELECT
+            f.country,
+            COUNT(*)                                                       AS orders_placed,
+            COUNT(*) FILTER (WHERE f.status = 'completed')                 AS orders_completed,
+            COUNT(*) FILTER (WHERE f.status = 'cancelled')                 AS orders_cancelled,
+            COUNT(*) FILTER (WHERE f.status = 'pending')                   AS orders_pending,
+            COUNT(*) FILTER (WHERE f.status IS NULL)                       AS orders_status_missing,
+            -- governed net revenue: completed rows only, amounts less refunds
+            SUM(f.amount)        FILTER (WHERE f.status = 'completed')
+              - SUM(f.refund_amount) FILTER (WHERE f.status = 'completed') AS net_revenue,
+            SUM(f.refund_amount) FILTER (WHERE f.status = 'completed')     AS completed_refunds,
+            SUM(f.amount)        FILTER (WHERE f.status = 'cancelled')     AS cancelled_value,
+            SUM(f.discount)      FILTER (WHERE f.status = 'completed')     AS completed_discounts,
+            COUNT(DISTINCT f.customer_id)                                  AS customers_placing,
+            COUNT(DISTINCT f.customer_id) FILTER (WHERE f.status = 'completed') AS customers_converting
+        FROM orders_h1_digital AS f
+        GROUP BY f.country
+        -- a country appears in the revenue view only if it has a completed order
+        HAVING COUNT(*) FILTER (WHERE f.status = 'completed') > 0
+    ),
+
+    channel_split AS (
+        -- completed-order counts per channel, pivoted (context only)
+        SELECT
+            country,
+            COUNT(*) FILTER (WHERE channel = 'web'         AND status = 'completed') AS web_completed,
+            COUNT(*) FILTER (WHERE channel = 'app'         AND status = 'completed') AS app_completed,
+            COUNT(*) FILTER (WHERE channel = 'marketplace' AND status = 'completed') AS marketplace_completed
+        FROM orders_h1_digital
+        GROUP BY country
+    ),
+
+    regional_alignment AS (
+        -- CRM region vs order country: how many converting customers are booked
+        -- to a CRM region that disagrees with where they order from
+        SELECT
+            f.country,
+            COUNT(DISTINCT CASE
+                WHEN f.country IN ('US', 'CA') AND c.region <> 'NA'   THEN f.customer_id
+                WHEN f.country IN ('GB', 'DE') AND c.region <> 'EMEA' THEN f.customer_id
+            END)                                                           AS region_mismatched_customers,
+            COUNT(DISTINCT CASE WHEN c.customer_id IS NULL THEN f.customer_id END) AS crm_missing_customers
+        FROM orders_h1_digital AS f
+        LEFT JOIN main.finance.customers AS c
+               ON c.customer_id = f.customer_id
+        WHERE f.status = 'completed'
+        GROUP BY f.country
+    ),
+
+    time_to_first AS (
+        -- first completed order date per country in the half (launch tracking)
+        SELECT
+            country,
+            MIN(order_date)                                                AS first_completed_date,
+            MAX(order_date)                                                AS last_completed_date
+        FROM orders_h1_digital
+        WHERE status = 'completed'
+        GROUP BY country
+    )
+
+    SELECT
+        fu.country,
+        fu.net_revenue,
+        fu.completed_refunds,
+        fu.completed_discounts,
+        fu.orders_placed,
+        fu.orders_completed,
+        fu.orders_cancelled,
+        fu.orders_pending,
+        fu.orders_status_missing,
+        fu.orders_completed / NULLIF(CAST(fu.orders_placed AS DOUBLE), 0)       AS completion_rate,
+        fu.orders_cancelled / NULLIF(CAST(fu.orders_placed AS DOUBLE), 0)       AS cancellation_rate,
+        fu.cancelled_value,
+        fu.customers_placing,
+        fu.customers_converting,
+        fu.customers_converting / NULLIF(CAST(fu.customers_placing AS DOUBLE), 0) AS customer_conversion,
+        cs.web_completed,
+        cs.app_completed,
+        cs.marketplace_completed,
+        ra.region_mismatched_customers,
+        ra.crm_missing_customers,
+        tf.first_completed_date,
+        tf.last_completed_date,
+        fu.net_revenue / NULLIF(fu.orders_completed, 0)                         AS net_aov,
+        PERCENT_RANK() OVER (ORDER BY fu.net_revenue)                           AS net_revenue_pct_rank
+    FROM funnel AS fu
+    LEFT JOIN channel_split      AS cs ON cs.country = fu.country
+    LEFT JOIN regional_alignment AS ra ON ra.country = fu.country
+    LEFT JOIN time_to_first      AS tf ON tf.country = fu.country
+    ORDER BY fu.net_revenue DESC NULLS LAST, fu.country
+  label: permitted_variation
+  rationale: 'The base CTE keeps every status because the funnel columns need cancelled and pending rows. Its only filters are on declared dimensions: an order_date window and channel IN (''web'',''app'',''marketplace''). net_revenue = SUM(amount) FILTER (WHERE status = ''completed'') - SUM(refund_amount) FILTER (WHERE status = ''completed''). That is the declared formula with the required filter applied inside each aggregate, grouped by country as declared. HAVING COUNT(*) FILTER (WHERE status = ''completed'') > 0 removes only countries that have no completed order in scope. Those countries do not exist in the governed result, so the group set and every value match it. The customers join (regional_alignment), channel_split and time_to_first feed only other columns, as country-unique aggregates LEFT JOINed onto funnel.'
+  counterpart_sql: |
+    SELECT country, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2025-01-01' AND order_date < DATE '2025-07-01'
+      AND channel IN ('web', 'app', 'marketplace')
+    GROUP BY country
+  key_columns:
+  - country
+  metric_column: net_revenue
+- id: longnb-06
+  metric: gross_revenue
+  sql: |
+    /* ==========================================================================
+       Merchandising x channel: monthly gross revenue, units and SKU breadth
+       Period: Q3-Q4 2025 (month window)          Audience: Category leads
+       Built from the "basket" notebook; gross revenue column is the one the
+       category leads paste into the monthly trading update.
+       ========================================================================== */
+    WITH
+    /* 1) order headers in scope ------------------------------------------------ */
+    hdr AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.channel,
+            o.country,
+            o.order_date,
+            DATE_TRUNC('MONTH', o.order_date)                       AS month,
+            o.amount,
+            o.discount
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND DATE_TRUNC('MONTH', o.order_date) >= DATE '2025-07-01'
+          AND DATE_TRUNC('MONTH', o.order_date) <= DATE '2025-12-01'
+    ),
+
+    /* 2) SKU taxonomy (inline mapping until the product dim lands) ------------- */
+    sku_map AS (
+        SELECT * FROM (VALUES
+            ('SKU-A',  'core',     'apparel'),
+            ('SKU-B',  'core',     'home'),
+            ('GIFT-1', 'seasonal', 'gifting')
+        ) AS t(sku, sku_tier, category)
+    ),
+
+    /* 3) basket: header attributes carried onto each line for the mix views ---- */
+    basket AS (
+        SELECT
+            h.order_id,
+            h.customer_id,
+            h.channel,
+            h.month,
+            h.amount,
+            h.discount,
+            i.sku,
+            i.qty,
+            COALESCE(m.sku_tier, 'unmapped')                        AS sku_tier,
+            COALESCE(m.category, 'unmapped')                        AS category
+        FROM hdr AS h
+        JOIN main.finance.order_items AS i
+          ON i.order_id = h.order_id
+        LEFT JOIN sku_map AS m
+          ON m.sku = i.sku
+    ),
+
+    /* 4) monthly channel trading view ----------------------------------------- */
+    trading AS (
+        SELECT
+            b.month,
+            b.channel,
+            SUM(b.amount)                                           AS gross_revenue,
+            SUM(b.qty)                                              AS units,
+            COUNT(DISTINCT b.order_id)                              AS orders,
+            COUNT(DISTINCT b.sku)                                   AS active_skus,
+            SUM(CASE WHEN b.sku_tier = 'seasonal' THEN b.qty END)   AS seasonal_units,
+            SUM(CASE WHEN b.category = 'unmapped' THEN 1 ELSE 0 END) AS unmapped_lines
+        FROM basket AS b
+        GROUP BY b.month, b.channel
+    ),
+
+    /* 5) category mix (units) pivot ------------------------------------------- */
+    category_mix AS (
+        SELECT
+            month,
+            channel,
+            SUM(CASE WHEN category = 'apparel' THEN qty ELSE 0 END) AS apparel_units,
+            SUM(CASE WHEN category = 'home'    THEN qty ELSE 0 END) AS home_units,
+            SUM(CASE WHEN category = 'gifting' THEN qty ELSE 0 END) AS gifting_units
+        FROM basket
+        GROUP BY month, channel
+    ),
+
+    /* 6) discount depth from headers ------------------------------------------ */
+    discounting AS (
+        SELECT
+            month,
+            channel,
+            SUM(discount)                                           AS discount_total,
+            AVG(discount)                                           AS avg_discount,
+            COUNT_IF(discount > 0)                                  AS discounted_orders
+        FROM hdr
+        GROUP BY month, channel
+    ),
+
+    /* 7) customer reach ------------------------------------------------------- */
+    reach AS (
+        SELECT
+            h.month,
+            h.channel,
+            COUNT(DISTINCT h.customer_id)                           AS customers,
+            COUNT(DISTINCT CASE WHEN c.segment = 'consumer' THEN h.customer_id END) AS consumer_customers
+        FROM hdr AS h
+        LEFT JOIN main.finance.customers AS c ON c.customer_id = h.customer_id
+        GROUP BY h.month, h.channel
+    )
+
+    SELECT
+        t.month                                                     AS month,
+        t.channel                                                   AS channel,
+        t.gross_revenue                                             AS gross_revenue,
+        t.units                                                     AS units,
+        t.orders                                                    AS orders,
+        t.gross_revenue / NULLIF(t.orders, 0)                       AS aov,
+        t.units / NULLIF(CAST(t.orders AS DOUBLE), 0)               AS units_per_order,
+        t.active_skus                                               AS active_skus,
+        t.seasonal_units                                            AS seasonal_units,
+        t.unmapped_lines                                            AS unmapped_lines,
+        cm.apparel_units                                            AS apparel_units,
+        cm.home_units                                               AS home_units,
+        cm.gifting_units                                            AS gifting_units,
+        d.discount_total                                            AS discount_total,
+        d.avg_discount                                              AS avg_discount,
+        d.discounted_orders                                         AS discounted_orders,
+        r.customers                                                 AS customers,
+        r.consumer_customers                                        AS consumer_customers,
+        t.gross_revenue / NULLIF(SUM(t.gross_revenue) OVER (PARTITION BY t.month), 0) AS share_of_month,
+        t.gross_revenue - LAG(t.gross_revenue) OVER (PARTITION BY t.channel ORDER BY t.month) AS mom_delta
+    FROM trading AS t
+    LEFT JOIN category_mix AS cm ON cm.month = t.month AND cm.channel = t.channel
+    LEFT JOIN discounting  AS d  ON d.month  = t.month AND d.channel  = t.channel
+    LEFT JOIN reach        AS r  ON r.month  = t.month AND r.channel  = t.channel
+    ORDER BY t.month, t.channel NULLS LAST
+  label: source_drift
+  rationale: 'hdr is governed: completed orders, a month window, and a projection. However, CTE basket INNER JOINs hdr to main.finance.order_items, which has one row per order line, and copies the header amount onto every line. trading then computes gross_revenue = SUM(b.amount) from basket. Each order''s amount is counted once per item line, and completed orders with no item lines disappear. The join therefore changes which rows are counted, and the metric no longer comes from main.finance.orders through select-project-filter steps. The formula and the month x channel grouping are as declared. discounting and reach correctly read hdr, which makes the revenue path look as safe as theirs.'
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND DATE_TRUNC('MONTH', order_date) >= DATE '2025-07-01'
+      AND DATE_TRUNC('MONTH', order_date) <= DATE '2025-12-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date), channel
+  key_columns:
+  - month
+  - channel
+  metric_column: gross_revenue
+- id: longnb-07
+  metric: gross_revenue
+  sql: |
+    -- ===========================================================================
+    -- Holiday peak 2025 — US digital (web + app) daily gross revenue tracker
+    -- Dashboard: "Peak War Room" / tile: daily_gross_us_digital
+    -- Window: 1 Nov – 31 Dec 2025 inclusive
+    -- New-customer flags use each customer's first completed order across ALL
+    -- history (not just the window) so returning shoppers are not miscounted.
+    -- ===========================================================================
+    WITH
+    -- the governed slice: completed, US, web/app, inside the peak window
+    peak_orders AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.channel,
+            o.order_date,
+            o.amount,
+            o.refund_amount,
+            o.discount
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND o.country = 'US'
+          AND o.channel IN ('web', 'app')
+          AND o.order_date BETWEEN DATE '2025-11-01' AND DATE '2025-12-31'
+    ),
+
+    -- daily totals: gross revenue + volume
+    daily AS (
+        SELECT
+            p.order_date,
+            SUM(p.amount)                                         AS gross_revenue,
+            COUNT(*)                                              AS orders,
+            COUNT_IF(p.channel = 'app')                           AS app_orders,
+            SUM(p.discount)                                       AS discount_total,
+            SUM(p.refund_amount)                                  AS refunds_to_date
+        FROM peak_orders AS p
+        GROUP BY p.order_date
+    ),
+
+    -- first completed order per customer, all history, any country/channel
+    first_orders AS (
+        SELECT
+            customer_id,
+            MIN(order_date)                                       AS first_order_date
+        FROM main.finance.orders
+        WHERE status = 'completed'
+          AND customer_id IS NOT NULL
+        GROUP BY customer_id
+    ),
+
+    -- new vs returning shoppers per day
+    shopper_mix AS (
+        SELECT
+            p.order_date,
+            COUNT(DISTINCT p.customer_id)                                              AS shoppers,
+            COUNT(DISTINCT CASE WHEN f.first_order_date = p.order_date THEN p.customer_id END) AS new_shoppers
+        FROM peak_orders AS p
+        LEFT JOIN first_orders AS f
+               ON f.customer_id = p.customer_id
+        GROUP BY p.order_date
+    ),
+
+    -- abandoned / cancelled pressure on the same days (ops tile)
+    cancellations AS (
+        SELECT
+            o.order_date,
+            COUNT(*)                                              AS cancelled_orders,
+            SUM(o.amount)                                         AS cancelled_value
+        FROM main.finance.orders AS o
+        WHERE o.status = 'cancelled'
+          AND o.country = 'US'
+          AND o.channel IN ('web', 'app')
+          AND o.order_date BETWEEN DATE '2025-11-01' AND DATE '2025-12-31'
+        GROUP BY o.order_date
+    ),
+
+    -- named retail events for annotation
+    events AS (
+        SELECT * FROM (VALUES
+            (DATE '2025-11-28', 'Black Friday'),
+            (DATE '2025-12-01', 'Cyber Monday'),
+            (DATE '2025-12-26', 'Boxing Day')
+        ) AS e(event_date, event_name)
+    ),
+
+    tracker AS (
+        SELECT
+            d.order_date,
+            d.gross_revenue,
+            d.orders,
+            d.app_orders,
+            d.discount_total,
+            d.refunds_to_date,
+            s.shoppers,
+            s.new_shoppers,
+            COALESCE(c.cancelled_orders, 0)                       AS cancelled_orders,
+            c.cancelled_value,
+            e.event_name
+        FROM daily AS d
+        LEFT JOIN shopper_mix   AS s ON s.order_date = d.order_date
+        LEFT JOIN cancellations AS c ON c.order_date = d.order_date
+        LEFT JOIN events        AS e ON e.event_date = d.order_date
+    )
+
+    SELECT
+        t.order_date,
+        t.gross_revenue,
+        t.orders,
+        t.gross_revenue / NULLIF(t.orders, 0)                                          AS aov,
+        t.app_orders / NULLIF(CAST(t.orders AS DOUBLE), 0)                             AS app_order_share,
+        t.discount_total,
+        t.refunds_to_date,
+        t.shoppers,
+        t.new_shoppers,
+        t.new_shoppers / NULLIF(CAST(t.shoppers AS DOUBLE), 0)                         AS new_shopper_share,
+        t.cancelled_orders,
+        t.cancelled_value,
+        t.event_name,
+        AVG(t.gross_revenue) OVER (ORDER BY t.order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS gross_7d_avg,
+        SUM(t.gross_revenue) OVER (ORDER BY t.order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS gross_running_total,
+        t.gross_revenue - LAG(t.gross_revenue, 7) OVER (ORDER BY t.order_date)         AS wow_delta,
+        CASE
+            WHEN t.gross_revenue >= 1.5 * AVG(t.gross_revenue) OVER () THEN 'spike'
+            WHEN t.gross_revenue <= 0.5 * AVG(t.gross_revenue) OVER () THEN 'dip'
+            ELSE 'normal'
+        END                                                                            AS anomaly_flag,
+        RANK() OVER (ORDER BY t.gross_revenue DESC NULLS LAST)                         AS day_rank
+    FROM tracker AS t
+    ORDER BY t.order_date
+  label: permitted_variation
+  rationale: 'gross_revenue = SUM(amount) over peak_orders, which is main.finance.orders filtered to status = ''completed''. The other filters are on declared dimensions only: country = ''US'', channel IN (''web'',''app'') and order_date BETWEEN 2025-11-01 and 2025-12-31. The result is grouped by order_date, a declared dimension. first_orders (all-history completed orders), shopper_mix, cancellations and the events VALUES list are aggregated or unique per order_date. They are LEFT JOINed onto daily and feed only other columns. The moving average, running total, WoW delta, anomaly flag and rank are separate window columns, so each day''s governed value is unchanged.'
+  counterpart_sql: |
+    SELECT order_date, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND country = 'US'
+      AND channel IN ('web', 'app')
+      AND order_date BETWEEN DATE '2025-11-01' AND DATE '2025-12-31'
+    GROUP BY order_date
+  key_columns:
+  - order_date
+  metric_column: gross_revenue
+- id: longnb-08
+  metric: net_revenue
+  sql: |
+    -- ****************************************************************************
+    -- Regional GM scorecard — country x channel — fall trading (Sep–Nov 2025)
+    -- Tableau custom SQL (data source: gm_scorecard_fall25), last edited by @rk
+    -- Grain: one row per country x channel that traded in the window.
+    -- ****************************************************************************
+    WITH
+    -- [A] order activity of every status: drives the scorecard rows
+    activity AS (
+        SELECT
+            o.country,
+            o.channel,
+            COUNT(*)                                                  AS orders_all_status,
+            COUNT_IF(o.status = 'completed')                          AS orders_completed,
+            COUNT_IF(o.status = 'cancelled')                          AS orders_cancelled,
+            COUNT_IF(o.status = 'pending')                            AS orders_pending,
+            COUNT(DISTINCT o.customer_id)                             AS customers_all_status,
+            MIN(o.order_date)                                         AS first_order_in_window,
+            MAX(o.order_date)                                         AS last_order_in_window
+        FROM main.finance.orders AS o
+        WHERE DATE_TRUNC('MONTH', o.order_date) IN (DATE '2025-09-01', DATE '2025-10-01', DATE '2025-11-01')
+        GROUP BY o.country, o.channel
+    ),
+
+    -- [B] governed net revenue: completed orders, amounts less refunds
+    revenue AS (
+        SELECT
+            o.country,
+            o.channel,
+            SUM(o.amount) - SUM(o.refund_amount)                      AS net_revenue,
+            SUM(o.amount)                                             AS completed_amount,
+            SUM(o.refund_amount)                                      AS completed_refunds,
+            SUM(o.discount)                                           AS completed_discounts
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND DATE_TRUNC('MONTH', o.order_date) IN (DATE '2025-09-01', DATE '2025-10-01', DATE '2025-11-01')
+        GROUP BY o.country, o.channel
+    ),
+
+    -- [C] monthly shape of completed orders, pivoted (sparkline source)
+    monthly_shape AS (
+        SELECT
+            o.country,
+            o.channel,
+            COUNT_IF(DATE_TRUNC('MONTH', o.order_date) = DATE '2025-09-01') AS completed_sep,
+            COUNT_IF(DATE_TRUNC('MONTH', o.order_date) = DATE '2025-10-01') AS completed_oct,
+            COUNT_IF(DATE_TRUNC('MONTH', o.order_date) = DATE '2025-11-01') AS completed_nov
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND DATE_TRUNC('MONTH', o.order_date) IN (DATE '2025-09-01', DATE '2025-10-01', DATE '2025-11-01')
+        GROUP BY o.country, o.channel
+    ),
+
+    -- [D] CRM segment reach for converting customers
+    segment_reach AS (
+        SELECT
+            o.country,
+            o.channel,
+            COUNT(DISTINCT CASE WHEN c.segment = 'enterprise' THEN o.customer_id END) AS enterprise_buyers,
+            COUNT(DISTINCT CASE WHEN c.segment = 'smb'        THEN o.customer_id END) AS smb_buyers,
+            COUNT(DISTINCT CASE WHEN c.segment = 'consumer'   THEN o.customer_id END) AS consumer_buyers
+        FROM main.finance.orders AS o
+        LEFT JOIN main.finance.customers AS c
+               ON c.customer_id = o.customer_id
+        WHERE o.status = 'completed'
+          AND DATE_TRUNC('MONTH', o.order_date) IN (DATE '2025-09-01', DATE '2025-10-01', DATE '2025-11-01')
+        GROUP BY o.country, o.channel
+    ),
+
+    -- [E] scorecard rows = activity rows that have revenue
+    scorecard AS (
+        SELECT
+            a.country,
+            a.channel,
+            r.net_revenue,
+            r.completed_amount,
+            r.completed_refunds,
+            r.completed_discounts,
+            a.orders_all_status,
+            a.orders_completed,
+            a.orders_cancelled,
+            a.orders_pending,
+            a.customers_all_status,
+            a.first_order_in_window,
+            a.last_order_in_window
+        FROM activity AS a
+        JOIN revenue  AS r
+          USING (country, channel)
+    )
+
+    SELECT
+        s.country                                                                      AS country,
+        s.channel                                                                      AS channel,
+        s.net_revenue                                                                  AS net_revenue,
+        s.completed_refunds / NULLIF(s.completed_amount, 0)                            AS refund_rate,
+        s.completed_discounts                                                          AS discounts,
+        s.orders_all_status                                                            AS orders_all_status,
+        s.orders_completed                                                             AS orders_completed,
+        s.orders_completed / NULLIF(CAST(s.orders_all_status AS DOUBLE), 0)            AS completion_rate,
+        s.orders_cancelled / NULLIF(CAST(s.orders_all_status AS DOUBLE), 0)            AS cancel_rate,
+        s.orders_pending                                                               AS orders_pending,
+        s.customers_all_status                                                         AS customers,
+        ms.completed_sep                                                               AS completed_sep,
+        ms.completed_oct                                                               AS completed_oct,
+        ms.completed_nov                                                               AS completed_nov,
+        sr.enterprise_buyers                                                           AS enterprise_buyers,
+        sr.smb_buyers                                                                  AS smb_buyers,
+        sr.consumer_buyers                                                             AS consumer_buyers,
+        s.net_revenue / NULLIF(SUM(s.net_revenue) OVER (PARTITION BY s.country), 0)    AS share_of_country,
+        DENSE_RANK() OVER (ORDER BY s.net_revenue DESC NULLS LAST)                     AS overall_rank,
+        CASE
+            WHEN s.orders_completed / NULLIF(CAST(s.orders_all_status AS DOUBLE), 0) < 0.6 THEN 'review'
+            ELSE 'ok'
+        END                                                                            AS gm_flag
+    FROM scorecard AS s
+    LEFT JOIN monthly_shape AS ms ON ms.country = s.country AND ms.channel = s.channel
+    LEFT JOIN segment_reach AS sr ON sr.country = s.country AND sr.channel = s.channel
+    ORDER BY s.country NULLS LAST, s.channel NULLS LAST
+  label: insufficient_evidence
+  rationale: 'CTE revenue is fully governed: status = ''completed'', a month IN (Sep/Oct/Nov 2025) window on a declared dimension, SUM(amount) - SUM(refund_amount), grouped by country and channel. The output rows, however, come from activity JOIN revenue USING (country, channel), an inner equi-join on the grouping keys. activity covers all statuses over the same window, so every revenue group with non-NULL keys has a match and passes through unchanged. A group whose country or channel is NULL can never match, and it is silently dropped. The output equals the governed result only if country and channel are non-nullable. The definitions do not state nullability for these columns, so whether this statement matches the governed metric cannot be decided from the evidence.'
+  counterpart_sql: |
+    SELECT country, channel, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND DATE_TRUNC('MONTH', order_date) IN (DATE '2025-09-01', DATE '2025-10-01', DATE '2025-11-01')
+    GROUP BY country, channel
+  key_columns:
+  - country
+  - channel
+  metric_column: net_revenue
+- id: longnb-09
+  metric: gross_revenue
+  sql: |
+    -- ============================================================================
+    -- Board pack FY2025 | Appendix B — channel league table by month
+    -- Excludes the internal test storefront (country code 'ZZ').
+    -- Gross revenue = completed orders' amounts (governed definition).
+    -- Ranking columns: channel position within each month and change vs prior
+    -- month; every channel row is kept (no top-N cut) so totals tie to 2.1.
+    -- ============================================================================
+    WITH
+    scope AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.channel,
+            o.country,
+            o.order_date,
+            DATE_TRUNC('MONTH', o.order_date)                         AS month,
+            o.amount,
+            o.discount,
+            o.refund_amount
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND o.country NOT IN ('ZZ')
+          AND DATE_TRUNC('MONTH', o.order_date) BETWEEN DATE '2025-01-01' AND DATE '2025-12-01'
+    ),
+
+    league AS (
+        SELECT
+            s.month,
+            s.channel,
+            CAST(SUM(s.amount) AS DOUBLE)                             AS gross_revenue,
+            COUNT(*)                                                  AS orders,
+            SUM(s.discount)                                           AS discounts,
+            SUM(s.refund_amount)                                      AS refunds,
+            COUNT(DISTINCT s.country)                                 AS countries_active
+        FROM scope AS s
+        GROUP BY s.month, s.channel
+    ),
+
+    ranked AS (
+        SELECT
+            l.*,
+            RANK() OVER (PARTITION BY l.month ORDER BY l.gross_revenue DESC NULLS LAST)        AS rank_in_month,
+            l.gross_revenue / NULLIF(SUM(l.gross_revenue) OVER (PARTITION BY l.month), 0)      AS share_of_month,
+            SUM(l.gross_revenue) OVER (PARTITION BY l.channel ORDER BY l.month
+                                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)       AS ytd_gross_revenue
+        FROM league AS l
+    ),
+
+    ranked_with_prior AS (
+        SELECT
+            r.*,
+            LAG(r.rank_in_month) OVER (PARTITION BY r.channel ORDER BY r.month)                AS prior_rank,
+            LAG(r.gross_revenue) OVER (PARTITION BY r.channel ORDER BY r.month)                AS prior_gross_revenue
+        FROM ranked AS r
+    ),
+
+    -- first completed order per customer (all history, all countries) to split
+    -- new vs returning buyers in each month x channel
+    customer_first AS (
+        SELECT
+            customer_id,
+            MIN(DATE_TRUNC('MONTH', order_date))                      AS first_month
+        FROM main.finance.orders
+        WHERE status = 'completed'
+        GROUP BY customer_id
+    ),
+
+    buyer_split AS (
+        SELECT
+            s.month,
+            s.channel,
+            COUNT(DISTINCT s.customer_id)                                                   AS buyers,
+            COUNT(DISTINCT CASE WHEN cf.first_month = s.month THEN s.customer_id END)       AS new_buyers,
+            COUNT(DISTINCT CASE WHEN cf.first_month < s.month THEN s.customer_id END)       AS returning_buyers
+        FROM scope AS s
+        LEFT JOIN customer_first AS cf
+               ON cf.customer_id = s.customer_id
+        GROUP BY s.month, s.channel
+    ),
+
+    -- enterprise reach via CRM (distinct counts only)
+    enterprise_reach AS (
+        SELECT
+            s.month,
+            s.channel,
+            COUNT(DISTINCT s.customer_id)                             AS enterprise_buyers
+        FROM scope AS s
+        JOIN main.finance.customers AS c
+          ON c.customer_id = s.customer_id
+         AND c.segment = 'enterprise'
+        GROUP BY s.month, s.channel
+    )
+
+    SELECT
+        rp.month                                                                    AS month,
+        rp.channel                                                                  AS channel,
+        rp.gross_revenue                                                            AS gross_revenue,
+        rp.rank_in_month                                                            AS rank_in_month,
+        rp.prior_rank                                                               AS prior_rank,
+        CASE
+            WHEN rp.prior_rank IS NULL           THEN 'new'
+            WHEN rp.rank_in_month < rp.prior_rank THEN 'up'
+            WHEN rp.rank_in_month > rp.prior_rank THEN 'down'
+            ELSE 'flat'
+        END                                                                         AS movement,
+        rp.share_of_month                                                           AS share_of_month,
+        rp.ytd_gross_revenue                                                        AS ytd_gross_revenue,
+        (rp.gross_revenue - rp.prior_gross_revenue) / NULLIF(rp.prior_gross_revenue, 0) AS mom_growth,
+        rp.orders                                                                   AS orders,
+        rp.gross_revenue / NULLIF(rp.orders, 0)                                     AS aov,
+        rp.discounts                                                                AS discounts,
+        rp.refunds                                                                  AS refunds,
+        rp.countries_active                                                         AS countries_active,
+        b.buyers                                                                    AS buyers,
+        b.new_buyers                                                                AS new_buyers,
+        b.returning_buyers                                                          AS returning_buyers,
+        COALESCE(e.enterprise_buyers, 0)                                            AS enterprise_buyers
+    FROM ranked_with_prior AS rp
+    LEFT JOIN buyer_split      AS b ON b.month = rp.month AND b.channel = rp.channel
+    LEFT JOIN enterprise_reach AS e ON e.month = rp.month AND e.channel = rp.channel
+    ORDER BY rp.month, rp.rank_in_month, rp.channel NULLS LAST
+  label: permitted_variation
+  rationale: gross_revenue = CAST(SUM(amount) AS DOUBLE) over scope. A DOUBLE-to-DOUBLE cast cannot change the value. scope is main.finance.orders filtered to status = 'completed', plus declared-dimension filters country NOT IN ('ZZ') and month BETWEEN 2025-01-01 and 2025-12-01. It is grouped by month and channel as declared. The ranking columns (rank_in_month, prior_rank, movement), share, YTD running total and MoM growth are window-function columns that keep every group and leave each group's value unchanged. There is no top-N cut. customer_first, buyer_split and enterprise_reach (the CRM inner join) feed only buyer-count columns. They are aggregated to unique month x channel keys and LEFT JOINed onto the ranked revenue rows.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND country NOT IN ('ZZ')
+      AND DATE_TRUNC('MONTH', order_date) BETWEEN DATE '2025-01-01' AND DATE '2025-12-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date), channel
+  key_columns:
+  - month
+  - channel
+  metric_column: gross_revenue
+- id: longnb-10
+  metric: gross_revenue
+  sql: |
+    /* ---------------------------------------------------------------------------
+       Board pack FY2025 | 2.3 Gross revenue by country, monthly
+       dbt model: marts/finance/board/fct_board_country_month_gross.sql (compiled)
+       Upstream refs compiled inline. Gross revenue = completed order amounts.
+       --------------------------------------------------------------------------- */
+    WITH
+
+    /* ref('stg_finance__orders') */
+    stg_finance__orders AS (
+        SELECT
+            order_id,
+            customer_id,
+            amount,
+            refund_amount,
+            discount,
+            status,
+            country,
+            channel,
+            order_date
+        FROM main.finance.orders
+    ),
+
+    /* ref('int_orders__reporting_calendar') — attaches reporting keys */
+    int_orders__reporting_calendar AS (
+        SELECT
+            s.*,
+            EXTRACT(YEAR FROM s.order_date)                         AS order_year,
+            EXTRACT(QUARTER FROM s.order_date)                      AS order_quarter,
+            DATE_TRUNC('MONTH', DATE_ADD(s.order_date, 6))          AS reporting_month,
+            CASE WHEN DAYOFWEEK(s.order_date) IN (1, 7) THEN 1 ELSE 0 END AS is_weekend
+        FROM stg_finance__orders AS s
+    ),
+
+    /* ref('int_orders__completed') */
+    int_orders__completed AS (
+        SELECT *
+        FROM int_orders__reporting_calendar
+        WHERE status = 'completed'
+          AND order_date >= DATE '2025-01-01'
+          AND order_date <  DATE '2026-01-01'
+    ),
+
+    /* gross revenue + volume per reporting month x country */
+    country_month AS (
+        SELECT
+            c.reporting_month                                       AS month,
+            c.country,
+            SUM(c.amount)                                           AS gross_revenue,
+            COUNT(*)                                                AS orders,
+            SUM(c.discount)                                         AS discounts,
+            SUM(c.is_weekend)                                       AS weekend_orders,
+            COUNT(DISTINCT c.customer_id)                           AS customers,
+            COUNT(DISTINCT c.channel)                               AS channels_active
+        FROM int_orders__completed AS c
+        GROUP BY c.reporting_month, c.country
+    ),
+
+    /* channel leader per reporting month x country (by order count) */
+    channel_leader AS (
+        SELECT month, country, channel AS leading_channel, channel_orders
+        FROM (
+            SELECT
+                c.reporting_month                                   AS month,
+                c.country,
+                c.channel,
+                COUNT(*)                                            AS channel_orders,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.reporting_month, c.country
+                    ORDER BY COUNT(*) DESC, c.channel
+                )                                                   AS rn
+            FROM int_orders__completed AS c
+            GROUP BY c.reporting_month, c.country, c.channel
+        ) AS ranked
+        WHERE rn = 1
+    ),
+
+    /* CRM segment mix (distinct buyers) */
+    segment_mix AS (
+        SELECT
+            c.reporting_month                                       AS month,
+            c.country,
+            COUNT(DISTINCT CASE WHEN cu.segment = 'enterprise' THEN c.customer_id END) AS enterprise_customers,
+            COUNT(DISTINCT CASE WHEN cu.segment = 'smb'        THEN c.customer_id END) AS smb_customers
+        FROM int_orders__completed AS c
+        LEFT JOIN main.finance.customers AS cu
+               ON cu.customer_id = c.customer_id
+        GROUP BY c.reporting_month, c.country
+    ),
+
+    /* budget phasing placeholder: flat 1/12 of FY target per country */
+    budget AS (
+        SELECT * FROM (VALUES
+            ('US', 1200000.0),
+            ('CA',  300000.0),
+            ('GB',  450000.0),
+            ('DE',  380000.0)
+        ) AS b(country, fy_target)
+    )
+
+    SELECT
+        cm.month                                                                AS month,
+        cm.country                                                              AS country,
+        cm.gross_revenue                                                        AS gross_revenue,
+        cm.orders                                                               AS orders,
+        cm.gross_revenue / NULLIF(cm.orders, 0)                                 AS aov,
+        cm.discounts                                                            AS discounts,
+        cm.weekend_orders / NULLIF(CAST(cm.orders AS DOUBLE), 0)                AS weekend_share,
+        cm.customers                                                            AS customers,
+        cm.channels_active                                                      AS channels_active,
+        cl.leading_channel                                                      AS leading_channel,
+        sm.enterprise_customers                                                 AS enterprise_customers,
+        sm.smb_customers                                                        AS smb_customers,
+        b.fy_target / 12.0                                                      AS monthly_budget,
+        cm.gross_revenue - b.fy_target / 12.0                                   AS variance_to_budget,
+        SUM(cm.gross_revenue) OVER (PARTITION BY cm.country ORDER BY cm.month
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ytd_gross_revenue,
+        cm.gross_revenue / NULLIF(SUM(cm.gross_revenue) OVER (PARTITION BY cm.month), 0) AS share_of_month
+    FROM country_month AS cm
+    LEFT JOIN channel_leader AS cl ON cl.month = cm.month AND cl.country = cm.country
+    LEFT JOIN segment_mix    AS sm ON sm.month = cm.month AND sm.country = cm.country
+    LEFT JOIN budget         AS b  ON b.country = cm.country
+    ORDER BY cm.month, cm.country NULLS LAST
+  label: grain_drift
+  rationale: 'The population is governed: status = ''completed'' and a 2025 order_date window on a declared dimension. The formula is governed too: SUM(amount). The grouping is not. int_orders__reporting_calendar derives reporting_month = DATE_TRUNC(''MONTH'', DATE_ADD(order_date, 6)), and country_month groups by it while aliasing it as month. That is not the declared month dimension (DATE_TRUNC(''MONTH'', order_date)). Orders from the last six days of each month move into the next month''s bucket, and orders from 26-31 Dec 2025 create a 2026-01 row. Grouping by anything other than the declared dimensions changes the grain, even though the output column is named month.'
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, country, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date >= DATE '2025-01-01' AND order_date < DATE '2026-01-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date), country
+  key_columns:
+  - month
+  - country
+  metric_column: gross_revenue
+- id: longnb-11
+  metric: net_revenue
+  sql: |
+    -- ===========================================================================
+    -- CFO deck — slide 4: monthly net revenue trend, refund ratio, buyer counts
+    -- notebook: finance/cfo_deck/04_monthly_trend   cell: [12] final_query
+    -- Period: calendar 2025.  Net revenue = completed amounts less refunds.
+    -- ===========================================================================
+    WITH
+    -- ---------------------------------------------------------------------------
+    -- order_status_clean: the order feed is merged from the web platform and the
+    -- legacy POS export, which writes status codes with inconsistent casing and
+    -- padding; normalise once here so every downstream CTE sees one vocabulary.
+    -- ---------------------------------------------------------------------------
+    order_status_clean AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.amount,
+            o.refund_amount,
+            o.discount,
+            LOWER(TRIM(o.status))                                   AS status_norm,
+            o.country,
+            o.channel,
+            o.order_date
+        FROM main.finance.orders AS o
+        WHERE o.order_date >= DATE '2025-01-01'
+          AND o.order_date <  DATE '2026-01-01'
+    ),
+
+    -- completed orders (revenue population)
+    completed AS (
+        SELECT
+            c.*,
+            DATE_TRUNC('MONTH', c.order_date)                       AS month
+        FROM order_status_clean AS c
+        WHERE c.status_norm = 'completed'
+    ),
+
+    -- monthly revenue lines
+    monthly_revenue AS (
+        SELECT
+            month,
+            SUM(amount) - SUM(refund_amount)                        AS net_revenue,
+            SUM(amount)                                             AS gross_amount,
+            SUM(refund_amount)                                      AS refunds,
+            COUNT(*)                                                AS completed_orders,
+            COUNT(DISTINCT customer_id)                             AS buyers
+        FROM completed
+        GROUP BY month
+    ),
+
+    -- monthly status mix across the whole feed (ops context)
+    status_mix AS (
+        SELECT
+            DATE_TRUNC('MONTH', order_date)                         AS month,
+            COUNT(*)                                                AS orders_all,
+            COUNT_IF(status_norm = 'cancelled')                     AS orders_cancelled,
+            COUNT_IF(status_norm = 'pending')                       AS orders_pending,
+            COUNT_IF(status_norm IS NULL)                           AS orders_unknown_status
+        FROM order_status_clean
+        GROUP BY 1
+    ),
+
+    -- geographic breadth per month
+    geo AS (
+        SELECT
+            month,
+            COUNT(DISTINCT country)                                 AS countries_selling,
+            COUNT(DISTINCT channel)                                 AS channels_selling,
+            COUNT_IF(country = 'US') / NULLIF(CAST(COUNT(*) AS DOUBLE), 0) AS us_order_share
+        FROM completed
+        GROUP BY month
+    ),
+
+    -- repeat buyers: bought in this month and in any earlier 2025 month
+    repeat_buyers AS (
+        SELECT
+            cur.month,
+            COUNT(DISTINCT cur.customer_id)                         AS repeat_buyers
+        FROM completed AS cur
+        WHERE EXISTS (
+            SELECT 1
+            FROM completed AS prev
+            WHERE prev.customer_id = cur.customer_id
+              AND prev.month < cur.month
+        )
+        GROUP BY cur.month
+    ),
+
+    -- CRM enterprise buyers per month (distinct only)
+    crm_enterprise AS (
+        SELECT
+            c.month,
+            COUNT(DISTINCT c.customer_id)                           AS enterprise_buyers
+        FROM completed AS c
+        JOIN main.finance.customers AS cu
+          ON cu.customer_id = c.customer_id
+        WHERE cu.segment = 'enterprise'
+        GROUP BY c.month
+    )
+
+    SELECT
+        mr.month,
+        mr.net_revenue,
+        mr.gross_amount,
+        mr.refunds,
+        mr.refunds / NULLIF(mr.gross_amount, 0)                                     AS refund_ratio,
+        mr.completed_orders,
+        mr.net_revenue / NULLIF(mr.completed_orders, 0)                             AS net_aov,
+        mr.buyers,
+        COALESCE(rb.repeat_buyers, 0)                                               AS repeat_buyers,
+        COALESCE(rb.repeat_buyers, 0) / NULLIF(CAST(mr.buyers AS DOUBLE), 0)        AS repeat_buyer_share,
+        COALESCE(ce.enterprise_buyers, 0)                                           AS enterprise_buyers,
+        sm.orders_all,
+        sm.orders_cancelled / NULLIF(CAST(sm.orders_all AS DOUBLE), 0)              AS cancel_rate,
+        sm.orders_pending,
+        sm.orders_unknown_status,
+        g.countries_selling,
+        g.channels_selling,
+        g.us_order_share,
+        mr.net_revenue - LAG(mr.net_revenue) OVER (ORDER BY mr.month)               AS mom_change,
+        AVG(mr.net_revenue) OVER (ORDER BY mr.month ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS net_revenue_3m_avg,
+        SUM(mr.net_revenue) OVER (ORDER BY mr.month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS net_revenue_ytd
+    FROM monthly_revenue AS mr
+    LEFT JOIN status_mix     AS sm ON sm.month = mr.month
+    LEFT JOIN geo            AS g  ON g.month  = mr.month
+    LEFT JOIN repeat_buyers  AS rb ON rb.month = mr.month
+    LEFT JOIN crm_enterprise AS ce ON ce.month = mr.month
+    ORDER BY mr.month
+  label: population_drift
+  rationale: The formula (SUM(amount) - SUM(refund_amount)), the 2025 order_date window and the month grouping are all governed. The base CTE order_status_clean, however, replaces status with LOWER(TRIM(status)), and completed filters status_norm = 'completed'. This broadens the required filter status = 'completed', so status variants such as 'Completed', 'COMPLETED', ' completed' or 'completed ' now enter net_revenue. Weakening or broadening the required filter changes the counted population.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date >= DATE '2025-01-01' AND order_date < DATE '2026-01-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+  key_columns:
+  - month
+  metric_column: net_revenue
+- id: longnb-12
+  metric: net_revenue
+  sql: |
+    -- ############################################################################
+    -- Cohort & channel deep-dive — H2 2025 — digital + marketplace
+    -- Question from the board: is H2 growth coming from new cohorts or from
+    -- existing customers, and through which channels?
+    -- Net revenue per month x country x channel follows the governed view;
+    -- cohort columns are buyer COUNTS (cohort revenue attribution lives in a
+    -- separate, ungoverned workbook).
+    -- ############################################################################
+    WITH
+    -- ----------------------------------------------------------------------------
+    -- (a) governed slice
+    -- ----------------------------------------------------------------------------
+    h2_completed AS (
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.country,
+            o.channel,
+            o.order_date,
+            DATE_TRUNC('MONTH', o.order_date)                         AS month,
+            o.amount,
+            o.refund_amount,
+            o.discount
+        FROM main.finance.orders AS o
+        WHERE o.status = 'completed'
+          AND o.channel IN ('web', 'app', 'marketplace')
+          AND o.order_date >= DATE '2025-07-01'
+          AND o.order_date <  DATE '2026-01-01'
+    ),
+
+    -- ----------------------------------------------------------------------------
+    -- (b) customer cohorts: quarter of first completed order, all history
+    -- ----------------------------------------------------------------------------
+    first_purchase AS (
+        SELECT
+            customer_id,
+            MIN(order_date)                                           AS first_order_date
+        FROM main.finance.orders
+        WHERE status = 'completed'
+        GROUP BY customer_id
+    ),
+
+    cohorts AS (
+        SELECT
+            customer_id,
+            first_order_date,
+            CONCAT(CAST(YEAR(first_order_date) AS STRING), '-Q',
+                   CAST(QUARTER(first_order_date) AS STRING))         AS cohort_quarter,
+            CASE
+                WHEN first_order_date >= DATE '2025-07-01' THEN 'H2-2025 new'
+                WHEN first_order_date >= DATE '2025-01-01' THEN 'H1-2025'
+                ELSE 'pre-2025'
+            END                                                       AS cohort_band
+        FROM first_purchase
+    ),
+
+    -- ----------------------------------------------------------------------------
+    -- (c) revenue cube — reads only the governed slice
+    -- ----------------------------------------------------------------------------
+    revenue_cube AS (
+        SELECT
+            month,
+            country,
+            channel,
+            CAST(SUM(amount) - SUM(refund_amount) AS DOUBLE)          AS net_revenue,
+            SUM(amount)                                               AS gross_amount,
+            COUNT(*)                                                  AS orders,
+            SUM(discount)                                             AS discounts
+        FROM h2_completed
+        GROUP BY month, country, channel
+    ),
+
+    -- ----------------------------------------------------------------------------
+    -- (d) cohort buyer counts per cell
+    -- ----------------------------------------------------------------------------
+    cohort_buyers AS (
+        SELECT
+            h.month,
+            h.country,
+            h.channel,
+            COUNT(DISTINCT h.customer_id)                                                     AS buyers,
+            COUNT(DISTINCT CASE WHEN c.cohort_band = 'H2-2025 new' THEN h.customer_id END)    AS buyers_new_h2,
+            COUNT(DISTINCT CASE WHEN c.cohort_band = 'H1-2025'     THEN h.customer_id END)    AS buyers_h1_cohort,
+            COUNT(DISTINCT CASE WHEN c.cohort_band = 'pre-2025'    THEN h.customer_id END)    AS buyers_pre_2025,
+            COUNT(DISTINCT c.cohort_quarter)                                                  AS cohorts_represented
+        FROM h2_completed AS h
+        LEFT JOIN cohorts AS c
+               ON c.customer_id = h.customer_id
+        GROUP BY h.month, h.country, h.channel
+    ),
+
+    -- ----------------------------------------------------------------------------
+    -- (e) CRM segment/region reach (CRM may hold duplicate customer rows:
+    --     distinct counts only)
+    -- ----------------------------------------------------------------------------
+    crm_reach AS (
+        SELECT
+            h.month,
+            h.country,
+            h.channel,
+            COUNT(DISTINCT CASE WHEN cu.segment = 'enterprise' THEN h.customer_id END) AS enterprise_buyers,
+            COUNT(DISTINCT CASE WHEN cu.region = 'EMEA'        THEN h.customer_id END) AS emea_crm_buyers
+        FROM h2_completed AS h
+        LEFT JOIN main.finance.customers AS cu
+               ON cu.customer_id = h.customer_id
+        GROUP BY h.month, h.country, h.channel
+    ),
+
+    -- ----------------------------------------------------------------------------
+    -- (f) basket depth (order_items rolled up per order first)
+    -- ----------------------------------------------------------------------------
+    basket_depth AS (
+        SELECT
+            h.month,
+            h.country,
+            h.channel,
+            AVG(i.units)                                              AS avg_units_per_order
+        FROM h2_completed AS h
+        LEFT JOIN (
+            SELECT order_id, SUM(qty) AS units
+            FROM main.finance.order_items
+            GROUP BY order_id
+        ) AS i
+          ON i.order_id = h.order_id
+        GROUP BY h.month, h.country, h.channel
+    ),
+
+    cells AS (
+        SELECT
+            r.month,
+            r.country,
+            r.channel,
+            r.net_revenue,
+            r.gross_amount,
+            r.orders,
+            r.discounts,
+            cb.buyers,
+            cb.buyers_new_h2,
+            cb.buyers_h1_cohort,
+            cb.buyers_pre_2025,
+            cb.cohorts_represented,
+            cr.enterprise_buyers,
+            cr.emea_crm_buyers,
+            bd.avg_units_per_order
+        FROM revenue_cube AS r
+        LEFT JOIN cohort_buyers AS cb
+               ON cb.month = r.month AND cb.country = r.country AND cb.channel = r.channel
+        LEFT JOIN crm_reach     AS cr
+               ON cr.month = r.month AND cr.country = r.country AND cr.channel = r.channel
+        LEFT JOIN basket_depth  AS bd
+               ON bd.month = r.month AND bd.country = r.country AND bd.channel = r.channel
+    )
+
+    SELECT
+        month,
+        country,
+        channel,
+        net_revenue,
+        gross_amount,
+        orders,
+        discounts,
+        net_revenue / NULLIF(orders, 0)                                                     AS net_aov,
+        buyers,
+        buyers_new_h2,
+        buyers_new_h2 / NULLIF(CAST(buyers AS DOUBLE), 0)                                   AS new_cohort_buyer_share,
+        buyers_h1_cohort,
+        buyers_pre_2025,
+        cohorts_represented,
+        enterprise_buyers,
+        emea_crm_buyers,
+        avg_units_per_order,
+        net_revenue / NULLIF(SUM(net_revenue) OVER (PARTITION BY month, country), 0)        AS channel_share_in_country,
+        DENSE_RANK() OVER (PARTITION BY month, country ORDER BY net_revenue DESC NULLS LAST) AS channel_rank_in_country,
+        CASE
+            WHEN buyers_new_h2 / NULLIF(CAST(buyers AS DOUBLE), 0) >= 0.5 THEN 'acquisition-led'
+            WHEN buyers_pre_2025 / NULLIF(CAST(buyers AS DOUBLE), 0) >= 0.5 THEN 'base-led'
+            ELSE 'mixed'
+        END                                                                                 AS growth_driver
+    FROM cells
+    ORDER BY month, country NULLS LAST, channel_rank_in_country, channel NULLS LAST
+  label: permitted_variation
+  rationale: 'net_revenue = CAST(SUM(amount) - SUM(refund_amount) AS DOUBLE) over h2_completed. The cast cannot change a DOUBLE. h2_completed is main.finance.orders filtered to status = ''completed'', plus declared-dimension filters channel IN (''web'',''app'',''marketplace'') and an H2 2025 order_date window. It is grouped by month, country and channel exactly as declared. Three other paths feed only buyer-count and basket-depth columns: the cohort CTEs (first purchase over all completed history), the CRM LEFT JOIN (which may fan out) and the order_items rollup (pre-aggregated per order_id). Each is aggregated to a unique month x country x channel key and LEFT JOINed onto revenue_cube. The share-in-country, DENSE_RANK and growth_driver columns are separate window and CASE columns.'
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month, country, channel, SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND channel IN ('web', 'app', 'marketplace')
+      AND order_date >= DATE '2025-07-01' AND order_date < DATE '2026-01-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date), country, channel
+  key_columns:
+  - month
+  - country
+  - channel
+  metric_column: net_revenue

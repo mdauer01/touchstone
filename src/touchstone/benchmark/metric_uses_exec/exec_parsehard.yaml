@@ -1,0 +1,586 @@
+family: exec_parsehard
+split: test
+items:
+- id: parsehard-01
+  metric: net_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue,
+           DENSE_RANK() OVER (ORDER BY SUM(amount) - SUM(refund_amount) DESC NULLS LAST) AS revenue_rank
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+    QUALIFY revenue_rank <= 5
+  label: permitted_variation
+  rationale: Groups by the declared dimension country, keeps the required filter and the declared formula; the DENSE_RANK window over the aggregate expression and the QUALIFY on its alias only rank and limit the groups, leaving each group's value unchanged.
+  counterpart_sql: |
+    WITH by_country AS (
+      SELECT country, SUM(amount) - SUM(refund_amount) AS net_revenue
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY country
+    )
+    SELECT country, net_revenue,
+           DENSE_RANK() OVER (ORDER BY net_revenue DESC NULLS LAST) AS revenue_rank
+    FROM by_country
+    QUALIFY revenue_rank <= 5
+- id: parsehard-02
+  metric: gross_revenue
+  sql: |
+    SELECT country, channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2026-07-01'
+    GROUP BY ROLLUP (country, channel)
+  label: grain_drift
+  rationale: ROLLUP returns the (country, channel) rows plus per-country subtotal rows and a grand-total row, so the result mixes three grains; only the (country, channel) grouping is a declared grouping.
+  counterpart_sql: |
+    SELECT country, channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2026-07-01'
+    GROUP BY country, channel
+- id: parsehard-03
+  metric: net_revenue
+  sql: |
+    WITH monthly AS (
+      SELECT DATE_TRUNC('MONTH', order_date) AS month,
+             SUM(amount) AS gross,
+             SUM(refund_amount) AS refunds,
+             gross - refunds AS net_revenue
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY 1
+    )
+    SELECT month, net_revenue
+    FROM monthly
+  label: permitted_variation
+  rationale: The lateral column aliases gross and refunds expand to SUM(amount) and SUM(refund_amount), so net_revenue is exactly the declared formula; grouping is by the declared month dimension and the outer step only projects.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+- id: parsehard-04
+  metric: gross_revenue
+  sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE LOWER(TRIM(status)) = 'completed'
+    GROUP BY ALL
+  label: population_drift
+  rationale: LOWER(TRIM(status)) = 'completed' also admits 'Completed', ' completed ' and similar values the required filter excludes; broadening the required filter changes the population even though grouping and formula match.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+- id: parsehard-05
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) FILTER (WHERE status = 'completed') AS gross_revenue
+    FROM main.finance.orders
+    WHERE order_date >= DATE '2026-01-01' AND order_date < DATE '2026-04-01'
+  label: permitted_variation
+  rationale: With no GROUP BY the query always returns one row, so moving the required filter from WHERE into the aggregate's FILTER clause yields the same value (NULL when no completed rows); the order_date window is a declared-dimension filter.
+  counterpart_sql: |
+    SELECT SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2026-04-01'
+- id: parsehard-06
+  metric: gross_revenue
+  sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(SUM(amount)) OVER (
+             ORDER BY DATE_TRUNC('MONTH', order_date)
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY 1
+  label: formula_drift
+  rationale: The window SUM over the monthly SUM accumulates months, so each row is a year-to-date running total rather than the month's gross revenue; a cumulative version is a different formula.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+- id: parsehard-07
+  metric: net_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY ROLLUP (channel)
+    HAVING GROUPING(channel) = 0
+  label: permitted_variation
+  rationale: HAVING GROUPING(channel) = 0 removes the grand-total row ROLLUP adds (and keeps a genuine NULL-channel group, whose GROUPING is 0), so only the per-channel rows remain; that is the declared channel grouping with the declared formula.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: parsehard-08
+  metric: net_revenue
+  sql: |
+    SELECT c.country,
+           (SELECT SUM(o.amount) - SUM(o.refund_amount)
+              FROM main.finance.orders o
+             WHERE o.status = 'completed'
+               AND o.country = c.country) AS net_revenue
+    FROM (SELECT DISTINCT country FROM main.finance.orders WHERE status = 'completed') c
+  label: insufficient_evidence
+  rationale: For every non-NULL country the correlated subquery equals the GROUP BY value, but a NULL country row survives DISTINCT and then matches nothing under o.country = c.country, returning NULL instead of that group's revenue; whether this differs depends on country being nullable, which the definitions do not state.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-09
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY GROUPING SETS ((country, DATE_TRUNC('MONTH', order_date)))
+  label: permitted_variation
+  rationale: 'A GROUPING SETS clause with exactly one set is the ordinary GROUP BY of that set: country and month, both declared; no subtotal rows are produced and the formula and required filter are intact.'
+  counterpart_sql: |
+    SELECT country,
+           DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY country, DATE_TRUNC('MONTH', order_date)
+- id: parsehard-10
+  metric: net_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date >= DATE '2026-01-01'
+       OR channel = 'web'
+    GROUP BY country
+  label: population_drift
+  rationale: 'AND binds tighter than OR, so the predicate is (completed AND 2026+) OR web: every web order of any status passes, so the required filter no longer holds for the whole population.'
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND (order_date >= DATE '2026-01-01' OR channel = 'web')
+    GROUP BY country
+- id: parsehard-11
+  metric: net_revenue
+  sql: |
+    SELECT
+      (SELECT SUM(amount) FROM main.finance.orders WHERE status = 'completed' AND country = 'DE')
+      - (SELECT SUM(refund_amount) FROM main.finance.orders WHERE country = 'DE' AND status = 'completed')
+      AS net_revenue
+  label: permitted_variation
+  rationale: Each scalar subquery aggregates the same population (completed, country = 'DE', a declared-dimension filter), so their difference is SUM(amount) - SUM(refund_amount) over that population, including the NULL cases.
+  counterpart_sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND country = 'DE'
+- id: parsehard-12
+  metric: net_revenue
+  sql: |
+    WITH lines AS (
+      SELECT country, amount - refund_amount AS net_amount
+      FROM main.finance.orders
+      WHERE status = 'completed'
+    )
+    SELECT country, SUM(net_amount) AS net_revenue
+    FROM lines
+    GROUP BY country
+  label: formula_drift
+  rationale: 'SUM(amount - refund_amount) is not SUM(amount) - SUM(refund_amount): refund_amount is declared nullable, and a row with a NULL refund contributes nothing (its amount is lost) instead of its full amount.'
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-13
+  metric: net_revenue
+  sql: |
+    WITH q1 AS (
+      SELECT amount, refund_amount FROM main.finance.orders
+       WHERE status = 'completed' AND order_date >= DATE '2026-01-01' AND order_date < DATE '2026-02-01'
+      UNION ALL
+      SELECT amount, refund_amount FROM main.finance.orders
+       WHERE status = 'completed' AND order_date >= DATE '2026-02-01' AND order_date < DATE '2026-03-01'
+      UNION ALL
+      SELECT amount, refund_amount FROM main.finance.orders
+       WHERE status = 'completed' AND order_date >= DATE '2026-03-01' AND order_date < DATE '2026-04-01'
+    )
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM q1
+  label: permitted_variation
+  rationale: The three half-open month windows are disjoint and together cover exactly [2026-01-01, 2026-04-01), so the row-level UNION ALL is the completed orders in that window; the declared formula is then applied once to those rows.
+  counterpart_sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2026-04-01'
+- id: parsehard-14
+  metric: gross_revenue
+  sql: |
+    SELECT o.channel,
+           SUM(o.amount) AS gross_revenue
+    FROM main.finance.orders o
+    JOIN main.finance.order_items i
+      ON i.order_id = o.order_id
+    WHERE o.status = 'completed'
+    GROUP BY o.channel
+  label: source_drift
+  rationale: Joining orders to its line items repeats each order's amount once per item and drops orders with no items, so the rows summed are no longer the orders rows; the join changes the source.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: parsehard-15
+  metric: gross_revenue
+  sql: |
+    WITH per_customer AS (
+      SELECT country, customer_id, SUM(amount) AS customer_gross
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY country, customer_id
+    )
+    SELECT country, SUM(customer_gross) AS gross_revenue
+    FROM per_customer
+    GROUP BY country
+  label: permitted_variation
+  rationale: 'SUM is decomposable: summing per-(country, customer) subtotals within a country gives the country''s SUM(amount), with all-NULL subtotals skipped exactly as NULL amounts are; the intermediate customer grouping is aggregated away, so the final grain is the declared country.'
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-16
+  metric: gross_revenue
+  sql: |
+    WITH r AS (
+      SELECT country,
+             SUM(amount) AS gross_revenue,
+             SUM(refund_amount) AS refunds
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY country
+    )
+    SELECT country, gross_revenue - refunds AS gross_revenue
+    FROM r
+  label: identity_mismatch
+  rationale: The outer alias gross_revenue shadows the CTE column of the same name but its expression is SUM(amount) - SUM(refund_amount), the net_revenue definition; presenting net revenue under the gross_revenue name is an identity mismatch.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-17
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    GROUP BY country, status
+    HAVING status = 'completed'
+  label: permitted_variation
+  rationale: Grouping by status and then keeping only the status = 'completed' groups is the required filter applied after grouping; because status is pinned to a single value, there is exactly one row per country, so the grain is the declared country.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-18
+  metric: net_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) FILTER (WHERE status = 'completed')
+             - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE order_date >= DATE '2026-04-01' AND order_date < DATE '2026-07-01'
+    GROUP BY channel
+  label: population_drift
+  rationale: The FILTER clause restricts only SUM(amount); SUM(refund_amount) runs over refunds of every status in Q2, so the required filter is dropped from part of the measure.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-04-01' AND order_date < DATE '2026-07-01'
+    GROUP BY channel
+- id: parsehard-19
+  metric: gross_revenue
+  sql: |
+    WITH completed AS (
+      SELECT channel, order_date, amount
+      FROM main.finance.orders
+      WHERE status = 'completed'
+    ),
+    h1 AS (
+      SELECT channel, amount
+      FROM completed
+      WHERE order_date >= DATE '2026-01-01' AND order_date < DATE '2026-07-01'
+    ),
+    by_channel AS (
+      SELECT channel, SUM(amount) AS gross_revenue
+      FROM h1
+      GROUP BY channel
+    )
+    SELECT channel, gross_revenue
+    FROM by_channel
+    ORDER BY 2 DESC NULLS LAST, 1 NULLS LAST
+    LIMIT 3
+  label: permitted_variation
+  rationale: The CTE chain is select-project-filter steps over orders (required filter, then an H1 order_date window) followed by the declared channel grouping; ORDER BY ordinals with channel as tiebreak give a total order, so LIMIT 3 only keeps the top groups unchanged.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2026-07-01'
+    GROUP BY channel
+    ORDER BY gross_revenue DESC NULLS LAST, channel NULLS LAST
+    LIMIT 3
+- id: parsehard-20
+  metric: net_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) OVER (PARTITION BY channel)
+             - SUM(refund_amount) OVER (PARTITION BY channel) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+  label: grain_drift
+  rationale: Partitioned window SUMs produce the right per-channel number, but it is returned once per completed order row instead of once per channel; returning the value per row changes the grain.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: parsehard-21
+  metric: net_revenue
+  sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE NOT (status <> 'completed')
+      AND DATE_TRUNC('MONTH', order_date) = DATE '2026-03-01'
+    GROUP BY channel
+  label: permitted_variation
+  rationale: NOT (status <> 'completed') is true exactly when status = 'completed' (NULL status yields NULL in both forms and is excluded), so the required filter holds; the month equality is a declared-dimension time filter.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND DATE_TRUNC('MONTH', order_date) = DATE '2026-03-01'
+    GROUP BY channel
+- id: parsehard-22
+  metric: net_revenue
+  sql: |
+    WITH h1 AS (
+      SELECT amount, refund_amount FROM main.finance.orders
+       WHERE status = 'completed'
+         AND order_date BETWEEN DATE '2026-01-01' AND DATE '2026-04-01'
+      UNION ALL
+      SELECT amount, refund_amount FROM main.finance.orders
+       WHERE status = 'completed'
+         AND order_date BETWEEN DATE '2026-04-01' AND DATE '2026-06-30'
+    )
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM h1
+  label: source_drift
+  rationale: BETWEEN is inclusive on both ends, so completed orders dated 2026-04-01 appear in both branches and are counted twice; the UNION ALL is not a select-project-filter step of orders but a relation that duplicates rows, like a fan-out.
+  counterpart_sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date BETWEEN DATE '2026-01-01' AND DATE '2026-06-30'
+- id: parsehard-23
+  metric: net_revenue
+  sql: |
+    SELECT SUM(CASE WHEN channel = 'web' THEN amount END)
+         - SUM(CASE WHEN channel = 'web' THEN refund_amount END) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2027-01-01'
+  label: permitted_variation
+  rationale: Both CASE expressions apply the same channel = 'web' condition with no ELSE, so non-web rows contribute NULL and are ignored; with no GROUP BY this is the declared formula over completed web orders in 2026, i.e. a declared-dimension filter.
+  counterpart_sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND channel = 'web'
+      AND order_date >= DATE '2026-01-01' AND order_date < DATE '2027-01-01'
+- id: parsehard-24
+  metric: gross_revenue
+  sql: |
+    SELECT CASE
+             WHEN country IN ('US', 'CA', 'MX') THEN 'AMER'
+             WHEN country IN ('DE', 'FR', 'GB') THEN 'EMEA'
+             ELSE 'APAC'
+           END AS sales_region,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY ALL
+  label: grain_drift
+  rationale: GROUP BY ALL groups by a CASE bucket derived from country, merging several countries (and NULL) into one region row; a derived bucket is not the declared dimension as declared, so the grain changes.
+  counterpart_sql: |
+    SELECT country AS sales_region,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-25
+  metric: gross_revenue
+  sql: |
+    SELECT o.channel,
+           SUM(o.amount) AS gross_revenue
+    FROM main.finance.orders o
+    LEFT JOIN main.finance.customers c
+      ON c.customer_id = o.customer_id
+    WHERE o.status = 'completed'
+      AND o.order_date >= DATE '2026-01-01'
+    GROUP BY o.channel
+  label: insufficient_evidence
+  rationale: No customers column is used and a LEFT JOIN never drops orders, so the only possible effect is fan-out; whether any happens depends on customers.customer_id being unique, which is not stated.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND order_date >= DATE '2026-01-01'
+    GROUP BY channel
+- id: parsehard-26
+  metric: net_revenue
+  sql: |
+    WITH by_country AS (
+      SELECT country, SUM(amount) - SUM(refund_amount) AS net_revenue
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY country
+    )
+    SELECT country,
+           net_revenue / SUM(net_revenue) OVER () AS net_revenue_share
+    FROM by_country
+  label: formula_drift
+  rationale: The CTE computes the declared net_revenue per country, but the outer step divides it by the all-country total, presenting a share of total; a ratio version is a different formula.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) - SUM(refund_amount) AS net_revenue_share
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-27
+  metric: gross_revenue
+  sql: |
+    SELECT o.channel,
+           SUM(o.amount) AS gross_revenue
+    FROM main.finance.orders o
+    WHERE o.status = 'completed'
+      AND EXISTS (
+        SELECT 1
+        FROM main.finance.orders p
+        WHERE p.customer_id = o.customer_id
+          AND p.order_date < o.order_date
+      )
+    GROUP BY o.channel
+  label: population_drift
+  rationale: The correlated EXISTS keeps only orders whose customer has an earlier order, a filter on customer_id and purchase history, which are not declared dimensions; the semi-join adds no rows but restricts the population.
+  counterpart_sql: |
+    SELECT channel,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+- id: parsehard-28
+  metric: net_revenue
+  sql: |
+    WITH m AS (
+      SELECT DATE_TRUNC('MONTH', order_date) AS month,
+             SUM(amount) AS net_revenue,
+             SUM(amount) - SUM(refund_amount) AS adjusted_revenue
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY 1
+    )
+    SELECT month, net_revenue
+    FROM m
+  label: identity_mismatch
+  rationale: The column projected as net_revenue is SUM(amount), the gross_revenue definition; the correct net expression exists in the CTE as adjusted_revenue but is not returned, so gross revenue is presented under the net_revenue name.
+  counterpart_sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+- id: parsehard-29
+  metric: gross_revenue
+  sql: |
+    SELECT country,
+           SUM(COALESCE(amount, 0)) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+  label: insufficient_evidence
+  rationale: COALESCE(amount, 0) only matters for a country whose completed amounts are all NULL (0 instead of NULL); amount's nullability is not stated, so whether the result differs cannot be decided from the definitions.
+  counterpart_sql: |
+    SELECT country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+- id: parsehard-30
+  metric: gross_revenue
+  sql: |
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           country,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY 1, 2
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY DATE_TRUNC('MONTH', order_date)
+      ORDER BY SUM(amount) DESC NULLS LAST, country NULLS LAST
+    ) = 1
+  label: permitted_variation
+  rationale: Groups by the declared month and country; the QUALIFY with a totally ordered ROW_NUMBER within each month keeps the top country per month without altering any group's value, which is ranking and limiting groups.
+  counterpart_sql: |
+    WITH g AS (
+      SELECT DATE_TRUNC('MONTH', order_date) AS month,
+             country,
+             SUM(amount) AS gross_revenue
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY DATE_TRUNC('MONTH', order_date), country
+    )
+    SELECT month, country, gross_revenue
+    FROM g
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY month
+      ORDER BY gross_revenue DESC NULLS LAST, country NULLS LAST
+    ) = 1
