@@ -102,44 +102,57 @@ one execution context.
 ## The Databricks backend
 
 `--provider databricks` runs `ai_query` on a SQL warehouse through the SQL Statement
-Execution API. It is implemented and tested against mocked API responses, and has **not
-yet run against a real workspace**.
+Execution API. It is tested against mocked API responses and has run against one real
+workspace (Databricks Free Edition, serverless starter warehouse, 2026-11-04).
 
 ```bash
-export DATABRICKS_HOST=https://<workspace>.cloud.databricks.com
-export DATABRICKS_TOKEN=...          # a PAT or OAuth access token; read from the environment only
-touchstone assess benchmark --provider databricks --model system.ai.<chat model> \
-  --endpoint <sql-warehouse-id> --split test --with-observations --json report.json
+databricks auth login --host https://<workspace>.cloud.databricks.com --profile touchstone
+export DATABRICKS_CONFIG_PROFILE=touchstone     # a profile name, not a secret
+touchstone assess benchmark --provider databricks --model databricks-gpt-oss-120b \
+  --endpoint <sql-warehouse-id> --batch-size 20 --split test --json report.json
 ```
 
+- **Credentials.** `DATABRICKS_TOKEN` (a PAT or OAuth access token) when it is set;
+  otherwise a `databricks auth login` profile (`--profile` or
+  `DATABRICKS_CONFIG_PROFILE`): the host comes from the profile, and a short-lived OAuth
+  token from `databricks auth token`, refreshed five minutes before it expires. No
+  long-lived token has to exist.
 - **What it sends.** Per record, one statement:
   `ai_query('<endpoint>', :request, responseFormat => '<json schema>', failOnError =>
-  false, modelParameters => named_struct('temperature', 0.0, 'max_tokens', N))`.
-  - The prompt is the named parameter `:request`, never SQL text.
+  false, modelParameters => named_struct('max_tokens', N))`. With `--batch-size N`, one
+  statement per batch: the prompts travel as ONE named parameter, a JSON array of
+  `{id, request}`, which the statement explodes into rows for `ai_query`.
+  - The prompt is a named parameter, never SQL text.
   - The response format is a JSON schema with one enum per criteria component, plus a
     self-reported confidence.
   - The label is computed from the answers by fixed code.
+  - `max_tokens` defaults to 8192, because reasoning tokens count against it; 1024
+    truncated measured judgments. `temperature` is sent only with `--temperature`:
+    reasoning endpoints reject it, and 0 never made a hosted endpoint reproducible.
+  - In a batch, a statement that fails fails its whole batch; a row the endpoint failed
+    fails that record only. Latency is the batch's time divided over its records.
 - **Checked against the official docs (2026-10-26).** These are asserted exactly in
   tests:
   - the request body and the parameter shape;
   - the wait-timeout range;
   - all four terminal states (SUCCEEDED, FAILED, CANCELED, CLOSED) and polling;
   - the all-strings `data_array` encoding;
-  - the `failOnError` struct fields `response` and `errorMessage`;
   - that `json_schema` returns a JSON string.
-- **Inferred; the first live run must confirm it.**
-  - A parameter marker is accepted as `ai_query`'s request argument on a SQL warehouse.
-    The docs allow markers in expressions, but no page shows one in `ai_query`.
-  - The chosen chat model accepts this response format. Some Claude endpoints reject
-    `response_format` over REST, and the docs don't say whether `ai_query` behaves the
-    same.
-  - The warehouse is Pro or Serverless. AI Functions are documented as unavailable on
-    Classic.
+- **Confirmed on the first live run (2026-11-04, `databricks-gpt-oss-120b`).**
+  - The `failOnError` struct fields are `result` and `errorMessage`. The docs had been
+    read as `response`; the live run refuted that, and the statement now selects
+    `result`.
+  - A parameter marker is accepted as `ai_query`'s request, directly (`:request`) and
+    inside an expression (`from_json(:batch, …)`).
+  - gpt-oss-120b accepts the JSON-schema response format.
+  - The serverless starter warehouse runs AI Functions. Classic warehouses are
+    documented as unable to.
+  - Free Edition serves only open models (gpt-oss, Qwen, Llama, Gemma), not Claude.
 - **Not reported.** Cost: `ai_query` returns no token usage. The JSON report has
   `cost_usd: null` and `cost_reported: false`, and the CLI prints `cost: not reported`,
   never 0. Usage is in `system.ai_gateway.usage`, which needs account and metastore
   admin.
-- **Variation between runs.** Answers can vary between calls even at temperature 0, and
+- **Variation between runs.** Answers can vary between calls, at any temperature, and
   the hosted model can change. Record the model name with every run, and repeat runs
   before trusting a difference.
 - **Errors.** An endpoint error, an answer that violates the requested schema, or a

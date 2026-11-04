@@ -369,12 +369,26 @@ def main(argv: list[str] | None = None) -> int:
     p_ab.add_argument("--provider", default="fake",
                       choices=["fake", "api", "databricks", "snowflake"],
                       help="assessment backend: fake (measures nothing) or databricks "
-                           "(ai_query; the token is read from DATABRICKS_TOKEN)")
+                           "(ai_query; the token is read from DATABRICKS_TOKEN, or from a "
+                           "`databricks auth login` profile)")
     p_ab.add_argument("--model", help="databricks: the serving endpoint ai_query calls, "
                                       "e.g. system.ai.<model>")
     p_ab.add_argument("--endpoint", help="databricks: the SQL warehouse id (or "
                                          "DATABRICKS_WAREHOUSE_ID) — never a secret")
-    p_ab.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST)")
+    p_ab.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST, or "
+                                     "the profile's host)")
+    p_ab.add_argument("--profile", help="databricks: a `databricks auth login` profile to take "
+                                        "the host and a short-lived OAuth token from when "
+                                        "DATABRICKS_TOKEN is unset (or "
+                                        "DATABRICKS_CONFIG_PROFILE)")
+    p_ab.add_argument("--batch-size", dest="batch_size", type=int, default=1,
+                      help="databricks: records per ai_query statement (default 1)")
+    p_ab.add_argument("--max-tokens", dest="max_tokens", type=int,
+                      help="databricks: max_tokens per answer, reasoning included "
+                           "(default 8192)")
+    p_ab.add_argument("--temperature", type=float,
+                      help="databricks: sampling temperature (default: not sent — reasoning "
+                           "endpoints reject it)")
     p_ab.add_argument("--seed", default="", help="seed for the fake provider")
     p_ab.add_argument("--split", default="test", choices=["dev", "test", "all"],
                       help="split by query family; tune on dev, report test")
@@ -1136,11 +1150,12 @@ def _cmd_assess(args: argparse.Namespace) -> int:
         return _assess_compare_labels(args)
 
     try:
+        options = {"seed": args.seed, "batch_size": args.batch_size}
+        for name in ("host", "profile", "max_tokens", "temperature"):
+            if getattr(args, name) is not None:
+                options[name] = getattr(args, name)
         provider = get_provider(ProviderConfig(args.provider, model=args.model,
-                                               endpoint=args.endpoint,
-                                               options={"seed": args.seed,
-                                                        **({"host": args.host}
-                                                           if args.host else {})}))
+                                               endpoint=args.endpoint, options=options))
     except (NotImplementedError, ValueError) as e:
         print(f"touchstone assess: {e}", file=sys.stderr)
         return 2

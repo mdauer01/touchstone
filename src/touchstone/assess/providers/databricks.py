@@ -3,22 +3,32 @@ SQL warehouse through the SQL Statement Execution API.
 
 What it sends, per record:
 
-    SELECT r.response, r.errorMessage FROM (
+    SELECT r.result, r.errorMessage FROM (
       SELECT ai_query('<serving endpoint>', :request,
                       responseFormat => '<json schema>',
                       failOnError => false,
-                      modelParameters => named_struct('temperature', 0.0, 'max_tokens', N)) AS r)
+                      modelParameters => named_struct('max_tokens', N)) AS r)
 
 * the prompt is `render_prompt` (the statement as it ran, its execution and
   session, the definition with its validity window, the governing variation
   policy, schemas; touchstone's observations last) and travels as the named
   parameter `:request` — never spliced into SQL text;
+* with `batch_size` > 1, one statement assesses a batch: the prompts travel
+  as ONE named parameter `:batch` (a JSON array of {id, request}), exploded
+  into rows, and ai_query runs over the rows — one statement per batch instead
+  of one per record;
+* `temperature` is sent only when configured: reasoning models (gpt-oss,
+  Claude with thinking) reject or ignore it, and 0.0 never made answers
+  reproducible on a hosted endpoint anyway. `max_tokens` defaults to 8192:
+  reasoning tokens count against it, and 1024 truncated measured judgments;
 * the endpoint, response format and model parameters are validated literals:
   Databricks documents the endpoint and failOnError as literals and
   modelParameters as constants, and parameter markers in literal positions
   are documented for Databricks Runtime 18.0+ only;
-* `failOnError => false` returns STRUCT<response, errorMessage>; the two fields
-  are selected as scalar columns, so no STRUCT has to be serialized by the API;
+* `failOnError => false` returns STRUCT<result, errorMessage> — `result`, not
+  `response`: the first live run (2026-11-04) refuted the earlier reading of
+  the docs. The two fields are selected as scalar columns, so no STRUCT has to
+  be serialized by the API;
 * a json_schema response format returns a JSON STRING, parsed here; the model
   answers the criteria's questions, and `criteria.aggregate` — not the model —
   computes the label.
@@ -29,9 +39,13 @@ that a parameter marker is accepted as ai_query's request argument on a SQL
 warehouse, and that the chosen chat model accepts this response format.
 
 Credentials: the access token is read from DATABRICKS_TOKEN (a personal
-access token or an OAuth access token the operator obtained). It is sent only
-in the Authorization header, and never stored on the provider's public
-attributes, logged, printed, or included in an error or an assessment.
+access token or an OAuth access token the operator obtained) or, when that is
+unset, from a Databricks CLI login profile (`databricks auth login --profile
+<name>`, named by --profile or DATABRICKS_CONFIG_PROFILE): a short-lived OAuth
+token from `databricks auth token`, refreshed before it expires, with the host
+read from the profile. Either way it is sent only in the Authorization header,
+and never stored on the provider's public attributes, logged, printed, or
+included in an error or an assessment.
 `ai_query` reports no token usage, so cost is reported as not reported —
 system.ai_gateway.usage holds it for account and metastore admins.
 """
@@ -41,7 +55,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
+from pathlib import Path
 from typing import Callable
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -52,12 +68,21 @@ from touchstone.assess.providers import Assessment, ProviderConfig, render_promp
 TOKEN_ENV = "DATABRICKS_TOKEN"
 HOST_ENV = "DATABRICKS_HOST"
 WAREHOUSE_ENV = "DATABRICKS_WAREHOUSE_ID"
+PROFILE_ENV = "DATABRICKS_CONFIG_PROFILE"
+CONFIG_FILE = Path.home() / ".databrickscfg"
 TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"})
 _ENDPOINT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,254}")
 _WAREHOUSE = re.compile(r"[A-Za-z0-9]{1,64}")
+_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}")
+_CHUNKS = "/api/2.0/sql/statements/"
+_BATCH_TYPE = "array<struct<id:string,request:string>>"
+# A profile token is refreshed this many seconds before it expires.
+_REFRESH_MARGIN_S = 300.0
 
 # transport(method, url, headers, body) -> (status, headers, body)
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, dict, bytes]]
+# token_source() -> (access token, expiry as epoch seconds or None)
+TokenSource = Callable[[], tuple[str, float | None]]
 
 
 class DatabricksError(Exception):
@@ -157,6 +182,58 @@ def _parse_host(raw: str) -> str:
     return f"https://{host}" + (f":{port}" if port else "")
 
 
+def _profile_host(profile: str, path: Path) -> str:
+    """The `host` of a ~/.databrickscfg profile — and nothing else from the
+    file: a PAT profile also holds its token there."""
+    import configparser
+
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(path, encoding="utf-8")
+    except (OSError, configparser.Error):
+        return ""
+    if not parser.has_section(profile):
+        return ""
+    return parser.get(profile, "host", fallback="").strip()
+
+
+def _cli_token_source(profile: str, wall: Callable[[], float]) -> TokenSource:
+    """A short-lived OAuth token from `databricks auth token` for a profile the
+    operator logged in with (`databricks auth login`). The CLI refreshes it
+    from its own cache. Its output holds the token, so no part of stdout ever
+    reaches an error; stderr is the CLI's own words."""
+    def fetch() -> tuple[str, float | None]:
+        try:
+            proc = subprocess.run(["databricks", "auth", "token", "--profile", profile,
+                                   "-o", "json"], capture_output=True, text=True, timeout=120)
+        except FileNotFoundError:
+            raise DatabricksAuthError("the databricks CLI is not installed — install it, then "
+                                      f"run `databricks auth login --profile {profile}`",
+                                      "credential unavailable") from None
+        except subprocess.TimeoutExpired:
+            raise DatabricksAuthError("`databricks auth token` did not answer within 120s",
+                                      "credential unavailable") from None
+        if proc.returncode != 0:
+            said = (proc.stderr or "").strip().splitlines()
+            raise DatabricksAuthError(
+                f"`databricks auth token --profile {profile}` failed"
+                + (f": {said[0][:200]}" if said else "")
+                + f" — run `databricks auth login --profile {profile}`",
+                "credential unavailable")
+        try:
+            data = json.loads(proc.stdout)
+            token = str(data["access_token"]).strip()
+        except (ValueError, KeyError, TypeError):
+            raise DatabricksAuthError("`databricks auth token` returned no access token",
+                                      "credential unavailable") from None
+        expires_in = data.get("expires_in")
+        expiry = (wall() + float(expires_in)
+                  if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool)
+                  else None)
+        return token, expiry
+    return fetch
+
+
 class DatabricksProvider:
     name = "databricks"
     measures_performance = True
@@ -164,7 +241,9 @@ class DatabricksProvider:
 
     def __init__(self, config: ProviderConfig, *, transport: Transport | None = None,
                  env: dict | None = None, clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 token_source: TokenSource | None = None,
+                 wall: Callable[[], float] = time.time, config_file: Path | None = None):
         env = os.environ if env is None else env
         options = dict(config.options or {})
         self.model = config.model
@@ -176,23 +255,47 @@ class DatabricksProvider:
         if not self.warehouse_id or not _WAREHOUSE.fullmatch(self.warehouse_id):
             raise ValueError(f"databricks provider: pass the SQL warehouse id as --endpoint "
                              f"(or set {WAREHOUSE_ENV}) — the id after /sql/1.0/warehouses/")
-        self.host = _parse_host(str(options.get("host") or env.get(HOST_ENV) or ""))
         token = (env.get(TOKEN_ENV) or "").strip()
-        if not token:
-            raise ValueError(f"databricks provider: set {TOKEN_ENV} in the environment — "
-                             f"touchstone never takes a credential as an argument")
-        if not _TOKEN.fullmatch(token):
-            # Never echoed: a token with a stray newline or a pasted curly quote
-            # would otherwise surface verbatim in an "invalid header" error.
-            raise ValueError(f"databricks provider: {TOKEN_ENV} contains whitespace or "
-                             f"non-ASCII characters — re-copy the token")
-        self.__token = token          # name-mangled; never part of repr or output
-        # Every 8-character window of the token, for the partial-echo scan.
-        self.__grams = frozenset(token[i:i + 8] for i in range(len(token) - 7))
-        self.timeout_s = float(options.get("timeout_s", 300))
-        self.max_tokens = int(options.get("max_tokens", 1024))
+        # A login profile is used only when no token is set: an explicit
+        # DATABRICKS_TOKEN always wins, as it does for the Databricks tools.
+        self.profile = None if token else (str(options.get("profile") or env.get(PROFILE_ENV)
+                                                or "").strip() or None)
+        if self.profile is not None and not _PROFILE.fullmatch(self.profile):
+            raise ValueError("databricks provider: --profile must name a ~/.databrickscfg "
+                             "profile — letters, digits, '.', '_' and '-' only")
+        profile_host = (_profile_host(self.profile, config_file or CONFIG_FILE)
+                        if self.profile else "")
+        self.host = _parse_host(str(options.get("host") or env.get(HOST_ENV) or profile_host
+                                    or ""))
+        self._wall = wall
+        self.__token = ""             # name-mangled; never part of repr or output
+        self.__grams: frozenset = frozenset()
+        self.__expiry: float | None = None
+        self.__source: TokenSource | None = None
+        if token:
+            self.__set_token(token, None)
+        elif self.profile:
+            self.__source = token_source or _cli_token_source(self.profile, wall)
+            try:
+                self.__set_token(*self.__source())
+            except DatabricksError as e:
+                raise ValueError(f"databricks provider: {e}") from None
+        else:
+            raise ValueError(f"databricks provider: set {TOKEN_ENV} in the environment, or log "
+                             f"in with `databricks auth login --profile <name>` and name the "
+                             f"profile with --profile or {PROFILE_ENV} — touchstone never "
+                             f"takes a credential as an argument")
+        self.timeout_s = float(options.get("timeout_s", 600))
+        self.max_tokens = int(options.get("max_tokens", 8192))
         if not 1 <= self.max_tokens <= 100_000:
             raise ValueError("databricks provider: max_tokens must be between 1 and 100000")
+        temperature = options.get("temperature")
+        self.temperature = None if temperature is None else float(temperature)
+        if self.temperature is not None and not 0.0 <= self.temperature <= 2.0:
+            raise ValueError("databricks provider: temperature must be between 0 and 2")
+        self.batch_size = int(options.get("batch_size", 1))
+        if not 1 <= self.batch_size <= 500:
+            raise ValueError("databricks provider: batch_size must be between 1 and 500")
         self.max_attempts = max(1, int(options.get("max_attempts", 4)))
         self._send = transport or _urllib_transport(timeout=60)
         self._clock = clock
@@ -210,13 +313,23 @@ class DatabricksProvider:
 
     # ------------------------------------------------------------- protocol
 
-    def statement(self, criteria: Criteria) -> str:
+    def _ai_query(self, request: str, criteria: Criteria) -> str:
         fmt = json.dumps(response_format(criteria), separators=(",", ":"))
-        return ("SELECT r.response AS response, r.errorMessage AS error_message FROM ("
-                f"SELECT ai_query({_sql_literal(self.model)}, :request, "
+        return (f"ai_query({_sql_literal(self.model)}, {request}, "
                 f"responseFormat => {_sql_literal(fmt)}, failOnError => false, "
-                f"modelParameters => named_struct('temperature', 0.0, 'max_tokens', "
-                f"{self.max_tokens})) AS r)")
+                f"modelParameters => {self._model_parameters()})")
+
+    def statement(self, criteria: Criteria) -> str:
+        return ("SELECT r.result AS response, r.errorMessage AS error_message FROM ("
+                f"SELECT {self._ai_query(':request', criteria)} AS r)")
+
+    def batch_statement(self, criteria: Criteria) -> str:
+        """One statement for a batch: `:batch` is a JSON array of {id, request};
+        ai_query runs over its exploded rows, and each row comes back with its id."""
+        return ("SELECT b.id AS id, b.r.result AS response, b.r.errorMessage AS error_message "
+                f"FROM (SELECT x.id AS id, {self._ai_query('x.request', criteria)} AS r "
+                f"FROM (SELECT explode(from_json(:batch, {_sql_literal(_BATCH_TYPE)})) AS x) AS e"
+                ") AS b")
 
     def assess(self, records: list[dict], criteria: Criteria) -> list[Assessment]:
         """One assessment per record. A failure on one record is an error on
@@ -224,6 +337,8 @@ class DatabricksProvider:
         credential stops the CALLS — every later one would fail alike — and
         the records not attempted are failed, so what was answered survives
         (an OAuth token expiring mid-run discarded the whole report)."""
+        if self.batch_size > 1:
+            return self._assess_batched(records, criteria)
         sql = self.statement(criteria)
         out = []
         for record in records:
@@ -270,14 +385,115 @@ class DatabricksProvider:
             error, kind = self._clean(f"{type(e).__name__}: {e}")[:300], type(e).__name__
         return answers, confidence, error, kind, round((self._clock() - started) * 1000, 1)
 
+    def _assess_batched(self, records: list[dict], criteria: Criteria) -> list[Assessment]:
+        """The same contract as one statement per record — a failure is an error
+        on the assessments it touches, a refused credential stops the calls and
+        keeps what was answered — with one statement per batch. A statement-level
+        failure fails its whole batch; a row the endpoint failed fails that record
+        only. Latency is the batch's wall time divided over its records."""
+        sql = self.batch_statement(criteria)
+        out: list[Assessment] = []
+
+        def assessment(record, answers, confidence, error, kind, latency):
+            return Assessment(
+                record_id=record["record_id"], provider=self.name, model=self.model,
+                criteria_version=criteria.version, answers=answers,
+                label=aggregate(answers, criteria) if error is None else "insufficient_evidence",
+                probabilities=None, confidence=confidence, latency_ms=latency,
+                cost_estimate_usd=None, error=error, error_kind=kind)
+
+        for start in range(0, len(records), self.batch_size):
+            batch = records[start:start + self.batch_size]
+            if self.stopped:
+                out += [assessment(r, {}, None, f"not attempted: {self.stopped}",
+                                   "not attempted", None) for r in batch]
+                continue
+            started = self._clock()
+            payload = json.dumps([{"id": str(i), "request": render_prompt(r, criteria)}
+                                  for i, r in enumerate(batch)])
+            try:
+                rows = self._execute(sql, [{"name": "batch", "value": payload,
+                                            "type": "STRING"}])
+            except KeyboardInterrupt as e:
+                kind = "interrupted"
+                error = ("interrupted while the statement was being submitted — it may be "
+                         "running on the warehouse, and its id is not known"
+                         if isinstance(e, _SubmitInterrupted) else "interrupted")
+                self._stop("the run was interrupted by the operator", "interrupted")
+                out += [assessment(r, {}, None, error, kind, None) for r in batch]
+                continue
+            except DatabricksError as e:
+                error = self._clean(str(e))
+                if isinstance(e, DatabricksAuthError):
+                    self.credential_refused = error
+                    self._stop(error, "credential refused")
+                elif e.kind == "unreachable":
+                    self._stop(error, "unreachable")
+                out += [assessment(r, {}, None, error, e.kind, None) for r in batch]
+                continue
+            except Exception as e:  # noqa: BLE001 — one batch never ends the run
+                error = self._clean(f"{type(e).__name__}: {e}")[:300]
+                out += [assessment(r, {}, None, error, type(e).__name__, None) for r in batch]
+                continue
+            latency = round((self._clock() - started) * 1000 / len(batch), 1)
+            by_id: dict[str, list] = {}
+            for row in rows:
+                if isinstance(row, list) and len(row) == 3 and isinstance(row[0], str):
+                    by_id.setdefault(row[0], []).append(row)
+            for i, record in enumerate(batch):
+                got = by_id.get(str(i), [])
+                answers, confidence, error, kind = {}, None, None, None
+                if len(got) != 1:
+                    error, kind = (f"expected exactly one result row for this record, got "
+                                   f"{len(got)}", "invalid response")
+                else:
+                    _, response, model_error = got[0]
+                    try:
+                        if model_error is not None:
+                            raise DatabricksError(f"the model endpoint returned an error: "
+                                                  f"{self._clean(str(model_error))[:300]}",
+                                                  "model error")
+                        if not isinstance(response, str):
+                            raise DatabricksError("the model returned no response",
+                                                  "invalid response")
+                        answers, confidence = self._parse(response, criteria)
+                    except DatabricksError as e:
+                        error, kind = self._clean(str(e)), e.kind
+                out.append(assessment(record, answers, confidence, error, kind, latency))
+        return out
+
     def _stop(self, why: str, kind: str) -> None:
         self.stopped, self.stop_kind = why, kind
 
     # ------------------------------------------------------------ internals
 
+    def __set_token(self, token: str, expiry: float | None) -> None:
+        if not _TOKEN.fullmatch(token):
+            # Never echoed: a token with a stray newline or a pasted curly quote
+            # would otherwise surface verbatim in an "invalid header" error.
+            raise ValueError(f"databricks provider: {TOKEN_ENV} contains whitespace or "
+                             f"non-ASCII characters — re-copy the token")
+        self.__token, self.__expiry = token, expiry
+        # Every 8-character window of every token this run has held, for the
+        # partial-echo scan: an echo of the token a refresh replaced is still
+        # a secret in an error message.
+        self.__grams = self.__grams | frozenset(token[i:i + 8]
+                                                for i in range(len(token) - 7))
+
     def _headers(self) -> dict:
+        if self.__source is not None and self.__expiry is not None \
+                and self._wall() >= self.__expiry - _REFRESH_MARGIN_S:
+            try:
+                self.__set_token(*self.__source())
+            except ValueError as e:
+                raise DatabricksAuthError(str(e), "credential unavailable") from None
         return {"Authorization": f"Bearer {self.__token}",
                 "Content-Type": "application/json", "Accept": "application/json"}
+
+    def _model_parameters(self) -> str:
+        fields = ([f"'temperature', {self.temperature!r}"] if self.temperature is not None
+                  else []) + [f"'max_tokens', {self.max_tokens}"]
+        return f"named_struct({', '.join(fields)})"
 
     def _clean(self, text: str) -> str:
         """Redact the token — always BEFORE any truncation — and any run of
@@ -285,7 +501,9 @@ class DatabricksProvider:
         Authorization value leaves a fragment the whole-token match misses.
         Linear in the text: each position is looked up once among the
         token's 8-character windows (an OAuth JWT is thousands long)."""
-        text = str(text).replace(self.__token, "[redacted]")
+        text = str(text)
+        if self.__token:
+            text = text.replace(self.__token, "[redacted]")
         grams = self.__grams
         if not grams:
             return text
@@ -362,9 +580,26 @@ class DatabricksProvider:
         raise DatabricksError(f"{method} {path}: retries exhausted", "retries exhausted")
 
     def _run(self, sql: str, prompt: str) -> str:
+        rows = self._execute(sql, [{"name": "request", "value": prompt, "type": "STRING"}])
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], list) \
+                or len(rows[0]) != 2:
+            raise DatabricksError("expected exactly one row of (response, error_message)",
+                                  "invalid response")
+        response, model_error = rows[0]
+        if model_error is not None:
+            raise DatabricksError(f"the model endpoint returned an error: "
+                                  f"{self._clean(str(model_error))[:300]}", "model error")
+        if not isinstance(response, str):
+            raise DatabricksError("the model returned no response", "invalid response")
+        return response
+
+    def _execute(self, sql: str, parameters: list[dict]) -> list | None:
+        """Submit, poll to a terminal state (canceling on any way out), and
+        return every result row — following result chunks, which only a batch
+        is large enough to produce."""
         deadline = self._clock() + self.timeout_s
         body = {"warehouse_id": self.warehouse_id, "statement": sql,
-                "parameters": [{"name": "request", "value": prompt, "type": "STRING"}],
+                "parameters": parameters,
                 "wait_timeout": "30s", "on_wait_timeout": "CONTINUE",
                 "disposition": "INLINE", "format": "JSON_ARRAY"}
         try:
@@ -405,19 +640,25 @@ class DatabricksProvider:
             if code in _AUTH_CODES:
                 raise DatabricksAuthError(self._clean(message))
             raise DatabricksError(self._clean(message), f"statement {state}")
-        rows = (result.get("result") or {}).get("data_array") \
-            if isinstance(result.get("result"), dict) else None
-        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], list) \
-                or len(rows[0]) != 2:
-            raise DatabricksError("expected exactly one row of (response, error_message)",
-                                  "invalid response")
-        response, model_error = rows[0]
-        if model_error is not None:
-            raise DatabricksError(f"the model endpoint returned an error: "
-                                  f"{self._clean(str(model_error))[:300]}", "model error")
-        if not isinstance(response, str):
-            raise DatabricksError("the model returned no response", "invalid response")
-        return response
+        chunk = result.get("result") if isinstance(result.get("result"), dict) else {}
+        rows = chunk.get("data_array")
+        if rows is None or not isinstance(rows, list):
+            return rows
+        rows = list(rows)
+        link = chunk.get("next_chunk_internal_link")
+        while link:
+            # Only a path under the statements API: never a host the
+            # response names, which would be handed the Authorization header.
+            if not isinstance(link, str) or not link.startswith(_CHUNKS) or "//" in link:
+                raise DatabricksError("a result chunk link outside the statements API",
+                                      "invalid response")
+            chunk = self._call("GET", link)
+            more = chunk.get("data_array")
+            if not isinstance(more, list):
+                raise DatabricksError("a result chunk without rows", "invalid response")
+            rows += more
+            link = chunk.get("next_chunk_internal_link")
+        return rows
 
     def _cancel(self, statement_id: str) -> str:
         # One attempt each: a throttled cancel must not hold the run for

@@ -88,8 +88,11 @@ def test_the_request_is_what_the_statement_execution_api_documents(dataset):
                                    "type": "STRING"}]
     sql = body["statement"]
     assert f"ai_query('{MODEL}', :request," in sql
-    assert "failOnError => false" in sql and "r.errorMessage" in sql and "r.response" in sql
-    assert "named_struct('temperature', 0.0" in sql
+    assert "failOnError => false" in sql and "r.errorMessage" in sql and "r.result AS response" in sql
+    # No temperature unless configured (reasoning endpoints reject it), and a
+    # max_tokens that leaves room for reasoning tokens.
+    assert "modelParameters => named_struct('max_tokens', 8192))" in sql
+    assert "temperature" not in sql
     assert record["execution"]["statement"] not in sql
     assert a.label == aggregate(GOOD["answers"], load(1)) == "likely_permitted"
     assert a.confidence == 0.8 and a.error is None and a.model == MODEL
@@ -662,3 +665,139 @@ def test_a_connect_timeout_is_never_sent_and_stops_the_run(dataset):
     out = p.assess([build_record(dataset, i) for _, i in items(dataset)[:3]], load(1))
     assert len(calls) == 2 and p.stop_kind == "unreachable"
     assert [a.error_kind for a in out] == ["unreachable", "not attempted", "not attempted"]
+
+
+# ------------------------------------------------- login profile, model parameters, batches
+
+PROFILE_TOKEN = "eyJprofile-oauth-token-abcdefghijklmnop"
+
+
+def profile_provider(fake, tmp_path, source, *, wall=lambda: 1_000.0, **options):
+    cfg = tmp_path / "databrickscfg"
+    cfg.write_text("[touchstone]\nhost = https://dbc-profile.cloud.databricks.com\n"
+                   "auth_type = databricks-cli\n")
+    clock = iter(range(0, 10_000))
+    return DatabricksProvider(ProviderConfig("databricks", model=MODEL, endpoint=WAREHOUSE,
+                                             options={"profile": "touchstone", **options}),
+                              transport=fake, env={}, clock=lambda: next(clock),
+                              sleep=lambda s: None, token_source=source, wall=wall,
+                              config_file=cfg)
+
+
+def test_temperature_is_sent_only_when_configured_and_bounded():
+    assert "named_struct('temperature', 0.0, 'max_tokens', 4096)" in provider(
+        Fake([]), temperature=0, max_tokens=4096).statement(load(1))
+    with pytest.raises(ValueError, match="temperature"):
+        provider(Fake([]), temperature=3)
+
+
+def test_a_login_profile_supplies_the_host_and_a_token_that_never_surfaces(dataset, tmp_path):
+    fake = Fake([succeeded()])
+    p = profile_provider(fake, tmp_path, lambda: (PROFILE_TOKEN, 1_000.0 + 3600))
+    (a,) = p.assess([build_record(dataset, items(dataset)[0][1])], load(1))
+    assert p.host == "https://dbc-profile.cloud.databricks.com"
+    assert fake.calls[0]["url"].startswith(p.host)
+    assert fake.calls[0]["headers"]["Authorization"] == f"Bearer {PROFILE_TOKEN}"
+    assert PROFILE_TOKEN not in repr(p) and PROFILE_TOKEN not in json.dumps(a.as_dict())
+
+
+def test_an_explicit_token_wins_over_a_profile(dataset):
+    p = DatabricksProvider(ProviderConfig("databricks", model=MODEL, endpoint=WAREHOUSE),
+                           transport=Fake([]), env={**ENV, "DATABRICKS_CONFIG_PROFILE": "x"},
+                           token_source=lambda: (_ for _ in ()).throw(AssertionError("used")))
+    assert p.profile is None
+
+
+def test_a_profile_token_is_refreshed_before_it_expires_and_both_are_redacted(dataset,
+                                                                             tmp_path):
+    now = [1_000.0]
+    tokens = iter([(PROFILE_TOKEN, 1_000.0 + 400), (PROFILE_TOKEN + "-second", 9_999_999.0)])
+    fake = Fake([succeeded(), (500, {"message": f"echo {PROFILE_TOKEN}"})])
+    p = profile_provider(fake, tmp_path, lambda: next(tokens), wall=lambda: now[0])
+    record = build_record(dataset, items(dataset)[0][1])
+    p.assess([record], load(1))
+    now[0] = 1_000.0 + 200            # inside the refresh margin of the first token
+    (a,) = p.assess([record], load(1))
+    assert fake.calls[1]["headers"]["Authorization"] == f"Bearer {PROFILE_TOKEN}-second"
+    assert PROFILE_TOKEN[:12] not in a.error           # the replaced token is still a secret
+
+
+def test_a_profile_that_cannot_produce_a_token_is_refused_at_construction(tmp_path):
+    from touchstone.assess.providers.databricks import DatabricksAuthError
+
+    def fail():
+        raise DatabricksAuthError("`databricks auth token --profile touchstone` failed",
+                                  "credential unavailable")
+    with pytest.raises(ValueError, match="databricks auth token"):
+        profile_provider(Fake([]), tmp_path, fail)
+
+
+def test_no_token_and_no_profile_names_both_ways_to_log_in():
+    with pytest.raises(ValueError, match="DATABRICKS_TOKEN.*databricks auth login"):
+        DatabricksProvider(ProviderConfig("databricks", model=MODEL, endpoint=WAREHOUSE),
+                           transport=Fake([]), env={"DATABRICKS_HOST": ENV["DATABRICKS_HOST"]})
+
+
+def batch_reply(rows):
+    return (200, {"statement_id": "b1", "status": {"state": "SUCCEEDED"},
+                  "result": {"data_array": rows}})
+
+
+def test_a_batch_is_one_statement_with_one_parameter_and_rows_matched_by_id(dataset):
+    records = [build_record(dataset, it) for _, it in items(dataset)[:3]]
+    bad = {**GOOD, "answers": {**GOOD["answers"], "formula": "changed"}}
+    # Rows come back out of order; row 1 failed at the endpoint.
+    fake = Fake([batch_reply([["2", json.dumps(bad), None], ["1", None, "rate limited"],
+                              ["0", json.dumps(GOOD), None]])])
+    out = provider(fake, batch_size=10).assess(records, load(1))
+    (call,) = fake.calls
+    sql = call["body"]["statement"]
+    assert "explode(from_json(:batch," in sql and "ai_query('system.ai.claude-sonnet-4-6', x.request," in sql
+    (param,) = call["body"]["parameters"]
+    assert param["name"] == "batch" and param["type"] == "STRING"
+    assert json.loads(param["value"]) == [{"id": str(i), "request": render_prompt(r, load(1))}
+                                          for i, r in enumerate(records)]
+    assert all(r["execution"]["statement"] not in sql for r in records)
+    assert [a.record_id for a in out] == [r["record_id"] for r in records]
+    assert out[0].label == "likely_permitted" and out[0].error is None
+    assert out[1].error_kind == "model error" and out[1].label == "insufficient_evidence"
+    assert out[2].label == "suspected_drift"
+
+
+def test_a_missing_or_duplicated_row_fails_that_record_only(dataset):
+    records = [build_record(dataset, it) for _, it in items(dataset)[:3]]
+    fake = Fake([batch_reply([["0", json.dumps(GOOD), None], ["2", json.dumps(GOOD), None],
+                              ["2", json.dumps(GOOD), None]])])
+    out = provider(fake, batch_size=3).assess(records, load(1))
+    assert out[0].error is None
+    assert out[1].error_kind == out[2].error_kind == "invalid response"
+
+
+def test_a_refused_credential_fails_its_batch_and_stops_the_rest(dataset):
+    records = [build_record(dataset, it) for _, it in items(dataset)[:4]]
+    fake = Fake([batch_reply([["0", json.dumps(GOOD), None], ["1", json.dumps(GOOD), None]]),
+                 (403, {"message": "no"})])
+    p = provider(fake, batch_size=2)
+    out = p.assess(records + [build_record(dataset, items(dataset)[4][1])], load(1))
+    assert [a.error is None for a in out[:2]] == [True, True]
+    assert out[2].error_kind == out[3].error_kind == "credential refused"
+    assert out[4].error_kind == "not attempted" and p.stop_kind == "credential refused"
+    assert len(fake.calls) == 2
+
+
+def test_result_chunks_are_followed_only_under_the_statements_api(dataset):
+    records = [build_record(dataset, it) for _, it in items(dataset)[:2]]
+    first = (200, {"statement_id": "b1", "status": {"state": "SUCCEEDED"},
+                   "result": {"data_array": [["0", json.dumps(GOOD), None]],
+                              "next_chunk_internal_link":
+                                  "/api/2.0/sql/statements/b1/result/chunks/1"}})
+    fake = Fake([first, (200, {"data_array": [["1", json.dumps(GOOD), None]]})])
+    out = provider(fake, batch_size=2).assess(records, load(1))
+    assert [a.error for a in out] == [None, None]
+    assert fake.calls[1]["url"].endswith("/api/2.0/sql/statements/b1/result/chunks/1")
+    evil = (200, {"statement_id": "b1", "status": {"state": "SUCCEEDED"},
+                  "result": {"data_array": [], "next_chunk_internal_link":
+                             "//evil.example/api/2.0/sql/statements/x"}})
+    fake = Fake([evil])
+    out = provider(fake, batch_size=2).assess(records, load(1))
+    assert all(a.error_kind == "invalid response" for a in out) and len(fake.calls) == 1
