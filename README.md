@@ -1,65 +1,28 @@
 # touchstone
 
-touchstone finds where a metric's declared definition and the SQL that computes it
-appear to disagree, and explains each suspected difference clause by clause.
+touchstone checks that the SQL people actually run computes your business metrics the
+way they are defined. It reads governed definitions and the SQL that computes or uses
+them, and reports where the two appear to disagree, clause by clause: a dropped filter,
+a changed formula, a different source table, a grouping the definition does not allow.
 
-> **Positive verdicts are suspended.** Nine successive review rounds found new false
-> certifications, the last ones in how SQL is *parsed*: the parser binds `%` and `IS`
-> differently from DuckDB and Spark, and a guard operating on a misparsed tree may
-> never see the dangerous construct. So, until the re-enable criteria in
-> [docs/proof-policy.md](docs/proof-policy.md) are met:
->
-> - an equality the engine finds is reported as an **experimental comparison**,
->   never as CERTIFIED / ALIASING / conforming;
-> - a difference that rests on the same interpretation is a **suspected divergence**
->   or **suspected difference**, never a definitive contradiction or violation;
-> - **no receipt authorizes reliance.** Verification reports three separate answers —
->   signature authentic, estate unchanged, claim usable — and the claim is never
->   usable now, however authentic the receipt and however unchanged the estate.
->
-> Stores and receipts written earlier are read under the same policy; tables
-> published earlier are brought under it with `touchstone publish --refresh-policy`.
+- **Scan** compares computed definitions (dbt projects, SQL directories, view DDL) with
+  declared ones (metrics YAML, the dbt Semantic Layer, Unity Catalog metric views,
+  Apache Ossie, Agents Schema): suspected divergences, aliases, orphan and shadow metrics,
+  each with clause-level blame.
+- **Monitor** reads warehouse query history and finds uses of governed metrics that
+  depart from their definition, including ad-hoc queries and long BI or notebook SQL.
+- **Advisory assessment** can have a model (Databricks `ai_query` or the Anthropic API)
+  judge every candidate metric use, once per distinct query, cached. It orders triage;
+  it never changes a finding or an exit code.
+- **Receipts and agents.** Signed receipts, an MCP server agents can check before quoting
+  a number, a dbt package and a scan-over-scan diff for CI.
 
-It reads computed definitions from dbt projects, plain SQL directories and view-DDL
-dumps, and declared definitions from metrics YAML, the dbt Semantic Layer, Apache
-Ossie documents, Unity Catalog metric views and Agents Schema tables.
+Status: a research preview. touchstone reports *suspected* differences and
+*experimental* matches, not verdicts to rely on: see [Status](#status).
 
 - Concept: [docs/concept-one-pager.md](docs/concept-one-pager.md)
 - Architecture: [docs/architecture-spec.md](docs/architecture-spec.md)
-
-## Formerly semantix
-
-The project was called semantix. What was written under that name keeps meaning
-what it meant:
-
-- **Stores.** When `touchstone.db` is missing and `semantix.db` sits beside it, every
-  command refuses rather than create a new store. A store holds the signing key, and a
-  new one would mint a new key that no pinned public key matches. With nothing holding
-  it open (stop any `semantix mcp` server first), rename `semantix.db` to
-  `touchstone.db`, together with `semantix.db-wal` and `semantix.db-shm` if they are
-  there: the store runs in WAL mode, and recent writes live in the `-wal` file until
-  they are checkpointed. Or pass `--db semantix.db`. A `touchstone.db` beside a
-  stranded, non-empty `semantix.db-wal` is refused until the `-wal` is renamed to match.
-- **Policy id.** Scans and receipts recorded under `semantix-proof/2` are under
-  `touchstone-proof/2`. The grammar did not change with the name, and neither do
-  fingerprint ids: rescanning an existing store records no restatement.
-- **SQL annotations.** `-- semantix: relation=` directives and `semantix: metric=` tags
-  are still read.
-- **Published tables.** `touchstone publish` replaces the rows published under the
-  `semantix` provider in `agents.root`. Agent queries that filter
-  `provider = 'semantix'` must now filter `provider = 'touchstone'`; the republished
-  `skill/verify-metric` row says so. While a `semantix.verdicts` table exists, publish
-  writes the same projection into it, so gates that still read it keep failing on new
-  findings. `--refresh-policy` brings both tables under the policy. Point the gates at
-  `touchstone.verdicts`, then drop `semantix.verdicts`.
-- **What you wrote that names it.**
-  - The command is `touchstone`. Update CI, cron jobs and MCP client configs
-    (`{"command": "touchstone", "args": ["mcp", …]}`). In an existing virtualenv, run
-    `pip uninstall semantix` before reinstalling, so no stale `semantix` command lingers.
-  - The dbt package is `integrations/dbt/touchstone`: tests are `touchstone.<test>`,
-    and the vars are `touchstone_database`, `touchstone_schema` and `touchstone_table`.
-  - Environment variables are `TOUCHSTONE_*` (`TOUCHSTONE_DATABRICKS_*`,
-    `TOUCHSTONE_QUALIFY_SQLGLOT`).
+- License: [Apache-2.0](LICENSE)
 
 ## Quickstart
 
@@ -93,6 +56,25 @@ engineered so one scan produces every verdict type:
 | `gmv` | **UNRESOLVED** — experimental comparison | Under the experimental rules, `total_gmv` and `gross_merchandise_value` are equal to the declared metric (the engine would have said CERTIFIED + ALIASING) — CTE vs. inline, flipped predicate order, `NOT =` vs. `<>` and `SELECT *`. Not a conclusion while positive verdicts are suspended. |
 | `customer_ltv` | **ORPHAN_CLAIM** | Declared, never computed anywhere. |
 | `refund_rate` | **SHADOW_METRIC** | Computed in ops, absent from the ontology. |
+
+## Status
+
+> **Positive verdicts are suspended.** Nine successive review rounds found new false
+> certifications, the last ones in how SQL is *parsed*: the parser binds `%` and `IS`
+> differently from DuckDB and Spark, and a guard operating on a misparsed tree may
+> never see the dangerous construct. So, until the re-enable criteria in
+> [docs/proof-policy.md](docs/proof-policy.md) are met:
+>
+> - an equality the engine finds is reported as an **experimental comparison**,
+>   never as CERTIFIED / ALIASING / conforming;
+> - a difference that rests on the same interpretation is a **suspected divergence**
+>   or **suspected difference**, never a definitive contradiction or violation;
+> - **no receipt authorizes reliance.** Verification reports three separate answers —
+>   signature authentic, estate unchanged, claim usable — and the claim is never
+>   usable now, however authentic the receipt and however unchanged the estate.
+>
+> Stores and receipts written earlier are read under the same policy; tables
+> published earlier are brought under it with `touchstone publish --refresh-policy`.
 
 ## Supported scope
 
@@ -367,22 +349,32 @@ reported, not recorded.
 ### Advisory drift assessment (in development)
 
 `touchstone monitor --export-comparisons uses.jsonl` writes one `touchstone-comparison/1`
-evidence record per metric use. The statement as it ran and the authoritative
-definition come first; touchstone's own reading follows as explicitly unverified
-observations. A separate advisory classifier answers versioned per-component questions
-about those records, and fixed code aggregates the answers into `suspected_drift`,
-`insufficient_evidence` or `likely_permitted`.
+evidence record per distinct judgment of a candidate metric use: any query that
+aggregates and names a governed metric or reads its source, whether or not the rules
+could read it, with the executions it covers. The statement and the authoritative
+definition come first, as quoted data; touchstone's own reading follows as explicitly
+unverified observations. A model answers versioned per-component questions, and fixed
+code aggregates the answers into `suspected_drift`, `insufficient_evidence`,
+`likely_permitted` or `not_a_use`.
 
-`touchstone assess benchmark` scores a provider against 60 labeled metric uses, split
-by query family. The labels are model-authored and model-reviewed; a blind human
-review is still to come (`touchstone assess review-sheet`). Two backends run:
-- a deterministic fake, which measures nothing, and the report says so;
-- **Databricks** (`ai_query` on a SQL warehouse), tested against mocked responses and
-  not yet run against a workspace.
+```bash
+touchstone assess run --provider databricks --model <endpoint> --endpoint <warehouse> \
+  --batch-size 20 --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
+```
 
-**Classification performance is therefore still unmeasured.** Snowflake `AI_COMPLETE`
-and a direct API come next. Assessments never change a finding or an exit code. See
-`docs/assess.md`.
+Backends: Databricks (`ai_query`, run against a real workspace), the Anthropic API
+(`--provider api`, tested against a scripted client) and a deterministic fake that
+measures nothing. Records whose comments carry prompt-like steering text are held for a
+person, not sent. `touchstone assess benchmark` scores a backend on 66 labeled metric
+uses; a further 114 uses in `benchmark/metric_uses_exec` carry the queries their labels
+were checked against by execution.
+
+**What has been measured, and against what.** On 174 synthetic uses, the rules decided
+55, with no drift wrongly called permitted; a Claude Opus 5.5 judge matched 167 labels;
+the open models a Databricks Free Edition workspace serves matched 125 to 132. The labels
+are model-written (execution-checked where execution can decide), and no human has
+reviewed them, so these figures describe agreement with those labels on this synthetic
+set, not accuracy on a real estate. See [docs/assess.md](docs/assess.md).
 
 ### Agents Schema: claims in, receipts out
 
@@ -685,6 +677,40 @@ and bounds as tagged filters, grouping constructs in grain, join side and ON-les
 in the join graph, CTE bodies as a recursive content digest keyed on the body rather
 than the name). A gate that never lifts is just a refusal to verify.
 
+## Formerly semantix
+
+The project was called semantix. What was written under that name keeps meaning
+what it meant:
+
+- **Stores.** When `touchstone.db` is missing and `semantix.db` sits beside it, every
+  command refuses rather than create a new store. A store holds the signing key, and a
+  new one would mint a new key that no pinned public key matches. With nothing holding
+  it open (stop any `semantix mcp` server first), rename `semantix.db` to
+  `touchstone.db`, together with `semantix.db-wal` and `semantix.db-shm` if they are
+  there: the store runs in WAL mode, and recent writes live in the `-wal` file until
+  they are checkpointed. Or pass `--db semantix.db`. A `touchstone.db` beside a
+  stranded, non-empty `semantix.db-wal` is refused until the `-wal` is renamed to match.
+- **Policy id.** Scans and receipts recorded under `semantix-proof/2` are under
+  `touchstone-proof/2`. The grammar did not change with the name, and neither do
+  fingerprint ids: rescanning an existing store records no restatement.
+- **SQL annotations.** `-- semantix: relation=` directives and `semantix: metric=` tags
+  are still read.
+- **Published tables.** `touchstone publish` replaces the rows published under the
+  `semantix` provider in `agents.root`. Agent queries that filter
+  `provider = 'semantix'` must now filter `provider = 'touchstone'`; the republished
+  `skill/verify-metric` row says so. While a `semantix.verdicts` table exists, publish
+  writes the same projection into it, so gates that still read it keep failing on new
+  findings. `--refresh-policy` brings both tables under the policy. Point the gates at
+  `touchstone.verdicts`, then drop `semantix.verdicts`.
+- **What you wrote that names it.**
+  - The command is `touchstone`. Update CI, cron jobs and MCP client configs
+    (`{"command": "touchstone", "args": ["mcp", …]}`). In an existing virtualenv, run
+    `pip uninstall semantix` before reinstalling, so no stale `semantix` command lingers.
+  - The dbt package is `integrations/dbt/touchstone`: tests are `touchstone.<test>`,
+    and the vars are `touchstone_database`, `touchstone_schema` and `touchstone_table`.
+  - Environment variables are `TOUCHSTONE_*` (`TOUCHSTONE_DATABRICKS_*`,
+    `TOUCHSTONE_QUALIFY_SQLGLOT`).
+
 ## Layout (maps 1:1 to the spec's five layers)
 
 ```
@@ -785,3 +811,7 @@ only as candidate generation — consensus signals must never decide a verdict, 
 the failure mode this engine exists to correct) · IN-list operand normalization (the
 benchmark's one confirmed gap) · change-attribution service · live warehouse
 connectors for Agents Schema read/write.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

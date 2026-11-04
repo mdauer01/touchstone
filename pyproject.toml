@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "touchstone"
 version = "0.1.0"
-description = "Semantic verification engine: extracts the de facto semantics of a data estate from compiled SQL and reconciles them against the declared ontology."
+description = "Checks that the SQL people run computes governed business metrics the way they are defined, and reports suspected drift clause by clause."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Proprietary" }
+license = { text = "Apache-2.0" }
 dependencies = [
     "sqlglot==30.12.0",  # pinned: part of the trusted toolchain (toolchain.py)
     "pyyaml>=6",

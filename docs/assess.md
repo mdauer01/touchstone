@@ -5,10 +5,12 @@ suspended (`docs/proof-policy.md`), the monitor reports matches as experimental 
 differences as suspected. This package is a separate **advisory** second opinion, built
 and evaluated before anyone relies on it.
 
-**Status.** The machinery exists and is tested against a deterministic `fake` backend.
-**Classification performance is unmeasured** until a real backend runs against a
-workspace, and every fake-backend report says so. Assessments order triage only. They never change a finding, a funnel bucket or
-an exit code.
+**Status.** Two real backends exist: Databricks `ai_query`, run against a real
+workspace, and the Anthropic API, tested against a scripted client. Classification has
+been measured only against **model-written labels** on synthetic metric uses (see "The
+labels" below), so no figure here is an accuracy on a real estate. A run on the
+deterministic `fake` backend measures nothing, and its report says so. Assessments order
+triage only. They never change a finding, a funnel bucket or an exit code.
 
 ## What is in this delivery
 
@@ -20,14 +22,16 @@ an exit code.
 | Labeled metric uses | `src/touchstone/benchmark/metric_uses/` | 60 synthetic items in 9 query families. Labels are written from the business definitions and policy in its README, never from touchstone output. They are model-authored and model-reviewed (a blind model pass, adjudicated in `adjudication.yaml`), and have not yet been reviewed by a human. The split is by family: tune on `dev`, report `test`. |
 | Runner | `assess/runner.py`, `touchstone assess benchmark` | For drift: flagged, labeled permitted and undecided, always reported together. For permitted uses: confirmed, flagged as drift and undecided. Also abstention, calibration (reliability table and ECE), cost and latency, overall and per family. With `--with-observations` it adds the ablation and the touchstone-alone baseline. |
 
-## Human review of the labels
+## The labels
 
 **The labels are model-authored and model-reviewed**, and every report says so in its
 `labels` block. A blind second model pass agreed with the authored labels on 56 of 60
 items, and the four disagreements were decided by the written policy
-(`adjudication.yaml`). Agreement between two model passes is **not** independent
-validation. A blind human review is the next step, especially of the four adjudications
-and of the grouping policy:
+(`adjudication.yaml`); a later blind pass agreed on all 6 `non_uses` items. Agreement
+between two model passes is **not** independent validation, and no human has reviewed
+the labels. Where labels feed a decision, the intended source of independent labels is
+triage itself: metric owners confirming or dismissing flagged uses. The tooling for a
+blind human review exists:
 
 ```bash
 touchstone assess review-sheet --out sheet.csv      # writes sheet.csv and sheet.guide.md
@@ -201,7 +205,9 @@ touchstone assess benchmark --provider databricks --model databricks-gpt-oss-120
 `--provider api` calls Claude through the Anthropic API with the same prompt and answer
 schema as the Databricks backend, so the two are comparable. It is for workspaces that do
 not serve a frontier model through `ai_query`: Databricks Free Edition serves only open
-models, and on the 174-use study those scored 125-132 exact against Claude Opus 5.5's 167.
+models, and on the 174-use study those agreed with 125-132 labels against Claude Opus
+5.5's 167 (agreement with model-written labels on synthetic uses, not accuracy on a real
+estate).
 
 ```bash
 pip install 'touchstone[api]'
