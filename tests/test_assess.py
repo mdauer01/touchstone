@@ -428,7 +428,7 @@ def test_compare_labels_counts_distinct_ids_and_reports_duplicates(tmp_path, cap
         return rows + [first] * 5 + [conflict]
     assert main(["assess", "compare-labels", str(_sheet(tmp_path, dup))]) == 1
     out = capsys.readouterr().out
-    assert "58/60 item(s) labeled" in out                   # distinct, conflicts unscored
+    assert "64/66 item(s) labeled" in out                   # distinct, conflicts unscored
     assert "labeled more than once" in out and "with different labels" in out
     assert "not reviewed" in out
 
@@ -439,7 +439,7 @@ def test_compare_labels_reads_excel_sheets_and_refuses_unreadable_ones(tmp_path,
 
     assert main(["assess", "compare-labels",
                  str(_sheet(tmp_path, lambda r: r, encoding="utf-8-sig"))]) == 0
-    assert "60/60 item(s) labeled · agreed 60" in capsys.readouterr().out
+    assert "66/66 item(s) labeled · agreed 66" in capsys.readouterr().out
     upper = [c.capitalize() for c in REVIEW_COLUMNS]
     assert main(["assess", "compare-labels",
                  str(_sheet(tmp_path, lambda r: r, header=upper))]) == 0   # headers: no case
@@ -623,8 +623,8 @@ def test_the_cli_exits_nonzero_when_nothing_answered(capsys, monkeypatch):
     monkeypatch.setattr(providers, "get_provider", lambda config: _Broken())
     assert cli.main(["assess", "benchmark", "--split", "test"]) == 1
     out = capsys.readouterr()
-    assert "failed 15/15" in out.out and "nothing was measured" in out.err
-    assert "errors: 30" in out.out
+    assert "failed 16/16" in out.out and "nothing was measured" in out.err
+    assert "errors: 36" in out.out
 
 
 def test_a_refused_credential_exits_2_without_a_traceback(capsys, monkeypatch):

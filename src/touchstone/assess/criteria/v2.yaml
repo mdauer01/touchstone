@@ -1,0 +1,64 @@
+# Advisory drift criteria, version 2.
+#
+# One narrow question per component, each answerable `unknown`. The questions
+# are asked of the ORIGINAL statement against the authoritative definition;
+# touchstone's extracted observations, when present, are unverified hints.
+# Answers are aggregated by fixed code (touchstone.assess.criteria.aggregate),
+# never by the model: identity not_a_use → not_a_use (unless the statement's own
+# identity evidence names the governed metric: then insufficient_evidence);
+# any changed component → suspected_drift; otherwise any unknown →
+# insufficient_evidence; otherwise likely_permitted. The result is
+# ADVISORY — it orders triage, it never changes a finding or an exit code.
+version: 2
+# v2 adds identity `not_a_use`: candidate selection pairs an unnamed aggregate
+# over a governed source with every metric on it, and v1 could only call such
+# a statement drift or undecided.
+components:
+  identity:
+    question: >-
+      Does the statement present its result as the governed metric (by its
+      output name, a query tag, or the asset it feeds), as a different metric,
+      or is it not a use of the governed metric at all?
+    answers:
+      same_metric: it is presented as the governed metric
+      other_metric: it is presented as a different metric, or the governed math is shown under another name
+      not_a_use: it computes something that is not this metric and does not present it as this metric (for example an order count or a discount total over the same tables)
+      unknown: the statement does not establish which metric it presents
+  formula:
+    question: >-
+      Is the aggregate the statement computes the governed measure's formula
+      (the same aggregation over the same columns, the same arithmetic),
+      possibly with permitted slicing, or a different formula?
+    answers:
+      same: the same formula
+      changed: a different formula (another column, aggregate, sign, factor, or added term)
+      unknown: whether the formula is the same cannot be decided from the evidence
+  population:
+    question: >-
+      Does the statement keep every required filter of the definition, and
+      restrict rows only on dimensions the definition permits?
+    answers:
+      preserved: every required filter is kept; extra filters only on permitted dimensions
+      changed: a required filter is dropped, weakened, broadened or replaced, or rows are restricted on a non-permitted column
+      unknown: whether the row population is preserved cannot be decided
+  grain:
+    question: >-
+      Does the statement group only by dimensions the definition permits (or
+      not group at all)?
+    answers:
+      permitted: no grouping, or grouping only by permitted dimensions
+      changed: grouping by something the definition does not permit, or re-aggregating a grouped result
+      unknown: whether the grouping is permitted cannot be decided
+  source:
+    question: >-
+      Does the statement read the definition's source relation (directly or
+      through select-project-filter steps over it)?
+    answers:
+      same: the definition's source
+      different: another relation, or a join that changes which rows are counted
+      unknown: which relation is read cannot be established (session state, unknown views)
+labels:
+  not_a_use: the statement does not use the governed metric (no finding)
+  suspected_drift: at least one component differs from the definition
+  insufficient_evidence: no component differs, but at least one cannot be decided
+  likely_permitted: every component matches the definition or a permitted variation of it

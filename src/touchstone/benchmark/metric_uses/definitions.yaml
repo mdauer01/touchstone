@@ -39,6 +39,10 @@ policy: |
     are counted (fan-out, dropped rows), changes the source.
   - **Identity.** Presenting one metric's definition under another metric's name is an
     identity mismatch, even when the math is a correct definition of some metric.
+  - **Not a use.** The statement computes something that is not the named metric and does
+    not present it as that metric (an order count, a discount total over the same tables).
+    A statement that presents its result under the metric's name is a use, whatever it
+    computes.
   - **Insufficient evidence.** Use this label when the text alone cannot decide the
     question:
     - an unknown function;

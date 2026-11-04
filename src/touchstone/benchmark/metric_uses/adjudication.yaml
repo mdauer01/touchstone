@@ -5,10 +5,10 @@
 pass: blind-1
 label_provenance:
   authored_by: model
-  reviewed_by: model (blind pass blind-1 — 56 of 60 agreed, 4 adjudicated by the written policy)
+  reviewed_by: model (blind pass blind-1 — 56 of 60 agreed, 4 adjudicated by the written policy; blind-2 on the 6 non_uses items — 6 of 6 agreed)
   human_review: none yet
   note: agreement between two model passes is not independent validation
-agreement: 56 of 60 items
+agreement: 62 of 66 items (blind-1 56 of 60, blind-2 6 of 6)
 decisions:
 - id: slices-07
   authored: insufficient_evidence

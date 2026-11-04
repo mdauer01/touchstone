@@ -1,0 +1,33 @@
+family: non_uses
+split: test
+items:
+  - id: nonuse-01
+    metric: net_revenue
+    sql: SELECT channel, COUNT(*) AS completed_orders FROM main.finance.orders WHERE status = 'completed' GROUP BY channel
+    label: not_a_use
+    rationale: an order count over the governed source, presented as a count; it is not net revenue in any form
+  - id: nonuse-02
+    metric: gross_revenue
+    sql: SELECT country, SUM(discount) AS discount_total FROM main.finance.orders WHERE status = 'completed' GROUP BY country
+    label: not_a_use
+    rationale: a discount total; no governed measure reads discount, and nothing presents it as gross revenue
+  - id: nonuse-03
+    metric: net_revenue
+    sql: SELECT COUNT(DISTINCT customer_id) AS buying_customers FROM main.finance.orders WHERE order_date >= DATE '2026-01-01'
+    label: not_a_use
+    rationale: a distinct customer count over the governed source
+  - id: nonuse-04
+    metric: gross_revenue
+    sql: SELECT i.sku, SUM(i.qty) AS units FROM main.finance.order_items i JOIN main.finance.orders o ON o.order_id = i.order_id WHERE o.status = 'completed' GROUP BY i.sku
+    label: not_a_use
+    rationale: units sold per SKU; it reads the governed source but computes a quantity, not revenue
+  - id: nonuse-05
+    metric: net_revenue
+    sql: SELECT MAX(order_date) AS last_completed_order FROM main.finance.orders WHERE status = 'completed'
+    label: not_a_use
+    rationale: a freshness check (latest order date), not a revenue figure
+  - id: nonuse-06
+    metric: net_revenue
+    sql: SELECT channel, COUNT(*) AS net_revenue FROM main.finance.orders WHERE status = 'completed' GROUP BY channel
+    label: formula_drift
+    rationale: a count presented AS net_revenue is a use of the governed name with another formula; "not a use" would silence it (the label guard turns that answer into insufficient evidence)

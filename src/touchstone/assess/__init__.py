@@ -27,4 +27,5 @@ it has not measured. A run on the `fake` provider establishes only that the
 machinery works; every report says so.
 """
 
-ADVISORY_LABELS = ("suspected_drift", "insufficient_evidence", "likely_permitted")
+# `not_a_use` (criteria v2+): the statement is not a use of the governed metric.
+ADVISORY_LABELS = ("suspected_drift", "insufficient_evidence", "likely_permitted", "not_a_use")

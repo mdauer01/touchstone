@@ -1206,13 +1206,16 @@ def _assess_run(args: argparse.Namespace, provider) -> int:
         print("  NOTE: this provider measures nothing — its labels are not readings")
     print(f"  calls {stats['calls']} · from cache {stats['from_cache']} · "
           f"{stats['without_rules_reading']} judgment(s) the rules did not read")
+    if stats["held"]:
+        print(f"  HELD for a person (not sent — steering text in comments or strings): "
+              f"{stats['held']}")
     print("  labels: " + (", ".join(f"{k} {n}" for k, n in sorted(stats["labels"].items()))
                           or "none"))
     if stats["failed"]:
         print("  failed: " + ", ".join(f"{k} {n}" for k, n in sorted(stats["failed"].items())))
     print(f"  {ADVISORY_NOTE}")
     print(f"  verdicts → {args.out}")
-    return 1 if records and not stats["labels"] else 0
+    return 1 if records and not stats["labels"] and not stats["held"] else 0
 
 
 def _cmd_assess(args: argparse.Namespace) -> int:

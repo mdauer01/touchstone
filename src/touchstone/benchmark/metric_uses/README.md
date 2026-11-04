@@ -68,6 +68,10 @@ metric view's name), so the model and the human reviewer judge from the same evi
   are counted (fan-out, dropped rows), changes the source.
 - **Identity.** Presenting one metric's definition under another metric's name is an
   identity mismatch, even when the math is a correct definition of some metric.
+- **Not a use.** The statement computes something that is not the named metric and does
+  not present it as that metric (an order count, a discount total over the same tables).
+  A statement that presents its result under the metric's name is a use, whatever it
+  computes.
 - **Insufficient evidence.** Use this label when the text alone cannot decide the
   question:
   - an unknown function;
@@ -78,12 +82,12 @@ metric view's name), so the model and the human reviewer judge from the same evi
 ## Labels
 
 `permitted_variation`, `formula_drift`, `population_drift`, `grain_drift`,
-`source_drift`, `identity_mismatch`, `insufficient_evidence`.
+`source_drift`, `identity_mismatch`, `insufficient_evidence`, `not_a_use`.
 
 The advisory classes the classifier is scored on are derived from these labels:
 
 - `permitted_variation` becomes `likely_permitted`;
-- `insufficient_evidence` stays `insufficient_evidence`;
+- `insufficient_evidence` stays `insufficient_evidence`, and `not_a_use` stays `not_a_use`;
 - every other label becomes `suspected_drift`.
 
 ## Splits
@@ -94,4 +98,4 @@ shapes it has not seen. Thresholds are tuned on `dev` only.
 | split | families |
 |---|---|
 | `dev` | slices, staging_ctes, window_ranks, temp_views |
-| `test` | time_windows, dimension_joins, top_n, unknown_udfs, renamed_metrics |
+| `test` | time_windows, dimension_joins, top_n, unknown_udfs, renamed_metrics, non_uses |

@@ -124,3 +124,23 @@ items:
   label: permitted_variation
 - id: windows-06
   label: permitted_variation
+# Round nineteen (2026-11-04): the non_uses family, labeled by a separate blind MODEL
+# pass (blind-2) given only the definitions, the policy (with "not a use") and the SQL.
+- id: nonuse-01
+  label: not_a_use
+  pass: blind-2
+- id: nonuse-02
+  label: not_a_use
+  pass: blind-2
+- id: nonuse-03
+  label: not_a_use
+  pass: blind-2
+- id: nonuse-04
+  label: not_a_use
+  pass: blind-2
+- id: nonuse-05
+  label: not_a_use
+  pass: blind-2
+- id: nonuse-06
+  label: formula_drift
+  pass: blind-2

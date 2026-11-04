@@ -220,9 +220,21 @@ touchstone assess run --provider databricks --model <endpoint> --endpoint <wareh
   judgment, the exact prompt, the provider, the model and the criteria version reuses
   every unchanged judgment; failed calls are not cached. Verdicts are advisory: they
   never become a finding, a positive verdict or an exit code.
-- **A known gap.** A statement that reads a governed source but names no metric is
-  paired with every metric defined on that source. Criteria v1 has no "not a use of this
-  metric" answer, so such pairs can read as drift.
+- **Not a use (criteria v2, the default).** A statement that reads a governed source but
+  names no metric is paired with every metric on that source. The identity question can
+  now answer `not_a_use` (an order count, a discount total), which code turns into the
+  label `not_a_use` and no finding. That answer cannot silence a use: when the
+  statement's own identity evidence names the metric (an output, alias, tag or asset),
+  `not_a_use` becomes `insufficient_evidence` (`criteria.guarded`). The benchmark gained a
+  `non_uses` family (5 non-uses, plus a count aliased as `net_revenue`), blind-labeled 6/6.
+- **Steering.** The statement and the session statements reach the model as JSON-encoded
+  data between markers whose nonce is a hash of their own text: a comment cannot end the
+  data or forge a section. Before sending, `assess.screen` reads the comments and string
+  literals (never identifiers) for prompt structure: headings, an answers object, a
+  confidence value, classifier answer words, instructions to the reader, text addressed
+  to a model. A hit is not sent; its verdict is held for a person with the reason. On the
+  first real-history pilot it held 0 of 162 records. A plain "certified by the owner"
+  comment is not a hit; it reaches the model as data.
 
 ## What comes next
 

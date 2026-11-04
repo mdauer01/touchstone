@@ -41,12 +41,12 @@ from sqlglot import exp
 
 from touchstone.adapters.loadutil import load_yaml, parse_yaml
 from touchstone.assess import ADVISORY_LABELS
-from touchstone.assess.criteria import Criteria, load
+from touchstone.assess.criteria import Criteria, guarded, load
 from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, validate, without_observations
 
 DATASET_DIR = Path(__file__).resolve().parent.parent / "benchmark" / "metric_uses"
 LABELS = ("permitted_variation", "formula_drift", "population_drift", "grain_drift",
-          "source_drift", "identity_mismatch", "insufficient_evidence")
+          "source_drift", "identity_mismatch", "insufficient_evidence", "not_a_use")
 DIALECT = "databricks"
 UNMEASURED = ("classification performance is UNMEASURED: this provider does not measure it "
               "(the fake backend exercises the machinery only)")
@@ -55,8 +55,8 @@ UNMEASURED = ("classification performance is UNMEASURED: this provider does not 
 def gold_advisory(label: str) -> str:
     if label == "permitted_variation":
         return "likely_permitted"
-    if label == "insufficient_evidence":
-        return "insufficient_evidence"
+    if label in ("insufficient_evidence", "not_a_use"):
+        return label
     return "suspected_drift"
 
 
@@ -567,15 +567,19 @@ def _metrics(rows: list[dict]) -> dict:
     return {
         "n": n,
         "answered": len(answered),
+        # `called_not_a_use` (criteria v2+) keeps every class partitioned: on
+        # a drift item it is a missed drift, like labeled permitted.
         "drift": part("suspected_drift", {"flagged": "suspected_drift",
                                           "labeled_permitted": "likely_permitted",
-                                          "undecided": "insufficient_evidence"}),
+                                          "undecided": "insufficient_evidence",
+                                          "called_not_a_use": "not_a_use"}),
         "permitted": part("likely_permitted", {"confirmed": "likely_permitted",
                                                "flagged_as_drift": "suspected_drift",
-                                               "undecided": "insufficient_evidence"}),
+                                               "undecided": "insufficient_evidence",
+                                               "called_not_a_use": "not_a_use"}),
         "insufficient_evidence": part("insufficient_evidence", {
             "abstained": "insufficient_evidence", "flagged": "suspected_drift",
-            "labeled_permitted": "likely_permitted"}),
+            "labeled_permitted": "likely_permitted", "called_not_a_use": "not_a_use"}),
         "abstention": _rate(sum(1 for r in answered
                                 if r["predicted"] == "insufficient_evidence"), len(answered)),
         "agreement_with_labels": (round(sum(1 for r in answered if r["gold"] == r["predicted"])
@@ -639,7 +643,7 @@ def run_benchmark(provider, *, dataset: dict | None = None, split: str = "test",
     export); with them the run includes the ablation and the touchstone-alone
     baseline."""
     dataset = dataset or load_dataset()
-    criteria = criteria or load(1)
+    criteria = criteria or load()
     chosen = items(dataset, split)
     arms = {"without_observations": None}
     if observations is not None:
@@ -664,6 +668,10 @@ def run_benchmark(provider, *, dataset: dict | None = None, split: str = "test",
         if arm == "without_observations":
             records = [without_observations(r) for r in records]
         assessments = {a.record_id: a for a in provider.assess(records, criteria)}
+        by_record = {r["record_id"]: r for r in records}
+        for a in assessments.values():
+            if a.error is None and a.record_id in by_record:
+                a.label = guarded(a.label, by_record[a.record_id])
         rows_all, rows_fam = [], {}
         for (fam, item), record in zip(chosen, records):
             row = _row(gold_advisory(item["label"]), assessments.get(record["record_id"]))
@@ -742,15 +750,18 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
     """Advisory verdicts for exported comparison records (`monitor
     --export-comparisons`): one per record, i.e. per distinct judgment.
 
-    `cache` maps a cache key to an earlier answered assessment and is updated
-    in place. The key is the record's judgment, the EXACT prompt the provider
-    would send, the provider, its model and the criteria version — so any
-    change of evidence, definition, policy, model or criteria is judged anew,
-    and an unchanged judgment is never paid for twice. Failed calls are not
-    cached. Returns (verdicts, stats)."""
+    A record whose comments or strings carry steering text (assess.screen) is
+    NOT sent: its verdict is held for a person, with the reason. `cache` maps a
+    cache key to an earlier answered assessment and is updated in place. The
+    key is the record's judgment, the EXACT prompt the provider would send,
+    the provider, its model and the criteria version — so any change of
+    evidence, definition, policy, model or criteria is judged anew, and an
+    unchanged judgment is never paid for twice. Failed calls are not cached.
+    Returns (verdicts, stats)."""
     from touchstone.assess.providers import render_prompt
+    from touchstone.assess.screen import steering
 
-    criteria = criteria or load(1)
+    criteria = criteria or load()
     cache = {} if cache is None else cache
     prepared = []
     for record in records:
@@ -760,8 +771,8 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
             record.get("judgment_key") or record["record_id"],
             hashlib.sha256(prompt.encode()).hexdigest(), provider.name, provider.model,
             criteria.version]).encode()).hexdigest()
-        prepared.append((record, sent, key))
-    todo = [(sent, key) for _, sent, key in prepared if key not in cache]
+        prepared.append((record, sent, key, steering(record)))
+    todo = [(sent, key) for _, sent, key, held in prepared if held is None and key not in cache]
     answered = provider.assess([sent for sent, _ in todo], criteria) if todo else []
     fresh = {}
     for (_, key), a in zip(todo, answered):
@@ -769,11 +780,9 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
         if a.error is None:
             cache[key] = a.as_dict()
     verdicts = []
-    for record, sent, key in prepared:
-        from_cache = key not in fresh
-        a = cache[key] if from_cache else fresh[key]
+    for record, sent, key, held in prepared:
         occ = record.get("occurrences") or {}
-        verdicts.append({
+        verdict = {
             "record_id": record["record_id"], "judgment_key": record.get("judgment_key"),
             "metric": record["definition"]["name"], "view": record["definition"].get("view"),
             "executions": occ.get("executions", 1),
@@ -781,18 +790,33 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
             "last_start_time": occ.get("last_start_time"),
             "statement": record["execution"]["statement"],
             "rules_reading": (record.get("unverified_observations") or {}).get("finding_kind"),
-            "label": None if a["error"] else a["label"], "answers": a["answers"],
-            "confidence": a["confidence"], "provider": a["provider"], "model": a["model"],
-            "criteria_version": a["criteria_version"], "error": a["error"],
-            "error_kind": a["error_kind"], "from_cache": from_cache,
             "observations_sent": "unverified_observations" in sent,
-            "advisory": ADVISORY_NOTE})
+            "advisory": ADVISORY_NOTE}
+        if held is not None:
+            verdict.update({"label": None, "answers": {}, "confidence": None,
+                            "provider": provider.name, "model": provider.model,
+                            "criteria_version": criteria.version,
+                            "error": f"not sent: steering suspected — {held}; held for a person",
+                            "error_kind": "steering suspected", "from_cache": False})
+        else:
+            from_cache = key not in fresh
+            a = cache[key] if from_cache else fresh[key]
+            verdict.update({
+                "label": None if a["error"] else guarded(a["label"], record),
+                "answers": a["answers"], "confidence": a["confidence"],
+                "provider": a["provider"], "model": a["model"],
+                "criteria_version": a["criteria_version"], "error": a["error"],
+                "error_kind": a["error_kind"], "from_cache": from_cache})
+        verdicts.append(verdict)
+    held_count = sum(1 for *_, held in prepared if held is not None)
     stats = {
         "records": len(records),
         "executions": sum(v["executions"] for v in verdicts),
-        "calls": len(todo), "from_cache": len(records) - len(todo),
+        "calls": len(todo), "from_cache": len(records) - len(todo) - held_count,
+        "held": held_count,
         "labels": dict(Counter(v["label"] for v in verdicts if v["label"])),
-        "failed": dict(Counter(v["error_kind"] for v in verdicts if v["error"])),
+        "failed": dict(Counter(v["error_kind"] for v in verdicts
+                               if v["error"] and v["error_kind"] != "steering suspected")),
         "without_rules_reading": sum(1 for v in verdicts if v["rules_reading"] is None),
         "measures_performance": bool(getattr(provider, "measures_performance", False))}
     return verdicts, stats
