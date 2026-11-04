@@ -196,6 +196,32 @@ touchstone assess benchmark --provider databricks --model databricks-gpt-oss-120
   model, defined in the prompt as its probability that every answer is correct. It is a
   self-report, not a probability the model computed.
 
+## The direct API backend
+
+`--provider api` calls Claude through the Anthropic API with the same prompt and answer
+schema as the Databricks backend, so the two are comparable. It is for workspaces that do
+not serve a frontier model through `ai_query`: Databricks Free Edition serves only open
+models, and on the 174-use study those scored 125-132 exact against Claude Opus 5.5's 167.
+
+```bash
+pip install 'touchstone[api]'
+ant auth login                       # or export ANTHROPIC_API_KEY yourself
+touchstone assess run --provider api --model claude-opus-5-5 \
+  --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
+```
+
+- Credentials are resolved by the SDK (`ANTHROPIC_API_KEY`, or an `ant auth login`
+  profile); touchstone never reads, stores or prints them.
+- `output_config.format` constrains the reply to the criteria's JSON schema; the label is
+  computed by code. Thinking stays at the model's default; `--effort` is sent only when
+  given; no sampling parameters are sent.
+- On Opus 5.5, Opus 5, Fable 5.1 and Sonnet 5.5, server-side `fallbacks: "default"`
+  re-runs a declined request on Anthropic's recommended fallback. A refusal that survives
+  is an error on that assessment, never a label. Haiku has no server-side fallback.
+- Records run concurrently (`--concurrency`, default 8). The cost estimate uses list
+  prices; cache reads and batch discounts are not modelled.
+- Tested against a scripted client only; no live run yet.
+
 ## From query history to verdicts
 
 ```bash

@@ -8,8 +8,8 @@ A provider answers the criteria's per-component questions for each record;
   works and NOTHING about classification performance;
 * `databricks` — `ai_query` with a JSON-schema response format on a SQL
   warehouse (providers/databricks.py), tested against mocked API responses;
-* `snowflake` (Cortex `AI_COMPLETE`) and `api` (a direct model API for local
-  use) — not implemented yet. Every backend reads its credential from the
+* `api` — Claude through the Anthropic API (providers/anthropic_api.py);
+* `snowflake` (Cortex `AI_COMPLETE`) — not implemented yet. Every backend reads its credential from the
   environment; touchstone never stores, prints or logs it.
 
 `render_prompt` is shared by every model-backed provider so the evidence
@@ -79,9 +79,13 @@ def get_provider(config: ProviderConfig) -> Provider:
         from touchstone.assess.providers.databricks import DatabricksProvider
 
         return DatabricksProvider(config)
+    if config.kind == "api":
+        from touchstone.assess.providers.anthropic_api import AnthropicProvider
+
+        return AnthropicProvider(config)
     raise NotImplementedError(
-        f"the {config.kind} provider is not implemented yet: Databricks (ai_query) is the "
-        f"one real backend in this release")
+        f"the {config.kind} provider is not implemented yet: Databricks (ai_query) and the "
+        f"direct API are the real backends in this release")
 
 
 def _unknown_relation(name: str, definition: dict, session: dict) -> str:

@@ -369,11 +369,13 @@ def main(argv: list[str] | None = None) -> int:
     def provider_args(p) -> None:
         p.add_argument("--provider", default="fake",
                        choices=["fake", "api", "databricks", "snowflake"],
-                       help="assessment backend: fake (measures nothing) or databricks "
+                       help="assessment backend: fake (measures nothing), databricks "
                             "(ai_query; the token is read from DATABRICKS_TOKEN, or from a "
-                            "`databricks auth login` profile)")
+                            "`databricks auth login` profile) or api (Claude through the "
+                            "Anthropic API; credentials resolved by the SDK)")
         p.add_argument("--model", help="databricks: the serving endpoint ai_query calls, "
-                                       "e.g. system.ai.<model>")
+                                       "e.g. system.ai.<model>; api: the Claude model "
+                                       "(default claude-opus-5-5)")
         p.add_argument("--endpoint", help="databricks: the SQL warehouse id (or "
                                           "DATABRICKS_WAREHOUSE_ID) — never a secret")
         p.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST, or "
@@ -390,6 +392,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--temperature", type=float,
                        help="databricks: sampling temperature (default: not sent — "
                             "reasoning endpoints reject it)")
+        p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
+                       help="api: reasoning effort (default: the model's own)")
+        p.add_argument("--concurrency", type=int,
+                       help="api: records assessed at once (default 8)")
         p.add_argument("--seed", default="", help="seed for the fake provider")
 
     provider_args(p_ab)
@@ -1229,7 +1235,8 @@ def _cmd_assess(args: argparse.Namespace) -> int:
 
     try:
         options = {"seed": args.seed, "batch_size": args.batch_size}
-        for name in ("host", "profile", "max_tokens", "temperature"):
+        for name in ("host", "profile", "max_tokens", "temperature", "effort",
+                     "concurrency"):
             if getattr(args, name) is not None:
                 options[name] = getattr(args, name)
         provider = get_provider(ProviderConfig(args.provider, model=args.model,

@@ -107,13 +107,14 @@ def test_the_label_is_computed_by_fixed_code_never_by_the_model():
 
 # --------------------------------------------------------------- providers
 
-def test_fake_and_databricks_run_and_the_others_are_not_implemented(monkeypatch):
+def test_fake_databricks_and_api_run_and_snowflake_is_not_implemented(monkeypatch):
     with pytest.raises(ValueError):
         ProviderConfig("openai-direct")
-    for kind in ("api", "snowflake"):
-        with pytest.raises(NotImplementedError, match="not implemented yet"):
-            get_provider(ProviderConfig(kind, model="m", endpoint="e"))
+    with pytest.raises(NotImplementedError, match="not implemented yet"):
+        get_provider(ProviderConfig("snowflake", model="m", endpoint="e"))
     monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
+    # A login profile in the developer's shell would otherwise be used.
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
     with pytest.raises(ValueError, match="DATABRICKS_TOKEN"):
         get_provider(ProviderConfig("databricks", model="system.ai.m", endpoint="abc123",
                                     options={"host": "https://x.cloud.databricks.com"}))
