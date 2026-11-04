@@ -366,30 +366,33 @@ def main(argv: list[str] | None = None) -> int:
              "permitted / undecided, permitted uses confirmed / flagged / undecided, "
              "calibration, cost and latency (the fake provider measures nothing — the "
              "report says so)")
-    p_ab.add_argument("--provider", default="fake",
-                      choices=["fake", "api", "databricks", "snowflake"],
-                      help="assessment backend: fake (measures nothing) or databricks "
-                           "(ai_query; the token is read from DATABRICKS_TOKEN, or from a "
-                           "`databricks auth login` profile)")
-    p_ab.add_argument("--model", help="databricks: the serving endpoint ai_query calls, "
-                                      "e.g. system.ai.<model>")
-    p_ab.add_argument("--endpoint", help="databricks: the SQL warehouse id (or "
-                                         "DATABRICKS_WAREHOUSE_ID) — never a secret")
-    p_ab.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST, or "
-                                     "the profile's host)")
-    p_ab.add_argument("--profile", help="databricks: a `databricks auth login` profile to take "
-                                        "the host and a short-lived OAuth token from when "
-                                        "DATABRICKS_TOKEN is unset (or "
-                                        "DATABRICKS_CONFIG_PROFILE)")
-    p_ab.add_argument("--batch-size", dest="batch_size", type=int, default=1,
-                      help="databricks: records per ai_query statement (default 1)")
-    p_ab.add_argument("--max-tokens", dest="max_tokens", type=int,
-                      help="databricks: max_tokens per answer, reasoning included "
-                           "(default 8192)")
-    p_ab.add_argument("--temperature", type=float,
-                      help="databricks: sampling temperature (default: not sent — reasoning "
-                           "endpoints reject it)")
-    p_ab.add_argument("--seed", default="", help="seed for the fake provider")
+    def provider_args(p) -> None:
+        p.add_argument("--provider", default="fake",
+                       choices=["fake", "api", "databricks", "snowflake"],
+                       help="assessment backend: fake (measures nothing) or databricks "
+                            "(ai_query; the token is read from DATABRICKS_TOKEN, or from a "
+                            "`databricks auth login` profile)")
+        p.add_argument("--model", help="databricks: the serving endpoint ai_query calls, "
+                                       "e.g. system.ai.<model>")
+        p.add_argument("--endpoint", help="databricks: the SQL warehouse id (or "
+                                          "DATABRICKS_WAREHOUSE_ID) — never a secret")
+        p.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST, or "
+                                      "the profile's host)")
+        p.add_argument("--profile", help="databricks: a `databricks auth login` profile to "
+                                         "take the host and a short-lived OAuth token from "
+                                         "when DATABRICKS_TOKEN is unset (or "
+                                         "DATABRICKS_CONFIG_PROFILE)")
+        p.add_argument("--batch-size", dest="batch_size", type=int, default=1,
+                       help="databricks: records per ai_query statement (default 1)")
+        p.add_argument("--max-tokens", dest="max_tokens", type=int,
+                       help="databricks: max_tokens per answer, reasoning included "
+                            "(default 8192)")
+        p.add_argument("--temperature", type=float,
+                       help="databricks: sampling temperature (default: not sent — "
+                            "reasoning endpoints reject it)")
+        p.add_argument("--seed", default="", help="seed for the fake provider")
+
+    provider_args(p_ab)
     p_ab.add_argument("--split", default="test", choices=["dev", "test", "all"],
                       help="split by query family; tune on dev, report test")
     p_ab.add_argument("--with-observations", dest="with_observations", action="store_true",
@@ -398,6 +401,21 @@ def main(argv: list[str] | None = None) -> int:
                            "baseline")
     p_ab.add_argument("--dataset", help="dataset directory (default: the shipped one)")
     p_ab.add_argument("--json", dest="json_out", help="write the full report JSON here")
+    p_ar = assess_sub.add_parser(
+        "run",
+        help="advisory verdicts for exported comparison records (monitor "
+             "--export-comparisons): one call per distinct judgment, cached by judgment, "
+             "prompt, model and criteria version; never a finding or an exit code")
+    provider_args(p_ar)
+    p_ar.add_argument("--comparisons", required=True,
+                      help="the JSON-lines file monitor --export-comparisons wrote")
+    p_ar.add_argument("--out", required=True, help="write one verdict per record here "
+                                                   "(JSON lines)")
+    p_ar.add_argument("--cache", help="verdict cache (JSON lines): answered judgments are "
+                                      "reused, new ones appended")
+    p_ar.add_argument("--without-observations", dest="without_observations",
+                      action="store_true",
+                      help="send the records without touchstone's unverified observations")
     p_rs = assess_sub.add_parser(
         "review-sheet",
         help="write a BLIND review sheet (CSV, no labels or rationales) for a human labeler, "
@@ -1140,6 +1158,63 @@ def _print_graph(rows: list[dict]) -> None:
               + detail)
 
 
+def _assess_run(args: argparse.Namespace, provider) -> int:
+    from touchstone.assess.providers.databricks import DatabricksError
+    from touchstone.assess.record import validate
+    from touchstone.assess.runner import ADVISORY_NOTE, assess_records
+
+    records, invalid = [], 0
+    try:
+        with open(args.comparisons, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    if validate(record):
+                        invalid += 1      # never hand a classifier a malformed record
+                    else:
+                        records.append(record)
+    except (OSError, ValueError) as e:
+        print(f"touchstone assess: cannot read {args.comparisons}: {e}", file=sys.stderr)
+        return 2
+    cache: dict = {}
+    if args.cache and Path(args.cache).exists():
+        with open(args.cache, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    entry = json.loads(line)
+                    cache[entry["key"]] = entry["assessment"]
+    known = set(cache)
+    try:
+        verdicts, stats = assess_records(provider, records,
+                                         with_observations=not args.without_observations,
+                                         cache=cache)
+    except DatabricksError as e:
+        print(f"touchstone assess: {e}", file=sys.stderr)
+        return 2
+    with open(args.out, "w", encoding="utf-8") as f:
+        for v in verdicts:
+            f.write(json.dumps(v) + "\n")
+    if args.cache:
+        with open(args.cache, "a", encoding="utf-8") as f:
+            for key in cache.keys() - known:
+                f.write(json.dumps({"key": key, "assessment": cache[key]}) + "\n")
+    print(f"assess run · provider {provider.name}"
+          + (f" ({provider.model})" if provider.model else "")
+          + f" · {stats['records']} judgment(s) covering {stats['executions']} execution(s)"
+          + (f" · {invalid} invalid record(s) skipped" if invalid else ""))
+    if not stats["measures_performance"]:
+        print("  NOTE: this provider measures nothing — its labels are not readings")
+    print(f"  calls {stats['calls']} · from cache {stats['from_cache']} · "
+          f"{stats['without_rules_reading']} judgment(s) the rules did not read")
+    print("  labels: " + (", ".join(f"{k} {n}" for k, n in sorted(stats["labels"].items()))
+                          or "none"))
+    if stats["failed"]:
+        print("  failed: " + ", ".join(f"{k} {n}" for k, n in sorted(stats["failed"].items())))
+    print(f"  {ADVISORY_NOTE}")
+    print(f"  verdicts → {args.out}")
+    return 1 if records and not stats["labels"] else 0
+
+
 def _cmd_assess(args: argparse.Namespace) -> int:
     from touchstone.assess.providers import ProviderConfig, get_provider
     from touchstone.assess.runner import load_dataset, observations_from_monitor, run_benchmark
@@ -1159,6 +1234,8 @@ def _cmd_assess(args: argparse.Namespace) -> int:
     except (NotImplementedError, ValueError) as e:
         print(f"touchstone assess: {e}", file=sys.stderr)
         return 2
+    if args.assess_command == "run":
+        return _assess_run(args, provider)
     dataset = load_dataset(args.dataset)
     observations = (observations_from_monitor(dataset, args.split)
                     if args.with_observations else None)
@@ -1443,7 +1520,11 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         out = Path(args.export_comparisons)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-        print(f"  comparisons: {len(records)} touchstone-comparison/1 record(s) → {out}")
+        executions = sum((r.get("occurrences") or {}).get("executions", 1) for r in records)
+        unread = sum(1 for r in records if "unverified_observations" not in r)
+        print(f"  comparisons: {len(records)} touchstone-comparison/1 record(s), one per "
+              f"distinct judgment, covering {executions} execution(s); {unread} the rules did "
+              f"not read → {out}")
     if args.json_out:
         out = Path(args.json_out)
         out.parent.mkdir(parents=True, exist_ok=True)

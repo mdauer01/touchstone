@@ -446,10 +446,13 @@ def observations_from_monitor(dataset: dict, split: str = "all") -> dict[str, di
     metric_of = {item["id"]: item["metric"] for _, item in chosen}
     out: dict[str, dict] = {}
     for record in result["comparisons"]:
-        iid = record["execution"]["id"]
-        if iid in metric_of and record["definition"]["name"].lower() == metric_of[iid]:
-            obs = {k: v for k, v in record["unverified_observations"].items() if k != "note"}
-            out.setdefault(iid, obs)
+        observed = record.get("unverified_observations")
+        if not observed:
+            continue      # a candidate the rules did not read: the findings below say so
+        for iid in ((record.get("occurrences") or {}).get("execution_ids")
+                    or [record["execution"]["id"]]):
+            if iid in metric_of and record["definition"]["name"].lower() == metric_of[iid]:
+                out.setdefault(iid, {k: v for k, v in observed.items() if k != "note"})
     # A finding with no governed concept (session-dependent identity, an
     # unknown function) made no comparison record — but it IS touchstone's
     # reading of the execution, and the with-observations arm must carry it.
@@ -727,6 +730,72 @@ def run_benchmark(provider, *, dataset: dict | None = None, split: str = "test",
 
 REVIEW_COLUMNS = ("id", "family", "metric", "priority", "session_statements", "sql",
                   "label", "rationale", "reviewer")
+
+
+ADVISORY_NOTE = ("advisory — a model's reading that orders triage; never a finding, a "
+                 "positive verdict or an exit code")
+
+
+def assess_records(provider, records: list[dict], criteria: Criteria | None = None, *,
+                   with_observations: bool = True,
+                   cache: dict | None = None) -> tuple[list[dict], dict]:
+    """Advisory verdicts for exported comparison records (`monitor
+    --export-comparisons`): one per record, i.e. per distinct judgment.
+
+    `cache` maps a cache key to an earlier answered assessment and is updated
+    in place. The key is the record's judgment, the EXACT prompt the provider
+    would send, the provider, its model and the criteria version — so any
+    change of evidence, definition, policy, model or criteria is judged anew,
+    and an unchanged judgment is never paid for twice. Failed calls are not
+    cached. Returns (verdicts, stats)."""
+    from touchstone.assess.providers import render_prompt
+
+    criteria = criteria or load(1)
+    cache = {} if cache is None else cache
+    prepared = []
+    for record in records:
+        sent = record if with_observations else without_observations(record)
+        prompt = render_prompt(sent, criteria)
+        key = hashlib.sha256(json.dumps([
+            record.get("judgment_key") or record["record_id"],
+            hashlib.sha256(prompt.encode()).hexdigest(), provider.name, provider.model,
+            criteria.version]).encode()).hexdigest()
+        prepared.append((record, sent, key))
+    todo = [(sent, key) for _, sent, key in prepared if key not in cache]
+    answered = provider.assess([sent for sent, _ in todo], criteria) if todo else []
+    fresh = {}
+    for (_, key), a in zip(todo, answered):
+        fresh[key] = a.as_dict()
+        if a.error is None:
+            cache[key] = a.as_dict()
+    verdicts = []
+    for record, sent, key in prepared:
+        from_cache = key not in fresh
+        a = cache[key] if from_cache else fresh[key]
+        occ = record.get("occurrences") or {}
+        verdicts.append({
+            "record_id": record["record_id"], "judgment_key": record.get("judgment_key"),
+            "metric": record["definition"]["name"], "view": record["definition"].get("view"),
+            "executions": occ.get("executions", 1),
+            "first_start_time": occ.get("first_start_time"),
+            "last_start_time": occ.get("last_start_time"),
+            "statement": record["execution"]["statement"],
+            "rules_reading": (record.get("unverified_observations") or {}).get("finding_kind"),
+            "label": None if a["error"] else a["label"], "answers": a["answers"],
+            "confidence": a["confidence"], "provider": a["provider"], "model": a["model"],
+            "criteria_version": a["criteria_version"], "error": a["error"],
+            "error_kind": a["error_kind"], "from_cache": from_cache,
+            "observations_sent": "unverified_observations" in sent,
+            "advisory": ADVISORY_NOTE})
+    stats = {
+        "records": len(records),
+        "executions": sum(v["executions"] for v in verdicts),
+        "calls": len(todo), "from_cache": len(records) - len(todo),
+        "labels": dict(Counter(v["label"] for v in verdicts if v["label"])),
+        "failed": dict(Counter(v["error_kind"] for v in verdicts if v["error"])),
+        "without_rules_reading": sum(1 for v in verdicts if v["rules_reading"] is None),
+        "measures_performance": bool(getattr(provider, "measures_performance", False))}
+    return verdicts, stats
 
 
 def review_sheet(dataset: dict) -> list[dict]:

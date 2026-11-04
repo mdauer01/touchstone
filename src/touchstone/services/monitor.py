@@ -85,6 +85,7 @@ from touchstone.services.conformance import (
     check_metric_view,
     check_raw,
     measure_calls,
+    measure_ref,
     metric_view_relation,
     outside_measure_refs,
     raw_shape_problem,
@@ -269,9 +270,15 @@ def monitor_history(
     windows, and any asserted context; without one, `context` applies to
     history rows only when `assert_context` says it covers every execution.
 
-    `export` adds `comparisons`: one touchstone-comparison/1 evidence record
-    per run and governed metric (touchstone.assess.record), for the advisory
-    classifier. Findings, funnel and exit codes are the same either way.
+    `export` adds `comparisons`: touchstone-comparison/1 evidence records
+    (touchstone.assess.record) for the advisory classifier — one per DISTINCT
+    judgment (statement without comments, its session evidence, the governed
+    metric and definition), with the executions it covers. A record exists
+    for every candidate use — a statement that aggregates and names a
+    governed metric or reads its source — whether or not the rules could
+    read it and however often it ran: a measure in a CTE, an ad-hoc run and a
+    shape outside the grammar are exactly the uses the rules leave unread.
+    Findings, funnel and exit codes are the same either way.
     """
     from touchstone.services.pilot import precise_ts
 
@@ -307,6 +314,14 @@ def monitor_history(
     computed_by_hash: dict[str, list[_RefDef]] = {}
     for ref in computed:
         computed_by_hash.setdefault(ref.semantic_hash, []).append(ref)
+    # What each governed relation (a definition's source, or its metric view)
+    # can compute: a statement reading one is a candidate use of these.
+    by_source: dict[str, set[str]] = {}
+    for auth in authorities:
+        for rel in (auth.base_relation, auth.view):
+            if rel:
+                by_source.setdefault(rel.lower(), set()).add(auth.concept)
+    candidates: list = []   # (run, concepts, relations, names, identity source)
 
     # Session context: a row's own catalog/schema, else an asserted one.
     if pilot is not None and pilot.context_asserted:
@@ -393,6 +408,10 @@ def monitor_history(
                 _RUN.set(_run_record(ex, stmt, dialect, events, ri, si, q_catalog, q_schema,
                                      ts, log, depth))
             qualify_tables(stmt, q_catalog, q_schema, depth)
+            if export:
+                found = _candidate(stmt, explicit, by_name, by_source, history_registry)
+                if found is not None:
+                    candidates.append((_RUN.get(), *found))
             if measure_calls(stmt):
                 if any(outside_measure_refs(a) for a in stmt.find_all(exp.AggFunc)):
                     # Raw aggregates beside governed ones: the measure
@@ -497,8 +516,8 @@ def monitor_history(
         "funnel": funnel.as_dict(),
         "findings": findings,
         "recorded": False,  # v1: read-only — nothing written to the store
-        **({"comparisons": _comparisons(judged, by_concept, pilot, history_registry,
-                                         dialect)} if export else {}),
+        **({"comparisons": _comparisons(judged, candidates, by_concept, pilot,
+                                         history_registry)} if export else {}),
     }
 
 
@@ -645,64 +664,174 @@ def _variation_policy(auth: Authority) -> dict:
             "permitted_groupings": [f"{d.name} = {d.expr}" for d in dims] + approved}
 
 
-def _comparisons(judged, by_concept, pilot, registry: SchemaRegistry, dialect: str) -> list:
-    from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, record_id, validate
+def _candidate(stmt: exp.Expression, explicit, by_name: dict, by_source: dict,
+               registry: SchemaRegistry):
+    """(concepts, relations read, names, identity source) when a query may be a
+    use of a governed metric; None when it is not a metric computation or
+    touches nothing governed. Decided from what it NAMES — an explicit tag or
+    asset, MEASURE(m), an output named for the metric (`orders_net_revenue`)
+    — and else from what it READS (a definition's source or metric view),
+    never from whether a measure could be extracted."""
+    calls = measure_calls(stmt)
+    if not calls and stmt.find(exp.AggFunc) is None:
+        return None
+    ctes = {c.alias_or_name.lower() for c in stmt.find_all(exp.CTE)}
+    reads = sorted({registry.canonical_relation(table_fqname(t))
+                    for t in stmt.find_all(exp.Table) if t.name.lower() not in ctes})
+    named: set[str] = set()
+    names: set[str] = set()
+    if explicit:
+        named |= by_name.get(normalize_name(explicit[1]), set())
+        names.add(explicit[1])
+    for call in calls:
+        _, arg = measure_ref(call)
+        if isinstance(arg, exp.Column) and normalize_name(arg.name) in by_name:
+            named |= by_name[normalize_name(arg.name)]
+            names.add(arg.name)
+    for proj in getattr(stmt, "selects", []):
+        alias = normalize_name(proj.alias_or_name or "")
+        for metric, concepts in by_name.items():
+            if alias and (alias == metric or alias.startswith(metric + "_")
+                          or alias.endswith("_" + metric) or f"_{metric}_" in alias):
+                named |= concepts
+                names.add(proj.alias_or_name)
+    concepts = named or set().union(*(by_source.get(r.lower(), set()) for r in reads))
+    if not concepts:
+        return None
+    source = (explicit[0] if explicit and explicit[0] in _IDENTITY_SOURCES
+              else "output" if names else "none")
+    return sorted(concepts), reads, sorted(names), source
+
+
+def _normalized_text(text: str) -> str:
+    """The statement as it decides a judgment: comments removed, whitespace
+    outside quotes collapsed. A BI tool's per-run context comment (user id,
+    history slug) made every run of one dashboard tile a new statement — and
+    a new paid model call. Quoted text is kept byte for byte."""
+    out, i, n, quote = [], 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+        elif c in "'\"`":
+            quote = c
+            out.append(c)
+            i += 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            if out and out[-1] != " ":
+                out.append(" ")
+        elif c.isspace():
+            if out and out[-1] != " ":
+                out.append(" ")
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out).strip()
+
+
+def _comparisons(judged, candidates, by_concept, pilot, registry: SchemaRegistry) -> list:
+    """One record per judgment key: the comment-free statement, its session
+    evidence and the definition it is compared with. Every execution of the
+    same judgment is counted in `occurrences` instead of becoming a record of
+    its own — a dashboard tile run 500 times is one judgment. touchstone's
+    reading is attached when the rules judged the use; a candidate the rules
+    did not read (a nested measure, a single run, an unreadable shape) is
+    exported without it, so the classifier still sees it."""
+    from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, validate
 
     specs = {(v.name, s.name.lower()): (v, s)
              for v in (pilot.views if pilot is not None else []) for s in v.specs}
-    out, seen = [], set()
+    records: dict[str, dict] = {}
+    runs_of: dict[str, dict] = {}
+
+    def add(run, defs, relations, names, source, observations):
+        ts = run["execution"]["start_time"]
+        auth = next((a for a in defs if a.applies_at(ts)), defs[0])
+        view, spec = specs.get((auth.view, (auth.measure or "").lower()), (None, None))
+        key = hashlib.sha256(json.dumps([
+            _normalized_text(run["execution"]["statement"]), run["execution"]["dialect"],
+            run["session_evidence"], auth.label, auth.applies_from,
+            view.sha256 if view is not None else None], sort_keys=True).encode()).hexdigest()
+        seen = runs_of.setdefault(key, {})
+        seen.setdefault(run["execution"]["id"] or f"run:{id(run)}", ts)
+        record = records.get(key)
+        if record is not None:
+            if observations and "unverified_observations" not in record:
+                record["unverified_observations"] = observations
+            return
+        snapshot = view.snapshot.read_text(encoding="utf-8") if view is not None else None
+        records[key] = {
+            "format": FORMAT,
+            "record_id": "cmp_" + key[:16],
+            "judgment_key": key,
+            "execution": run["execution"],
+            "claimed_metric": {"name": names[0] if names else None, "identity_evidence": [
+                {"source": source if source in _IDENTITY_SOURCES else "none",
+                 "value": n} for n in names] or [{"source": "none", "value": None}]},
+            "definition": {
+                "system": auth.system, "view": auth.view, "name": auth.measure or auth.name,
+                "expr": (spec.expr if spec is not None and spec.expr
+                         else auth.core.measure_expr),
+                "source": auth.base_relation,
+                "required_filters": (list(spec.filters) if spec is not None
+                                     else list(auth.core.filters)),
+                "dimensions": [f"{d.name} = {d.expr}" for d in (auth.dimensions or [])],
+                "snapshot_text": snapshot,
+                "snapshot_sha256": view.sha256 if view is not None else None,
+                "applies": {"from": auth.applies_from, "to": auth.applies_to},
+                "variation_policy": _variation_policy(auth)},
+            "schemas": _record_schemas(relations, auth, registry),
+            "session_evidence": {**run["session_evidence"], "unresolved": sorted(
+                r for r in relations if len(r.split(".")) < registry.estate_depth())},
+            **({"unverified_observations": observations} if observations else {}),
+        }
+
     for f, obs in judged:
         concept = f.get("concept")
         defs = by_concept.get(concept) if concept else None
         if not defs:
             continue      # nothing authoritative to compare with
+        observations = {
+            "note": OBSERVATIONS_NOTE, "finding_kind": f["kind"],
+            "reasons": list(f.get("reasons") or []),
+            "suspected": list(f.get("suspected") or []),
+            "variation": f.get("variation"),
+            "calculation_matches": f.get("calculation_matches"),
+            "experimental": f.get("experimental")}
         for run in obs.runs:
-            ts = run["execution"]["start_time"]
-            auth = next((a for a in defs if a.applies_at(ts)), defs[0])
-            key = (run["execution"]["id"], run["execution"]["statement"], auth.label)
-            if key in seen:
-                continue
-            seen.add(key)
-            view, spec = specs.get((auth.view, (auth.measure or "").lower()), (None, None))
-            snapshot = view.snapshot.read_text(encoding="utf-8") if view is not None else None
-            names = f.get("names_used") or sorted(obs.names)
-            source = f.get("identity_source")
-            record = {
-                "format": FORMAT,
-                "record_id": record_id(run["execution"]["statement"],
-                                       run["execution"]["id"], auth.label),
-                "execution": run["execution"],
-                "claimed_metric": {"name": names[0] if names else None, "identity_evidence": [
-                    {"source": source if source in _IDENTITY_SOURCES else "none",
-                     "value": n} for n in names] or [{"source": "none", "value": None}]},
-                "definition": {
-                    "system": auth.system, "view": auth.view, "name": auth.measure or auth.name,
-                    "expr": (spec.expr if spec is not None and spec.expr
-                             else auth.core.measure_expr),
-                    "source": auth.base_relation,
-                    "required_filters": (list(spec.filters) if spec is not None
-                                         else list(auth.core.filters)),
-                    "dimensions": [f"{d.name} = {d.expr}" for d in (auth.dimensions or [])],
-                    "snapshot_text": snapshot,
-                    "snapshot_sha256": view.sha256 if view is not None else None,
-                    "applies": {"from": auth.applies_from, "to": auth.applies_to},
-                    "variation_policy": _variation_policy(auth)},
-                "schemas": _record_schemas(obs.relations, auth, registry),
-                "session_evidence": {**run["session_evidence"], "unresolved": sorted(
-                    r for r in obs.relations
-                    if len(r.split(".")) < registry.estate_depth())},
-                "unverified_observations": {
-                    "note": OBSERVATIONS_NOTE, "finding_kind": f["kind"],
-                    "reasons": list(f.get("reasons") or []),
-                    "suspected": list(f.get("suspected") or []),
-                    "variation": f.get("variation"),
-                    "calculation_matches": f.get("calculation_matches"),
-                    "experimental": f.get("experimental")},
-            }
-            errors = validate(record)
-            if errors:   # never hand a classifier a malformed record
-                raise ValueError(f"comparison record does not validate: {errors}")
-            out.append(record)
+            add(run, defs, obs.relations, f.get("names_used") or sorted(obs.names),
+                f.get("identity_source"), observations)
+    for run, concepts, relations, names, source in candidates:
+        for concept in concepts:
+            defs = by_concept.get(concept)
+            if defs and run is not None:
+                add(run, defs, relations, names, source, None)
+    out = []
+    for key, record in records.items():
+        runs = runs_of[key]
+        times = sorted(t for t in runs.values() if t)
+        record["occurrences"] = {
+            "executions": len(runs),
+            "execution_ids": [i for i in runs if not i.startswith("run:")][:_SAMPLE],
+            "first_start_time": times[0] if times else None,
+            "last_start_time": times[-1] if times else None}
+        errors = validate(record)
+        if errors:   # never hand a classifier a malformed record
+            raise ValueError(f"comparison record does not validate: {errors}")
+        out.append(record)
     return out
 
 

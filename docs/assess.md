@@ -14,7 +14,7 @@ an exit code.
 
 | part | where | what it does |
 |---|---|---|
-| Evidence record `touchstone-comparison/1` | `src/touchstone/assess/schema.json`, `record.py` | One record per metric use, produced by `touchstone monitor --export-comparisons out.jsonl`. It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, and the session statements before it. touchstone's reading follows **last**, as `unverified_observations`, and can be removed for the ablation. |
+| Evidence record `touchstone-comparison/1` | `src/touchstone/assess/schema.json`, `record.py` | One record per distinct judgment of a candidate metric use, produced by `touchstone monitor --export-comparisons out.jsonl` (see "From query history to verdicts" below). It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, the session statements before it, and the executions it covers. touchstone's reading follows **last**, as `unverified_observations`, when the rules read the use; it can be removed for the ablation. |
 | Criteria v1 | `assess/criteria/v1.yaml` | One narrow question per component (identity, formula, population, grain, source), each answerable `unknown`. Fixed code turns the answers into `suspected_drift`, `insufficient_evidence` or `likely_permitted`; the model never chooses the label. |
 | Providers | `assess/providers/` | `assess(records, criteria) -> assessments`, a config model, `render_prompt` (the evidence order every model-backed provider uses), the deterministic `fake`, and **Databricks** (`databricks.py`, described below). |
 | Labeled metric uses | `src/touchstone/benchmark/metric_uses/` | 60 synthetic items in 9 query families. Labels are written from the business definitions and policy in its README, never from touchstone output. They are model-authored and model-reviewed (a blind model pass, adjudicated in `adjudication.yaml`), and have not yet been reviewed by a human. The split is by family: tune on `dev`, report `test`. |
@@ -195,6 +195,34 @@ touchstone assess benchmark --provider databricks --model databricks-gpt-oss-120
   `scored`/`of`, and the source of the confidence: for Databricks, self-reported by the
   model, defined in the prompt as its probability that every answer is correct. It is a
   self-report, not a probability the model computed.
+
+## From query history to verdicts
+
+```bash
+touchstone monitor --pilot <package> --sql-dir <models> --export-comparisons uses.jsonl
+touchstone assess run --provider databricks --model <endpoint> --endpoint <warehouse-id> \
+  --batch-size 20 --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
+```
+
+- **Which statements are candidates.** A query that aggregates and either names a
+  governed metric (a query tag or asset, `MEASURE(m)`, or an output named for it, such as
+  `orders_net_revenue`) or reads a governed source or metric view. Whether the rules
+  could extract a measure does not matter, and neither does how often it ran. Before
+  this, the export held only recurring uses the rules had read. On the first real-history
+  pilot (Free Edition, 2026-11-04) that was 47 of 161 distinct statements: none of the 24
+  that compute the metric in a CTE, and 8 of the 102 that ran once. Now it is 161 of 161.
+- **One record per judgment.** The key is the statement without comments and with
+  whitespace collapsed outside quotes, its dialect and session evidence, and the
+  definition it is compared with. Every execution sharing it is counted in `occurrences`.
+  A BI tool's per-run context comment no longer makes each run a new statement. A
+  changed literal is a new judgment.
+- **`assess run`.** One call per record, so per distinct judgment. A cache keyed on the
+  judgment, the exact prompt, the provider, the model and the criteria version reuses
+  every unchanged judgment; failed calls are not cached. Verdicts are advisory: they
+  never become a finding, a positive verdict or an exit code.
+- **A known gap.** A statement that reads a governed source but names no metric is
+  paired with every metric defined on that source. Criteria v1 has no "not a use of this
+  metric" answer, so such pairs can read as drift.
 
 ## What comes next
 
