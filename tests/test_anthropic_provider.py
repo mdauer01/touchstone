@@ -116,3 +116,15 @@ def test_a_refused_credential_stops_the_calls_and_keeps_what_was_answered(record
     assert out[0].error is None
     assert out[1].error_kind == "credential refused" and p.stop_kind == "credential refused"
     assert out[2].error_kind == "not attempted" and len(client.calls) == 2
+
+
+def test_an_empty_credit_balance_stops_the_calls(records):
+    class BadRequestError(Exception):
+        status_code = 400
+
+    client = Client([BadRequestError("Your credit balance is too low to access the "
+                                     "Anthropic API.")])
+    p = provider(client, concurrency=1)
+    out = p.assess(records, load())
+    assert out[0].error_kind == "no credit" and p.stop_kind == "no credit"
+    assert [a.error_kind for a in out[1:]] == ["not attempted"] * 2 and len(client.calls) == 1

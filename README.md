@@ -366,8 +366,8 @@ Bring your own model: inside your data platform through Databricks (`ai_query`, 
 against a real workspace) or Snowflake (Cortex `AI_COMPLETE`), or with an API key through
 Anthropic or any OpenAI-compatible server (OpenAI, a LiteLLM proxy, vLLM, Groq, Ollama).
 `--model` is always yours to choose; [docs/assess.md](docs/assess.md) lists how the measured
-models did, and the Snowflake and API backends are tested against scripted responses only so
-far. A deterministic fake measures nothing. Records whose comments carry prompt-like steering text are held for a
+models did, and the Snowflake and OpenAI backends are tested against scripted responses only
+so far. A deterministic fake measures nothing. Records whose comments carry prompt-like steering text are held for a
 person, not sent. `touchstone assess benchmark` scores a backend on 66 labeled metric
 uses; a further 114 uses in `benchmark/metric_uses_exec` carry the queries their labels
 were checked against by execution.

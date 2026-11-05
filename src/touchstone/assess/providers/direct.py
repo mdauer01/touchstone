@@ -77,9 +77,13 @@ class DirectProvider:
                           round((self._clock() - started) * 1000, 1))
         except Exception as e:  # noqa: BLE001 — one record never ends the run
             kind = error_kind(e)
+            # Every later call would fail the same way: stop calling.
             if kind == "credential refused":
                 self.credential_refused = f"{type(e).__name__}: the API refused the credential"
                 self.stopped, self.stop_kind = self.credential_refused, kind
+            elif kind == "no credit":
+                self.stopped = f"{type(e).__name__}: the account's credit balance is too low"
+                self.stop_kind = kind
             return result({}, None, f"{type(e).__name__}: {str(e)[:300]}", kind,
                           round((self._clock() - started) * 1000, 1))
 
@@ -89,6 +93,8 @@ def error_kind(e: Exception) -> str:
     name = type(e).__name__
     if name in ("AuthenticationError", "PermissionDeniedError", "CredentialsError"):
         return "credential refused"
+    if "credit balance" in str(e).lower() or "insufficient_quota" in str(e).lower():
+        return "no credit"
     status = getattr(e, "status_code", None)
     if isinstance(status, int):
         return f"HTTP {status}"

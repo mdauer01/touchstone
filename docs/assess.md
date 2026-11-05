@@ -212,7 +212,7 @@ or logs it.
 |---|---|---|---|
 | `databricks` | `ai_query` in your workspace (above) | `DATABRICKS_TOKEN`, or a `databricks auth login` profile | yes (Free Edition, open models) |
 | `snowflake` | Cortex `AI_COMPLETE` in your account | `SNOWFLAKE_TOKEN`: a programmatic access token, OAuth token or key-pair JWT | not yet |
-| `anthropic` | Anthropic's API | `ANTHROPIC_API_KEY`, or an `ant auth login` profile | not yet |
+| `anthropic` | Anthropic's API | `ANTHROPIC_API_KEY`, or an `ant auth login` profile | yes |
 | `openai` | OpenAI's API, or any server that speaks it: a LiteLLM proxy, vLLM, Groq, Ollama | `OPENAI_API_KEY` | not yet |
 
 The warehouse backends keep the statements and definitions inside your own platform and
@@ -285,23 +285,32 @@ touchstone assess run --provider openai --base-url https://litellm.example.com/v
 
 ## Choosing a model
 
-Any model can be used; not every model judges well. On the 174-use study:
+Any model can be used; not every model judges well. Measured live on 2026-11-04 with
+criteria v2 over both labeled sets (180 uses: 83 drift, 76 permitted):
 
-| model | where it ran | labels matched (of 174) | price per million tokens (in / out) | about per judgment |
-|---|---|---|---|---|
-| Claude Opus 5.5 | Anthropic | 167 | $4 / $20 | 2¢ |
-| Claude Sonnet | Anthropic | 166 | $2 / $10 (Sonnet 5.5) | 1¢ |
-| Claude Haiku | Anthropic | 165 | $0.10 / $0.50 (Haiku 5.5) | under 0.1¢ |
-| gpt-oss-120b | Databricks Free Edition | 132 | workspace pricing | — |
-| Qwen3.5-122B | Databricks Free Edition | 125 | workspace pricing | — |
+| model | where it ran | exact (of 180) | drift called permitted | permitted confirmed (of 76) | cost for the 180 |
+|---|---|---|---|---|---|
+| Claude Haiku 5.5 | Anthropic API | **159** | **2** | 71 | $0.11 |
+| gpt-oss-120b | Databricks Free Edition | 139 | 9 | 60 | workspace pricing |
+| Qwen3-Next-80B | Databricks Free Edition | 114 | 28 | 55 | workspace pricing |
+| Llama 4 Maverick | Databricks Free Edition | 86 | 20 | 35 | workspace pricing |
+
+An earlier study run (174 uses, criteria v1) put Claude Opus 5.5 at 167, Claude Sonnet at
+166 and Claude Haiku at 165. Prices per million tokens (input / output): Opus 5.5 $4 / $20,
+Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50.
 
 - These are agreement with model-written labels on synthetic uses, not accuracy on a real
-  estate. The Sonnet and Haiku runs did not record the model version.
-- The cost per judgment assumes about 2,000 input tokens and a few hundred output tokens.
-  Duplicates are collapsed before judging, so a warehouse pays per distinct statement,
-  not per execution.
-- Claude Haiku is the best value measured so far. The same models served inside Databricks
-  or Snowflake are billed through the platform instead.
+  estate. Duplicates are collapsed before judging, so a warehouse pays per distinct
+  statement, not per execution.
+- **On real history, approve with a second model.** On the pilot (162 distinct
+  statements), Haiku called a `JOIN` to `order_items` permitted; executed, it overstates
+  net revenue by 42% (up to three items per order). Sonnet 5.5 and Opus 5.5 both withheld
+  approval on it. Of the 12 statements gpt-oss-120b flagged and Haiku permitted, Sonnet
+  confirmed 10 and withheld exactly the two risky ones. Until escalation is built in, run
+  a stronger model over the uses a cheap one calls `likely_permitted`.
+- The same models served inside Databricks or Snowflake are billed through the platform
+  instead. Databricks Free Edition serves no Claude or GPT model, and some of its endpoints
+  (DeepSeek V4 Flash) are not enabled for `ai_query` at all.
 - **Measure the model you choose before trusting it:**
 
 ```bash
