@@ -380,8 +380,8 @@ are model-written (execution-checked where execution can decide), and no human h
 reviewed them, so these figures describe agreement with those labels on this synthetic
 set, not accuracy on a real estate. On an independent live test (SQL written by
 Databricks Genie against governed views on the Databricks sample data, labeled before
-the verdicts and scored once), gpt-6-luna caught 21 of 21 drifts, called none of them
-permitted, and raised 4 false alarms on 20 permitted uses. See [docs/assess.md](docs/assess.md).
+the verdicts and scored once, in two rounds of 90 statements), gpt-6-luna caught 36 of
+36 drifts, called none of them permitted, and raised 4 false alarms on 36 permitted uses. See [docs/assess.md](docs/assess.md).
 
 ### Agents Schema: claims in, receipts out
 

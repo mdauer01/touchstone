@@ -372,6 +372,30 @@ output names such as `eu_revenue`).
 - Cost: under a tenth of a cent per distinct statement, and no extra warehouse compute:
   only the history export reads the warehouse.
 
+**A second fresh test, other variations** (same frozen configuration, labels locked
+before the verdicts, scored once): a third domain (`sales` on `samples.bakehouse`, no
+required filter, a declared join to franchises, three measures) and two-turn Genie
+conversations on TPC-H and NYC taxi, where the follow-up ("now only for ASIA", "add a
+running total", "only the top 5, with their share") rewrites the first answer's SQL.
+
+| second fresh test | bakery | TPC-H follow-ups | NYC follow-ups | total |
+|---|---|---|---|---|
+| drifts caught | 5 of 5 | 2 of 2 | 8 of 8 | **15 of 15** |
+| drifts called permitted | 0 | 0 | 0 | **0** |
+| false alarms | 0 of 8 | 0 of 6 | 0 of 2 | **0 of 16** |
+
+- One kind of noise remains: an aggregate over the governed source that names no metric
+  is paired with every measure on it, and three such pairings ("average transaction
+  value" checked against `units` and `transactions`) were called drift instead of not a
+  use. Pairing a statement only with measures whose columns it aggregates would remove
+  them; that is candidate selection, not the judge.
+- Genie wrote `country ILIKE '%US%'` for "US franchises", which also matches Australia.
+  It is a filter on a declared dimension, so it conforms to the definition: touchstone
+  checks conformance to the definition, not whether the business question was answered.
+
+Across both fresh tests (90 Genie statements): 36 of 36 drifts caught, none called
+permitted, 4 false alarms on 36 permitted uses, plus 4 cross-metric pairings flagged.
+
 The labels are one model author's, written from the definitions before the verdicts;
 no person has reviewed them.
 
