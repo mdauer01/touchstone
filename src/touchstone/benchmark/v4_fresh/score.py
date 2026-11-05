@@ -68,7 +68,9 @@ def score(sheet_path: str, verdicts_path: str) -> dict:
     scored = [(rows[k], verdicts[k]) for k in rows if k in verdicts]
     model_alerts = [(h, v) for h, v in scored if v.get("treatment") == "alert"]
     human_alerts = [(h, v) for h, v in scored if _human_alert(h) == "alert"]
-    changed = lambda h: CORE & {x.strip() for x in (h.get("what_changed") or "").split(";")}
+    def changed(h: dict) -> set:
+        return CORE & {x.strip() for x in (h.get("what_changed") or "").split(";")}
+
     missed = [(h, v) for h, v in human_alerts if changed(h) and v.get("treatment") != "alert"]
     investigations = [(h, v) for h, v in scored
                       if {x.strip() for x in (h.get("what_changed") or "").split(";")} <= SLICES
