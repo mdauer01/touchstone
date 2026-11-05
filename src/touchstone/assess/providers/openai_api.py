@@ -85,6 +85,11 @@ class OpenAIProvider(DirectProvider):
         if self.temperature is not None and not 0.0 <= self.temperature <= 2.0:
             raise ValueError("openai provider: temperature must be between 0 and 2")
         self.effort = options.get("effort")
+        # "flex": OpenAI's slower, half-price processing — fine for a monitor
+        # that judges query history in the background.
+        self.service_tier = options.get("service_tier")
+        if self.service_tier not in (None, "auto", "default", "flex"):
+            raise ValueError("openai provider: service tier must be auto, default or flex")
         self.decisions = bool(options.get("decisions"))
         if self.decisions:
             if self.base_url:
@@ -127,6 +132,8 @@ class OpenAIProvider(DirectProvider):
             kwargs["temperature"] = self.temperature
         if self.effort:
             kwargs["reasoning_effort"] = self.effort
+        if self.service_tier:
+            kwargs["service_tier"] = self.service_tier
         response = self._client.chat.completions.create(**kwargs)
         choices = getattr(response, "choices", None) or []
         if not choices:

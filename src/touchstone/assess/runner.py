@@ -362,7 +362,9 @@ def build_record(dataset: dict, item: dict, observations: dict | None = None) ->
             "snapshot_sha256": hashlib.sha256(d["view"].encode()).hexdigest(),
             "applies": d.get("applies"),
             "stated_facts": list(d.get("stated_facts") or []),
-            "variation_policy": variation_policy(dataset)},
+            "variation_policy": variation_policy(dataset),
+            **({"approved_variations": list(d["approved_variations"])}
+               if d.get("approved_variations") else {})},
         "schemas": _schemas(dataset, item),
         "session_evidence": {"context": session_reads(dataset, item)[1],
                              "events": _session_events(item),

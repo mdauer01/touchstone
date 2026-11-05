@@ -136,6 +136,14 @@ class Provider(Protocol):
 
 
 def get_provider(config: ProviderConfig) -> Provider:
+    provider = _make_provider(config)
+    votes = int((config.options or {}).get("votes") or 1)
+    if votes < 1 or votes > 9:
+        raise ValueError("votes must be between 1 and 9")
+    return ConfirmFlags(provider, votes) if votes > 1 else provider
+
+
+def _make_provider(config: ProviderConfig) -> Provider:
     if config.kind == "fake":
         from touchstone.assess.providers.fake import FakeProvider
 
@@ -159,6 +167,49 @@ def get_provider(config: ProviderConfig) -> Provider:
     raise NotImplementedError(f"the {config.kind} provider is not implemented")
 
 
+class ConfirmFlags:
+    """Votes on drift flags. Every record a first pass labels suspected_drift
+    is asked `votes - 1` more times, and the flag stands when at least half of
+    the answered votes are drift (a tie keeps it). Part of what a model flags
+    changes from run to run on the same statement; a flag that a majority of
+    independent answers repeats is the one worth a person's time. Only flags
+    are re-asked, so the extra cost follows them, and nothing the first pass
+    did not flag can become a flag."""
+
+    def __init__(self, inner: Provider, votes: int):
+        self._inner, self.votes = inner, votes
+        self.name = f"{inner.name}+votes{votes}"
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+    def assess(self, records: list[dict], criteria: Criteria) -> list[Assessment]:
+        first = self._inner.assess(records, criteria)
+        flagged = [r for r, a in zip(records, first)
+                   if a.error is None and a.label == "suspected_drift"]
+        if not flagged:
+            return first
+        again: dict[str, list[Assessment]] = {}
+        for _ in range(self.votes - 1):
+            for a in self._inner.assess(flagged, criteria):
+                again.setdefault(a.record_id, []).append(a)
+        out = []
+        for a in first:
+            if a.error is not None or a.label != "suspected_drift":
+                out.append(a)
+                continue
+            answered = [a] + [v for v in again.get(a.record_id, []) if v.error is None]
+            drift = sum(v.label == "suspected_drift" for v in answered)
+            if 2 * drift >= len(answered):
+                out.append(a)
+                continue
+            others = [v for v in answered if v.label != "suspected_drift"]
+            common = max({v.label for v in others},
+                         key=lambda label: sum(v.label == label for v in others))
+            out.append(next(v for v in others if v.label == common))
+        return out
+
+
 def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]:
     """From criteria v3: the parts every v3 request is made of — what is the
     same for every record (instructions, policy, questions), the definition
@@ -175,6 +226,7 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
                                                           "required_filters", "dimensions")},
                            indent=1)
     facts = definition.get("stated_facts") or []
+    approved = definition.get("approved_variations") or []
     evidence = (record.get("claimed_metric") or {}).get("identity_evidence") or []
     named = "; ".join(f"{e.get('source')}: {e.get('value')}" for e in evidence
                       if isinstance(e, dict)) or "no output name, tag or asset names a metric"
@@ -196,11 +248,25 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
         "definition": f"## Authoritative definition of {definition.get('name')}"
                       + (f" (governed view {definition['view']})" if definition.get("view")
                          else "")
-                      + f"\n{truth}" + "".join(f"\nStated fact: {f}" for f in facts),
+                      + f"\n{truth}" + "".join(f"\nStated fact: {f}" for f in facts)
+                      + ("\nVariations the metric's owner approved (each is permitted, "
+                         "whatever the policy says):" + "".join(f"\n- {v}" for v in approved)
+                         if approved else ""),
         "statement": "## How the statement names its result\n" + named + "\n\n"
-                     f"## Statement as it ran ({record['execution'].get('dialect')})\n"
+                     + _column_types(record)
+                     + f"## Statement as it ran ({record['execution'].get('dialect')})\n"
                      f"<<<DATA {nonce}>>>\n{json.dumps(statement)}\n<<<END {nonce}>>>",
     }
+
+
+def _column_types(record: dict) -> str:
+    """The declared type of every column of the tables the statement reads
+    (from the catalog the package carries): a DATE truncated to the day is the
+    same date, a BIGINT key is not text. Types only, never data."""
+    lines = [f"{table}: " + ", ".join(f"{c} {t}" for c, t in cols.items())
+             for table, cols in (record.get("schemas") or {}).items() if cols]
+    return ("## Column types of the tables it reads\n" + "\n".join(lines) + "\n\n"
+            if lines else "")
 
 
 def _render_against_definition(record: dict, criteria: Criteria) -> str:

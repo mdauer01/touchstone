@@ -792,7 +792,9 @@ def _comparisons(judged, candidates, by_concept, pilot, registry: SchemaRegistry
                 "snapshot_text": snapshot,
                 "snapshot_sha256": view.sha256 if view is not None else None,
                 "applies": {"from": auth.applies_from, "to": auth.applies_to},
-                "variation_policy": _variation_policy(auth)},
+                "variation_policy": _variation_policy(auth),
+                **({"approved_variations": list(view.approved_variations)}
+                   if view is not None and view.approved_variations else {})},
             "schemas": _record_schemas(relations, auth, registry),
             "session_evidence": {**run["session_evidence"], "unresolved": sorted(
                 r for r in relations if len(r.split(".")) < registry.estate_depth())},

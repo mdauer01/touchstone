@@ -117,3 +117,39 @@ def test_a_steering_record_is_held_and_never_sent(dataset):
     held = verdicts[1]
     assert held["label"] is None and held["error_kind"] == "steering suspected"
     assert stats["held"] == 1 and stats["calls"] == 1 and stats["from_cache"] == 0
+
+
+def test_votes_keep_a_flag_only_when_half_the_answers_repeat_it():
+    from touchstone.assess.providers import Assessment, ConfirmFlags
+
+    class Scripted:
+        name, model, measures_performance = "scripted", "m", True
+
+        def __init__(self, rounds):
+            self.rounds, self.calls = list(rounds), []
+
+        def assess(self, records, criteria):
+            labels = self.rounds.pop(0)
+            self.calls.append([r["record_id"] for r in records])
+            return [Assessment(record_id=r["record_id"], provider="scripted", model="m",
+                               criteria_version=3, answers={}, label=labels[r["record_id"]])
+                    for r in records]
+
+    recs = [{"record_id": i} for i in ("a", "b", "c")]
+    inner = Scripted([{"a": "suspected_drift", "b": "suspected_drift", "c": "likely_permitted"},
+                      {"a": "suspected_drift", "b": "likely_permitted"},
+                      {"a": "likely_permitted", "b": "likely_permitted"}])
+    out = ConfirmFlags(inner, 3).assess(recs, load())
+    assert [x.label for x in out] == ["suspected_drift", "likely_permitted", "likely_permitted"]
+    # Only the first pass's flags are asked again.
+    assert inner.calls[1:] == [["a", "b"], ["a", "b"]]
+
+
+def test_approved_variations_reach_the_prompt_with_the_definition(dataset):
+    base = record(dataset, "slices-01")
+    rec = {**base, "definition": {**base["definition"],
+                                  "approved_variations": ["IS NOT NULL guards on the measure's columns"]}}
+    prompt = render_prompt(rec, load())
+    assert "Variations the metric's owner approved" in prompt
+    assert "- IS NOT NULL guards on the measure's columns" in prompt
+    assert "owner approved" not in render_prompt(base, load())

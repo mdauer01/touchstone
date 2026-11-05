@@ -395,6 +395,12 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--base-url", dest="base_url",
                        help="openai: the server's API URL — a LiteLLM proxy, vLLM, Groq, "
                             "Ollama (or OPENAI_BASE_URL; default: OpenAI's API)")
+        p.add_argument("--service-tier", dest="service_tier", choices=["auto", "default", "flex"],
+                       help="openai: processing tier; flex is half price and slower")
+        p.add_argument("--votes", type=int, default=1,
+                       help="ask every statement flagged as drift this many times in all, "
+                            "and keep the flag when at least half the answers agree "
+                            "(default 1: no re-asking)")
         p.add_argument("--decisions", action="store_true",
                        help="openai: send each record to OpenAI's Decisions API (typed "
                             "answers with a probability for each; gpt-6-luna) instead of "
@@ -1251,9 +1257,9 @@ def _cmd_assess(args: argparse.Namespace) -> int:
 
     try:
         options = {"seed": args.seed, "batch_size": args.batch_size,
-                   "decisions": args.decisions}
+                   "decisions": args.decisions, "votes": args.votes}
         for name in ("host", "profile", "base_url", "max_tokens", "temperature", "effort",
-                     "concurrency"):
+                     "concurrency", "service_tier"):
             if getattr(args, name) is not None:
                 options[name] = getattr(args, name)
         provider = get_provider(ProviderConfig(args.provider, model=args.model,

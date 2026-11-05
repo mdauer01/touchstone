@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:touchstone:schema:comparison:1",
   "title": "touchstone-comparison/1",
-  "description": "One metric use: what ran, the authoritative definition it is compared with, and — only as explicitly unverified observations — what touchstone extracted. The original statement and the definition come first; nothing touchstone concluded is stated as fact.",
+  "description": "One metric use: what ran, the authoritative definition it is compared with, and \u2014 only as explicitly unverified observations \u2014 what touchstone extracted. The original statement and the definition come first; nothing touchstone concluded is stated as fact.",
   "type": "object",
   "required": [
     "format",
@@ -29,13 +29,32 @@
     "occurrences": {
       "type": "object",
       "description": "the executions this judgment covers; `execution` is the first of them",
-      "required": ["executions"],
+      "required": [
+        "executions"
+      ],
       "additionalProperties": false,
       "properties": {
-        "executions": {"type": "integer"},
-        "execution_ids": {"type": "array", "items": {"type": "string"}},
-        "first_start_time": {"type": ["string", "null"]},
-        "last_start_time": {"type": ["string", "null"]}
+        "executions": {
+          "type": "integer"
+        },
+        "execution_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "first_start_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_start_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "execution": {
@@ -225,7 +244,7 @@
             "object",
             "null"
           ],
-          "description": "the rules that decide which variations of the definition are permitted — the classifier answers against these, not against its own idea of a permitted use",
+          "description": "the rules that decide which variations of the definition are permitted \u2014 the classifier answers against these, not against its own idea of a permitted use",
           "required": [
             "source",
             "text"
@@ -257,7 +276,17 @@
           "items": {
             "type": "string"
           },
-          "description": "facts about the data the definition states (nullability, what is NOT stated about keys and integrity) — evidence a label can rest on"
+          "description": "facts about the data the definition states (nullability, what is NOT stated about keys and integrity) \u2014 evidence a label can rest on"
+        },
+        "approved_variations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 20,
+          "description": "Kinds of variation the metric's owner approved, in their words; the advisory judge treats each as permitted."
         }
       }
     },
@@ -295,7 +324,7 @@
           "items": {
             "type": "string"
           },
-          "description": "relations the statement reads whose name no recorded session context resolved to a full name (fewer parts than the estate's names) — their identity is not known"
+          "description": "relations the statement reads whose name no recorded session context resolved to a full name (fewer parts than the estate's names) \u2014 their identity is not known"
         }
       }
     },
@@ -304,7 +333,7 @@
         "object",
         "null"
       ],
-      "description": "touchstone's extracted differences, refusal reasons and suspected items — UNVERIFIED; omitted for the ablation",
+      "description": "touchstone's extracted differences, refusal reasons and suspected items \u2014 UNVERIFIED; omitted for the ablation",
       "required": [
         "note"
       ],
