@@ -26,7 +26,16 @@ from sqlglot import exp
 
 FIELDS = ("statement_id", "statement_text", "start_time", "executed_by",
           "client_application", "catalog", "schema", "query_tag",
-          "dashboard_id", "genie_space_id", "session_id", "statement_type")
+          "dashboard_id", "genie_space_id", "session_id", "statement_type",
+          "job_id", "alert_id", "notebook_id", "sql_query_id", "pipeline_id",
+          "legacy_dashboard_id")
+# The entities an execution can come from, in the order `asset` names them,
+# with the kind prefix each is reported under. Databricks query history
+# carries them in its `query_source` struct.
+_ASSET_FIELDS = (("alert_id", "alert"), ("job_id", "job"), ("pipeline_id", "pipeline"),
+                 ("dashboard_id", "dashboard"), ("legacy_dashboard_id", "legacy_dashboard"),
+                 ("sql_query_id", "query"), ("notebook_id", "notebook"),
+                 ("genie_space_id", "genie"))
 # Spellings the warehouses' own history tables use for the same facts.
 _ALIASES = {
     "query_id": "statement_id", "query_text": "statement_text",
@@ -53,14 +62,24 @@ class Execution:
     # another execution applies only within one (services.session).
     session_id: str | None = None
     statement_type: str | None = None
+    job_id: str | None = None
+    alert_id: str | None = None
+    notebook_id: str | None = None
+    sql_query_id: str | None = None
+    pipeline_id: str | None = None
+    legacy_dashboard_id: str | None = None
+
+    @property
+    def assets(self) -> list[str]:
+        """Every entity the execution came from, as `kind:id` (a job running a
+        notebook names both). Empty when the history attributes none."""
+        return [f"{kind}:{getattr(self, name)}" for name, kind in _ASSET_FIELDS
+                if getattr(self, name)]
 
     @property
     def asset(self) -> str | None:
-        if self.dashboard_id:
-            return f"dashboard:{self.dashboard_id}"
-        if self.genie_space_id:
-            return f"genie:{self.genie_space_id}"
-        return None
+        assets = self.assets
+        return assets[0] if assets else None
 
 
 @dataclass
@@ -119,9 +138,13 @@ def from_records(records: list[dict], source: str = "", fmt: str = "records") ->
             if k == "query_source" and isinstance(value, dict):
                 # Databricks system.query.history carries the entity ids in a
                 # struct; exported as JSON it arrives nested.
-                for sub in ("dashboard_id", "genie_space_id"):
-                    if value.get(sub) is not None:
+                for sub, _kind in _ASSET_FIELDS:
+                    if sub != "job_id" and sub != "pipeline_id" and value.get(sub) is not None:
                         row[sub] = value[sub]
+                for nested, sub in (("job_info", "job_id"), ("pipeline_info", "pipeline_id")):
+                    inner = value.get(nested)
+                    if isinstance(inner, dict) and inner.get(sub) is not None:
+                        row[sub] = inner[sub]
                 continue
             k = _ALIASES.get(k, k)
             if k in FIELDS:
@@ -148,7 +171,10 @@ def from_records(records: list[dict], source: str = "", fmt: str = "records") ->
             dashboard_id=_text(row.get("dashboard_id")),
             genie_space_id=_text(row.get("genie_space_id")),
             session_id=_text(row.get("session_id")),
-            statement_type=_text(row.get("statement_type"))))
+            statement_type=_text(row.get("statement_type")),
+            **{name: _text(row.get(name)) for name in (
+                "job_id", "alert_id", "notebook_id", "sql_query_id", "pipeline_id",
+                "legacy_dashboard_id")}))
     intake.ignored_columns = sorted(ignored)
     return intake
 

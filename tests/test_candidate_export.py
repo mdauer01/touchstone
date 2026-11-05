@@ -118,3 +118,42 @@ def test_assess_run_judges_each_record_once_and_reuses_the_cache(tmp_path, capsy
     assert main(argv) == 0
     assert "calls 0 · from cache 2" in capsys.readouterr().out
     assert all(json.loads(line)["from_cache"] for line in out.read_text().splitlines())
+
+
+def test_dedup_keeps_every_consumption_context_of_the_same_sql(tmp_path):
+    # The review's case: identical SQL run first in the SQL editor, then
+    # behind a dashboard, then by a job. One judgment, three contexts — the
+    # dashboard's and the job's attribution must survive the grouping.
+    rows = [
+        {"statement_id": "e1", "statement_text": GOVERNED, "start_time": "2026-10-03T09:00:00Z",
+         "client_application": "Databricks SQL Editor"},
+        {"statement_id": "d1", "statement_text": GOVERNED, "start_time": "2026-10-04T09:00:00Z",
+         "client_application": "Databricks SQL Dashboard", "dashboard_id": "01ef"},
+        {"statement_id": "d2", "statement_text": GOVERNED, "start_time": "2026-10-05T09:00:00Z",
+         "client_application": "Databricks SQL Dashboard", "dashboard_id": "01ef"},
+        {"statement_id": "j1", "statement_text": GOVERNED, "start_time": "2026-10-06T09:00:00Z",
+         "query_source": {"job_info": {"job_id": "77", "job_run_id": "1"}, "notebook_id": "9"}},
+        {"statement_id": "u1", "statement_text": GOVERNED, "start_time": "2026-10-07T09:00:00Z"},
+    ]
+    (record,) = export(tmp_path, rows)["comparisons"]
+    occ = record["occurrences"]
+    assert occ["executions"] == 5
+    by = {(c["client"], tuple(c["assets"])): c["executions"] for c in occ["contexts"]}
+    assert by == {("Databricks SQL Dashboard", ("dashboard:01ef",)): 2,
+                  ("Databricks SQL Editor", ()): 1,
+                  (None, ("job:77", "notebook:9")): 1,
+                  (None, ()): 1}
+    assert occ["asset_kinds"] == {"dashboard": 2, "unattributed": 2, "job": 1, "notebook": 1}
+
+
+def test_the_same_sql_claimed_as_different_metrics_is_judged_separately(tmp_path):
+    # A query tag is part of how the statement presents its result: the same
+    # SQL tagged as net_revenue in one run is a different assessment input
+    # from the same SQL with no tag.
+    rows = [{"statement_id": "a", "statement_text": NESTED, "start_time": "2026-10-03T09:00:00Z"},
+            {"statement_id": "b", "statement_text": NESTED, "start_time": "2026-10-04T09:00:00Z",
+             "query_tag": "metric=net_revenue"}]
+    records = export(tmp_path, rows)["comparisons"]
+    assert sorted(r["claimed_metric"]["identity_evidence"][0]["source"] for r in records) \
+        == ["output", "query_tag"]
+    assert all(r["occurrences"]["executions"] == 1 for r in records)

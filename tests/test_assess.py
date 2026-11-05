@@ -13,7 +13,7 @@ import socket
 
 import pytest
 
-from touchstone.assess import ADVISORY_LABELS
+from touchstone.assess import ADVISORY_LABELS, ADVISORY_LABELS_V3
 from touchstone.assess.criteria import CHANGED, aggregate, load
 from touchstone.assess.providers import (ProviderConfig, get_provider, render_prompt)
 from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, validate, without_observations
@@ -149,7 +149,7 @@ def test_the_dataset_is_split_by_family_and_labels_every_class(dataset):
     assert items(dataset, "dev") and items(dataset, "test")
     labels = {i["label"] for _, i in items(dataset)}
     assert labels == set(LABELS)
-    assert {gold_advisory(lab) for lab in labels} == set(ADVISORY_LABELS)
+    assert {gold_advisory(lab) for lab in labels} == set(ADVISORY_LABELS_V3)
 
 
 # ------------------------------------------------------------------- runner

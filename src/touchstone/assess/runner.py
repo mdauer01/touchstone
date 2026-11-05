@@ -41,7 +41,7 @@ from sqlglot import exp
 
 from touchstone.adapters.loadutil import load_yaml, parse_yaml
 from touchstone.assess import ADVISORY_LABELS
-from touchstone.assess.criteria import Criteria, guarded, load
+from touchstone.assess.criteria import Criteria, finalize, load
 from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, validate, without_observations
 
 DATASET_DIR = Path(__file__).resolve().parent.parent / "benchmark" / "metric_uses"
@@ -364,7 +364,9 @@ def build_record(dataset: dict, item: dict, observations: dict | None = None) ->
             "stated_facts": list(d.get("stated_facts") or []),
             "variation_policy": variation_policy(dataset),
             **({"approved_variations": list(d["approved_variations"])}
-               if d.get("approved_variations") else {})},
+               if d.get("approved_variations") else {}),
+            **({"prohibited_variations": list(d["prohibited_variations"])}
+               if d.get("prohibited_variations") else {})},
         "schemas": _schemas(dataset, item),
         "session_evidence": {"context": session_reads(dataset, item)[1],
                              "events": _session_events(item),
@@ -646,6 +648,15 @@ def run_benchmark(provider, *, dataset: dict | None = None, split: str = "test",
     baseline."""
     dataset = dataset or load_dataset()
     criteria = criteria or load()
+    if criteria.version >= 4:
+        # v4 decides a treatment from facts and owner rules; these datasets
+        # carry v1–v3 labels (drift / permitted), which do not say whether a
+        # variation is a definition change or an investigation. Scoring v4
+        # against them would report a disagreement about governance as a
+        # classifier error.
+        raise ValueError("criteria v4 is scored on a set labeled for it (what changed, "
+                         "whether it is allowed, whether it warrants an alert); this "
+                         "dataset carries v1-v3 labels")
     chosen = items(dataset, split)
     arms = {"without_observations": None}
     if observations is not None:
@@ -673,7 +684,7 @@ def run_benchmark(provider, *, dataset: dict | None = None, split: str = "test",
         by_record = {r["record_id"]: r for r in records}
         for a in assessments.values():
             if a.error is None and a.record_id in by_record:
-                a.label = guarded(a.label, by_record[a.record_id])
+                a.label, _ = finalize(a.label, a.answers, by_record[a.record_id], criteria)
         rows_all, rows_fam = [], {}
         for (fam, item), record in zip(chosen, records):
             row = _row(gold_advisory(item["label"]), assessments.get(record["record_id"]))
@@ -815,13 +826,25 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
         else:
             from_cache = key not in fresh
             a = cache[key] if from_cache else fresh[key]
+            label, cited = (None, {}) if a["error"] else finalize(a["label"], a["answers"],
+                                                                  record, criteria)
             verdict.update({
-                "label": None if a["error"] else guarded(a["label"], record),
+                "label": label, "treatment": criteria.treatment_of(label),
+                **({"cited_rules": cited} if cited else {}),
                 "answers": a["answers"], "confidence": a["confidence"],
                 "provider": a["provider"], "model": a["model"],
                 "criteria_version": a["criteria_version"], "error": a["error"],
                 "error_kind": a["error_kind"], "from_cache": from_cache})
         verdicts.append(verdict)
+    for v, (record, *_rest) in zip(verdicts, prepared):
+        occ = record.get("occurrences") or {}
+        v["contexts"] = occ.get("contexts") or []
+        v["priority"] = priority(occ)
+    # Review order: alerts, then unresolved, informational, the rest; within a
+    # treatment by the consumption evidence. Ordering only — no verdict moves.
+    order = {"alert": 0, "unresolved": 1, "informational": 2}
+    verdicts.sort(key=lambda v: (order.get(v.get("treatment"), 3), -v["priority"]["rank"],
+                                 v["record_id"]))
     held_count = sum(1 for *_, held in prepared if held is not None)
     stats = {
         "records": len(records),
@@ -829,11 +852,44 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
         "calls": len(todo), "from_cache": len(records) - len(todo) - held_count,
         "held": held_count,
         "labels": dict(Counter(v["label"] for v in verdicts if v["label"])),
+        "treatments": dict(Counter(v.get("treatment") for v in verdicts if v.get("treatment"))),
         "failed": dict(Counter(v["error_kind"] for v in verdicts
                                if v["error"] and v["error_kind"] != "steering suspected")),
         "without_rules_reading": sum(1 for v in verdicts if v["rules_reading"] is None),
         "measures_performance": bool(getattr(provider, "measures_performance", False))}
     return verdicts, stats
+
+
+# Where an execution comes from, as ordering evidence: an alert, job or
+# pipeline runs unattended; a dashboard or saved query is published to
+# readers; a notebook or Genie conversation may or may not be. None of these
+# says what anyone intended, and an execution attributed to nothing is
+# reported as unattributed, never guessed.
+_ASSET_WEIGHT = {"alert": 5, "job": 5, "pipeline": 5, "dashboard": 4, "legacy_dashboard": 4,
+                 "query": 3, "notebook": 2, "genie": 2}
+
+
+def priority(occurrences: dict) -> dict:
+    """Evidence for ordering review, from a judgment's consumption contexts:
+    which kinds of asset ran it, how often and over how many days. `rank`
+    orders verdicts of the same treatment and is never a verdict."""
+    contexts = occurrences.get("contexts") or []
+    executions = int(occurrences.get("executions") or sum(c["executions"] for c in contexts)
+                     or 0)
+    days = {str(t)[:10] for c in contexts for t in (c.get("first_start_time"),
+                                                     c.get("last_start_time")) if t}
+    kinds = occurrences.get("asset_kinds") or {}
+    evidence = [f"{executions} execution(s) over {max(len(days), 1)} day(s)"]
+    for kind, n in sorted(kinds.items(), key=lambda kv: (-_ASSET_WEIGHT.get(kv[0], 0), kv[0])):
+        assets = sorted({a for c in contexts for a in c["assets"] if a.split(":", 1)[0] == kind})
+        evidence.append(f"{n} unattributed execution(s)" if kind == "unattributed"
+                        else f"{n} execution(s) from {kind} {', '.join(a.split(':', 1)[1] for a in assets[:5])}")
+    clients = sorted({c["client"] for c in contexts if c.get("client")})
+    if clients:
+        evidence.append("clients: " + ", ".join(clients[:5]))
+    rank = (max([_ASSET_WEIGHT.get(k, 0) for k in kinds] or [0])
+            + (2 if executions >= 10 else 1 if executions >= 2 else 0) + (1 if len(days) >= 2 else 0))
+    return {"rank": rank, "evidence": evidence}
 
 
 def review_sheet(dataset: dict) -> list[dict]:

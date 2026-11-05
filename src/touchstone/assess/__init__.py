@@ -28,4 +28,10 @@ machinery works; every report says so.
 """
 
 # `not_a_use` (criteria v2+): the statement is not a use of the governed metric.
-ADVISORY_LABELS = ("suspected_drift", "insufficient_evidence", "likely_permitted", "not_a_use")
+# Criteria v1–v3 outcomes, and those v4 adds (facts first; see criteria/v4.yaml).
+ADVISORY_LABELS_V3 = ("suspected_drift", "insufficient_evidence", "likely_permitted",
+                      "not_a_use")
+ADVISORY_LABELS_V4 = ("likely_permitted", "unreviewed_variation", "separate_measure",
+                      "suspected_definition_change", "prohibited_variation",
+                      "insufficient_evidence", "not_a_use")
+ADVISORY_LABELS = tuple(dict.fromkeys(ADVISORY_LABELS_V3 + ADVISORY_LABELS_V4))

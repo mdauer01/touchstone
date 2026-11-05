@@ -35,8 +35,14 @@ SELECT
   client_application,
   session_id,
   statement_type,
-  query_source.dashboard_id   AS dashboard_id,
-  query_source.genie_space_id AS genie_space_id
+  query_source.dashboard_id          AS dashboard_id,
+  query_source.legacy_dashboard_id   AS legacy_dashboard_id,
+  query_source.genie_space_id        AS genie_space_id,
+  query_source.job_info.job_id       AS job_id,
+  query_source.alert_id              AS alert_id,
+  query_source.notebook_id           AS notebook_id,
+  query_source.sql_query_id          AS sql_query_id,
+  query_source.pipeline_info.pipeline_id AS pipeline_id
 FROM system.query.history
 WHERE start_time >= TIMESTAMP '2026-10-01 00:00:00'   -- the pilot window.from
   AND start_time <  TIMESTAMP '2026-10-15 00:00:00'   -- the pilot window.to

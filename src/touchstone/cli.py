@@ -397,6 +397,10 @@ def main(argv: list[str] | None = None) -> int:
                             "Ollama (or OPENAI_BASE_URL; default: OpenAI's API)")
         p.add_argument("--service-tier", dest="service_tier", choices=["auto", "default", "flex"],
                        help="openai: processing tier; flex is half price and slower")
+        p.add_argument("--criteria", type=int, choices=[1, 2, 3, 4],
+                       help="criteria version (default: the latest released, 3); 4 records "
+                            "facts and owner-rule citations and decides by treatment "
+                            "(alert, informational, unresolved, none)")
         p.add_argument("--votes", type=int, default=1,
                        help="ask every statement flagged as drift this many times in all, "
                             "and keep the flag when at least half the answers agree "
@@ -1213,7 +1217,10 @@ def _assess_run(args: argparse.Namespace, provider) -> int:
                     cache[entry["key"]] = entry["assessment"]
     known = set(cache)
     try:
+        from touchstone.assess.criteria import load as load_criteria
+
         verdicts, stats = assess_records(provider, records,
+                                         load_criteria(args.criteria) if args.criteria else None,
                                          with_observations=not args.without_observations,
                                          cache=cache)
     except ProviderError as e:
@@ -1237,6 +1244,8 @@ def _assess_run(args: argparse.Namespace, provider) -> int:
     if stats["held"]:
         print(f"  HELD for a person (not sent — steering text in comments or strings): "
               f"{stats['held']}")
+    if stats.get("treatments"):
+        print("  treatments: " + ", ".join(f"{k} {n}" for k, n in sorted(stats["treatments"].items())))
     print("  labels: " + (", ".join(f"{k} {n}" for k, n in sorted(stats["labels"].items()))
                           or "none"))
     if stats["failed"]:
@@ -1275,8 +1284,11 @@ def _cmd_assess(args: argparse.Namespace) -> int:
     from touchstone.assess.providers import ProviderError
 
     try:
+        from touchstone.assess.criteria import load as load_criteria
+
         report = run_benchmark(provider, dataset=dataset, split=args.split,
-                               observations=observations)
+                               observations=observations,
+                               criteria=load_criteria(args.criteria) if args.criteria else None)
     except ProviderError as e:
         print(f"touchstone assess: {e}", file=sys.stderr)
         return 2

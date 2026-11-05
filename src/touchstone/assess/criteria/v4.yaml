@@ -1,0 +1,112 @@
+# Advisory criteria, version 4: facts first, outcome by fixed code.
+#
+# v3 asked whether a statement equals the definition and called every
+# difference drift, so an analyst slicing fare revenue by trip length was
+# flagged like a broken definition. v4 separates the facts: which metric the
+# result claims to be; whether the calculation, the required eligibility rules
+# and the source rows are preserved; what variation it adds; and which of the
+# OWNER's rules (listed with the definition, cited by id) cover it. The model
+# records facts and cites rules; it never approves or prohibits anything.
+# touchstone.assess.criteria.decide turns the answers into one outcome:
+#
+#   identity not_a_use                     -> not_a_use (guarded)
+#   identity separate_measure              -> separate_measure (guarded)
+#   identity unknown                       -> insufficient_evidence
+#   calculation/eligibility/source_rows
+#     any changed                          -> suspected_definition_change
+#     any unknown                          -> insufficient_evidence
+#   a cited prohibited rule that exists    -> prohibited_variation
+#   variation none or declared             -> likely_permitted
+#   variation approved + a cited approved
+#     rule that exists                     -> likely_permitted (citing the rule)
+#   variation other, or approved without
+#     a valid citation                     -> unreviewed_variation
+#   variation unknown                      -> insufficient_evidence
+#
+# Every outcome is ADVISORY: a model's reading that orders review. None is a
+# positive verdict (positive verdicts stay suspended).
+version: 4
+citations: true
+policy: |-
+  You record facts about how a SQL statement relates to the authoritative definition of a
+  business metric. You do not decide whether anything is an error, approved or prohibited:
+  fixed code combines your answers with the owner's rules.
+  - The definition is the source of truth: its source, required filters (who is
+    eligible), declared joins, dimensions and measure, and any stated facts. Nothing else
+    is known about the data. Any column can be NULL unless a stated fact says otherwise.
+  - Judge the output column that presents the metric: follow it back through the CTEs and
+    subqueries that feed it. Columns and steps that do not feed it do not matter.
+  - Calculation, eligibility and source rows are preserved only if they are equal to the
+    definition for every possible data the definition allows, not only today's. A rewrite
+    equal by logic alone is preserved: CTEs and subqueries, aliases, a cast that cannot
+    change a value, rearranged arithmetic, a predicate that is always true, LIKE without
+    wildcards, a date truncated to its own precision, an inner join whose lost rows a
+    filter removes anyway, a stricter condition that implies a required filter (the
+    required filter is kept; the extra strictness is a variation).
+  - Variations are recorded, not judged: extra filters, groupings, orderings and limits
+    on top of the definition. Say whether they use only declared dimensions, are covered
+    by one of the owner's approved rules, or use other attributes.
+  - Cite owner rules only by the ids listed with the definition (A1, A2 for approved
+    rules; P1, P2 for prohibited ones). Cite a rule only when the statement plainly does
+    what the rule describes. Never cite a rule that is not listed.
+  - Answer unknown when the evidence cannot decide: a view, temporary view or function
+    whose definition is not shown, cut-off text, or a name you cannot resolve.
+components:
+  identity:
+    question: >-
+      Which metric does the statement present its result as - by the output's name
+      (alone or qualified, e.g. eu_revenue), a query tag, or the asset it feeds?
+    answers:
+      governed: it is presented as the governed metric
+      separate_measure: it is presented as a different, separately named measure, even one derived from this metric (a share, an average per order, revenue plus tax under its own name)
+      not_a_use: it computes something unrelated to this metric and does not present it as this metric
+      unknown: the statement cannot be read well enough to tell
+  calculation:
+    question: >-
+      For each output row, is the value the definition's measure computed over that row's
+      eligible source rows - the same aggregation, columns and arithmetic?
+    answers:
+      same: the measure, or a rewrite equal to it for every possible data (a sum of per-group sums is the same)
+      changed: another column, aggregate, sign, factor or term; a value transformed after aggregation and presented as the metric (running total, share, average of averages); a re-aggregation that changes values (summing distinct counts, the maximum of sums)
+      unknown: the evidence cannot decide
+  eligibility:
+    question: >-
+      Are the definition's required filters kept, so that no row the definition excludes
+      is counted?
+    answers:
+      kept: every required filter holds as declared, or is implied by a stricter condition
+      changed: a required filter is dropped, weakened, broadened or replaced, so excluded rows can be counted
+      unknown: the evidence cannot decide
+  source_rows:
+    question: >-
+      Are the rows the definition's: its source relation and declared joins, each eligible
+      row counted once?
+    answers:
+      same: the definition's source and declared joins, or joins that cannot repeat or drop the counted rows; no de-duplication
+      changed: a join that can repeat or drop counted rows, de-duplication of source rows, another relation, time travel or sampling
+      unknown: a view or temporary view whose definition is not shown
+  variation:
+    question: >-
+      Beyond the definition, how does the statement restrict or group the eligible rows?
+    answers:
+      none: no extra restriction or grouping (ordering, ranking or limiting the groups only)
+      declared: extra filters or groupings only on the declared dimensions
+      approved: a variation that one of the owner's approved rules covers - cite it in approved_rules
+      other: filters or groupings on other attributes (an undeclared column, another time grain, another table's attribute) that no approved rule covers
+      unknown: the evidence cannot decide
+labels:
+  likely_permitted: the calculation, eligibility and source rows appear preserved, with no variation or only declared or owner-approved ones (advisory, never a positive verdict)
+  unreviewed_variation: the calculation, eligibility and source rows appear preserved; the statement adds a variation no owner rule covers
+  separate_measure: the statement presents a separately named measure; it is not judged as the governed metric
+  suspected_definition_change: presented as the governed metric, but the calculation, eligibility or source rows appear changed
+  prohibited_variation: the statement uses a variation the owner prohibits (citing the rule)
+  insufficient_evidence: whether the calculation, eligibility or source rows are preserved, or which metric is presented, cannot be determined
+  not_a_use: the statement does not use the governed metric
+treatment:
+  suspected_definition_change: alert
+  prohibited_variation: alert
+  insufficient_evidence: unresolved
+  unreviewed_variation: informational
+  likely_permitted: none
+  separate_measure: none
+  not_a_use: none

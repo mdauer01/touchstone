@@ -49,7 +49,7 @@ _TOP_KEYS = frozenset({"history", "window", "execution_context", "authority",
 _CONTEXT_KEYS = frozenset({"catalog", "schema", "asserted_for_all_executions"})
 _AUTHORITY_KEYS = frozenset({"system", "metric_views"})
 _VIEW_KEYS = frozenset({"name", "snapshot", "sha256", "applies", "approved_time_groupings",
-                        "approved_variations"})
+                        "approved_variations", "prohibited_variations"})
 # Time grains an operator may approve: every grain a truncation can be read as.
 TIME_UNITS = frozenset(UNITS)
 _WINDOW_KEYS = frozenset({"from", "to"})
@@ -70,6 +70,9 @@ class PilotView:
     # Kinds of variation the metric's owner approved, in their words; sent to
     # the advisory judge with the definition (docs/assess.md).
     approved_variations: list[str] = field(default_factory=list)
+    # Kinds of variation the owner prohibits: a use of one is an alert, more
+    # serious than a variation nobody has reviewed.
+    prohibited_variations: list[str] = field(default_factory=list)
 
     def approvals_for(self, measure: str) -> dict[str, frozenset]:
         """The approved time groupings for one measure: its own plus "*"."""
@@ -221,8 +224,10 @@ def load_pilot(directory: str | Path, dialect: str) -> Pilot:
             applies_from=applies_from, applies_to=applies_to, specs=specs,
             approved_time_groupings=_approved_time_groupings(
                 entry.get("approved_time_groupings"), specs, where, dialect),
-            approved_variations=_approved_variations(entry.get("approved_variations"),
-                                                     where)))
+            approved_variations=_variation_texts(entry.get("approved_variations"), where,
+                                                 "approved_variations"),
+            prohibited_variations=_variation_texts(entry.get("prohibited_variations"), where,
+                                                   "prohibited_variations")))
     names = [v.name for v in views]
     if len(set(names)) != len(names):
         raise ValueError("pilot.yml: a metric view is listed twice")
@@ -246,16 +251,16 @@ def load_pilot(directory: str | Path, dialect: str) -> Pilot:
         system=system)
 
 
-def _approved_variations(raw, where: str) -> list[str]:
-    """`approved_variations`: a list of short texts, each a kind of variation
-    the metric's owner approves (e.g. "IS NOT NULL guards on the measure's own
-    columns")."""
+def _variation_texts(raw, where: str, key: str) -> list[str]:
+    """`approved_variations` / `prohibited_variations`: short texts, each a
+    kind of variation the metric's owner approves or prohibits (e.g. "IS NOT
+    NULL guards on the measure's own columns")."""
     if raw is None:
         return []
     if not isinstance(raw, list) or not all(isinstance(x, str) and x.strip() for x in raw):
-        raise ValueError(f"{where}.approved_variations: a list of non-empty texts")
+        raise ValueError(f"{where}.{key}: a list of non-empty texts")
     if any(len(x) > 300 for x in raw) or len(raw) > 20:
-        raise ValueError(f"{where}.approved_variations: at most 20 texts of 300 characters")
+        raise ValueError(f"{where}.{key}: at most 20 texts of 300 characters")
     return [x.strip() for x in raw]
 
 

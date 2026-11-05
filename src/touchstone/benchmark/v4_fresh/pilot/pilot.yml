@@ -1,0 +1,19 @@
+history: history.jsonl
+window: {from: 2026-11-05T00:00:00Z, to: 2026-11-08T00:00:00Z}
+catalog: catalog.yml
+compare_against: as_of_execution
+authority:
+  system: uc_metrics
+  metric_views:
+  - name: workspace.touchstone_tpch.revenue_mv
+    snapshot: views/revenue_mv.yaml
+    sha256: a7f764f7c81903ac23b8145da8b80809c4c83cd94a99eeaf337168098fe4df0c
+    applies: {from: '2026-11-01T00:00:00Z', to: null}
+    approved_variations:
+    - "IS NOT NULL conditions on the measure's own input columns (l_extendedprice, l_discount): rows they remove add nothing to the sum."
+    - "INNER JOIN instead of the declared LEFT OUTER joins, along the declared join keys: every line item has its order, customer, nation and region."
+    - "Output names that qualify the metric's name (for example urgent_order_revenue, eu_revenue, revenue_1996) present the metric."
+    - "Revenue by part brand or part type, joining part on l_partkey."
+    prohibited_variations:
+    - "Revenue by supplier nation or supplier region: in all reporting, nation and region mean the customer's."
+    - "Revenue for one named customer (a filter on a single c_custkey or c_name): customer-level revenue is confidential."

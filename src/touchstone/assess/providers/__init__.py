@@ -90,10 +90,21 @@ def response_format(criteria: Criteria) -> dict:
                        "answers": {"type": "object", "properties": components,
                                    "required": list(components),
                                    "additionalProperties": False},
-                       "confidence": {"type": "number"}},
-                   "required": ["answers", "confidence"],
+                       "confidence": {"type": "number"},
+                       **({"approved_rules": _rule_ids("A"), "prohibited_rules": _rule_ids("P")}
+                          if criteria.citations else {})},
+                   "required": ["answers", "confidence"]
+                   + (["approved_rules", "prohibited_rules"] if criteria.citations else []),
                    "additionalProperties": False},
         "strict": True}}
+
+
+def _rule_ids(prefix: str) -> dict:
+    """A list of owner-rule ids (A1… approved, P1… prohibited): the ids the
+    prompt lists the record's rules under; `criteria.decide` keeps only those
+    the record actually lists."""
+    return {"type": "array", "items": {"type": "string",
+                                       "enum": [f"{prefix}{i}" for i in range(1, 21)]}}
 
 
 def parse_answers(response: str, criteria: Criteria) -> tuple[dict, float]:
@@ -107,10 +118,11 @@ def parse_answers(response: str, criteria: Criteria) -> tuple[dict, float]:
     except ValueError:
         raise ProviderError("the model's response is not the requested JSON",
                               "invalid response") from None
-    if not isinstance(data, dict) or set(data) != {"answers", "confidence"} \
-            or not isinstance(data["answers"], dict):
-        raise ProviderError("the response violates the requested schema: expected "
-                              "exactly `answers` and `confidence`", "invalid response")
+    keys = {"answers", "confidence"} | ({"approved_rules", "prohibited_rules"}
+                                         if criteria.citations else set())
+    if not isinstance(data, dict) or set(data) != keys or not isinstance(data["answers"], dict):
+        raise ProviderError("the response violates the requested schema: expected exactly "
+                            + ", ".join(f"`{k}`" for k in sorted(keys)), "invalid response")
     answers = data["answers"]
     problems = sorted(set(answers) - set(criteria.components))
     for name in criteria.components:
@@ -124,7 +136,16 @@ def parse_answers(response: str, criteria: Criteria) -> tuple[dict, float]:
             or not math.isfinite(float(confidence)) or not 0.0 <= confidence <= 1.0:
         raise ProviderError("the response violates the requested schema: confidence "
                               "must be a number in [0, 1]", "invalid response")
-    return {k: answers[k] for k in criteria.components}, float(confidence)
+    out = {k: answers[k] for k in criteria.components}
+    if criteria.citations:
+        for key, prefix in (("approved_rules", "A"), ("prohibited_rules", "P")):
+            ids = data[key]
+            if not isinstance(ids, list) or not all(
+                    isinstance(i, str) and i[:1] == prefix and i[1:].isdigit() for i in ids):
+                raise ProviderError(f"the response violates the requested schema: {key}",
+                                    "invalid response")
+            out[key] = sorted(set(ids), key=lambda i: int(i[1:]))
+    return out, float(confidence)
 
 
 class Provider(Protocol):
@@ -242,14 +263,19 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
         "questions": "## Questions\n" + "\n".join(
             f"- {name}: {spec['question'].strip()} Answers: {', '.join(spec['answers'])}"
             for name, spec in criteria.components.items())
-            + "\nReply as JSON: {\"answers\": {component: answer}, \"confidence\": c}, "
-              "where c is your probability, between 0 and 1, that EVERY answer you gave is "
+            + ("\nReply as JSON: {\"answers\": {component: answer}, \"approved_rules\": "
+               "[ids], \"prohibited_rules\": [ids], \"confidence\": c}, citing only rule ids "
+               "listed with the definition (empty lists when none apply)"
+               if criteria.citations else
+               "\nReply as JSON: {\"answers\": {component: answer}, \"confidence\": c}")
+            + ", where c is your probability, between 0 and 1, that EVERY answer you gave is "
               "correct.",
         "definition": f"## Authoritative definition of {definition.get('name')}"
                       + (f" (governed view {definition['view']})" if definition.get("view")
                          else "")
                       + f"\n{truth}" + "".join(f"\nStated fact: {f}" for f in facts)
-                      + ("\nVariations the metric's owner approved (each is permitted, "
+                      + (_owner_rules_text(definition) if criteria.citations else
+                         "\nVariations the metric's owner approved (each is permitted, "
                          "whatever the policy says):" + "".join(f"\n- {v}" for v in approved)
                          if approved else ""),
         "statement": "## How the statement names its result\n" + named + "\n\n"
@@ -257,6 +283,18 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
                      + f"## Statement as it ran ({record['execution'].get('dialect')})\n"
                      f"<<<DATA {nonce}>>>\n{json.dumps(statement)}\n<<<END {nonce}>>>",
     }
+
+
+def _owner_rules_text(definition: dict) -> str:
+    """Criteria v4: the owner's rules for this metric, by the ids a reply may
+    cite. The owner's rules, not the model, approve and prohibit."""
+    approved = definition.get("approved_variations") or []
+    prohibited = definition.get("prohibited_variations") or []
+    return ("\nOwner rules for this metric (cite by id):"
+            + ("".join(f"\nA{i} (approved): {t}" for i, t in enumerate(approved, 1))
+               or "\nno approved variations")
+            + ("".join(f"\nP{i} (prohibited): {t}" for i, t in enumerate(prohibited, 1))
+               or "\nno prohibited variations"))
 
 
 def _column_types(record: dict) -> str:

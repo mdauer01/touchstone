@@ -609,6 +609,8 @@ def _run_record(ex: Execution, stmt: exp.Expression, dialect: str, events, ri: i
     return {"execution": {"id": ex.statement_id, "start_time": ex.start_time,
                           "session_id": ex.session_id, "user": ex.executed_by,
                           "client": ex.client_application, "asset": ex.asset,
+                          "assets": list(getattr(ex, "assets", None)
+                                         or ([ex.asset] if ex.asset else [])),
                           "statement": stmt.meta.get("source_text") or stmt.sql(dialect=dialect),
                           "dialect": dialect},
             "session_evidence": {"context": {"catalog": catalog, "schema": schema}
@@ -617,6 +619,10 @@ def _run_record(ex: Execution, stmt: exp.Expression, dialect: str, events, ri: i
 
 
 _IDENTITY_SOURCES = {"alias", "tag", "asset", "output", "query_tag"}
+# The same evidence reaches the export by two paths under two names (the
+# rules' reading says "alias", candidate selection "output"): one kind each.
+_IDENTITY_KIND = {"alias": "output", "output": "output", "tag": "tag", "query_tag": "tag",
+                  "asset": "asset"}
 
 
 def _record_schemas(relations, auth: Authority, registry: SchemaRegistry) -> dict:
@@ -761,12 +767,23 @@ def _comparisons(judged, candidates, by_concept, pilot, registry: SchemaRegistry
         ts = run["execution"]["start_time"]
         auth = next((a for a in defs if a.applies_at(ts)), defs[0])
         view, spec = specs.get((auth.view, (auth.measure or "").lower()), (None, None))
+        # Only equivalent ASSESSMENT INPUTS share a judgment: the statement,
+        # its session, the definition (and its window and snapshot) and how
+        # the statement names its result. Where it ran is not an input — every
+        # context is kept in `occurrences` and orders review without a call.
         key = hashlib.sha256(json.dumps([
             _normalized_text(run["execution"]["statement"]), run["execution"]["dialect"],
             run["session_evidence"], auth.label, auth.applies_from,
-            view.sha256 if view is not None else None], sort_keys=True).encode()).hexdigest()
+            view.sha256 if view is not None else None,
+            [_IDENTITY_KIND.get(source, "none"), sorted({str(n).lower() for n in names})]],
+            sort_keys=True).encode()).hexdigest()
         seen = runs_of.setdefault(key, {})
-        seen.setdefault(run["execution"]["id"] or f"run:{id(run)}", ts)
+        # Every execution keeps its own consumption context: the same SQL run
+        # in the editor and behind a dashboard is one judgment with two
+        # contexts, never one context (the first) for both.
+        seen.setdefault(run["execution"]["id"] or f"run:{id(run)}",
+                        (ts, run["execution"].get("client"),
+                         tuple(run["execution"].get("assets") or ())))
         record = records.get(key)
         if record is not None:
             if observations and "unverified_observations" not in record:
@@ -794,7 +811,9 @@ def _comparisons(judged, candidates, by_concept, pilot, registry: SchemaRegistry
                 "applies": {"from": auth.applies_from, "to": auth.applies_to},
                 "variation_policy": _variation_policy(auth),
                 **({"approved_variations": list(view.approved_variations)}
-                   if view is not None and view.approved_variations else {})},
+                   if view is not None and view.approved_variations else {}),
+                **({"prohibited_variations": list(view.prohibited_variations)}
+                   if view is not None and view.prohibited_variations else {})},
             "schemas": _record_schemas(relations, auth, registry),
             "session_evidence": {**run["session_evidence"], "unresolved": sorted(
                 r for r in relations if len(r.split(".")) < registry.estate_depth())},
@@ -824,16 +843,45 @@ def _comparisons(judged, candidates, by_concept, pilot, registry: SchemaRegistry
     out = []
     for key, record in records.items():
         runs = runs_of[key]
-        times = sorted(t for t in runs.values() if t)
+        times = sorted(t for t, _, _ in runs.values() if t)
         record["occurrences"] = {
             "executions": len(runs),
             "execution_ids": [i for i in runs if not i.startswith("run:")][:_SAMPLE],
             "first_start_time": times[0] if times else None,
-            "last_start_time": times[-1] if times else None}
+            "last_start_time": times[-1] if times else None,
+            **_contexts(runs.values())}
         errors = validate(record)
         if errors:   # never hand a classifier a malformed record
             raise ValueError(f"comparison record does not validate: {errors}")
         out.append(record)
+    return out
+
+
+_CONTEXTS = 50
+
+
+def _contexts(runs) -> dict:
+    """The consumption contexts of one judgment: per (client, assets), how
+    many executions and when. An execution the history attributes to nothing
+    is counted as unattributed, never guessed. Evidence for ordering review,
+    not a reading of anyone's intent."""
+    groups: dict[tuple, list] = {}
+    for ts, client, assets in runs:
+        groups.setdefault((client, tuple(assets)), []).append(ts)
+    contexts = []
+    for (client, assets), stamps in groups.items():
+        known = sorted(t for t in stamps if t)
+        contexts.append({"client": client, "assets": list(assets), "executions": len(stamps),
+                         "first_start_time": known[0] if known else None,
+                         "last_start_time": known[-1] if known else None})
+    contexts.sort(key=lambda c: (-c["executions"], c["client"] or "", c["assets"]))
+    kinds: dict[str, int] = {}
+    for c in contexts:
+        for kind in {a.split(":", 1)[0] for a in c["assets"]} or {"unattributed"}:
+            kinds[kind] = kinds.get(kind, 0) + c["executions"]
+    out = {"contexts": contexts[:_CONTEXTS], "asset_kinds": kinds}
+    if len(contexts) > _CONTEXTS:
+        out["contexts_omitted"] = len(contexts) - _CONTEXTS
     return out
 
 

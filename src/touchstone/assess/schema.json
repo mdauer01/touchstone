@@ -54,6 +54,60 @@
             "string",
             "null"
           ]
+        },
+        "contexts": {
+          "type": "array",
+          "description": "Each consumption context of the judgment: client, assets, executions and when; evidence for ordering review, not intent.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "client",
+              "assets",
+              "executions"
+            ],
+            "properties": {
+              "client": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "assets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "executions": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "first_start_time": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_start_time": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "asset_kinds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "Executions per asset kind; `unattributed` when the history names none."
+        },
+        "contexts_omitted": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -108,6 +162,13 @@
         },
         "dialect": {
           "type": "string"
+        },
+        "assets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Every entity this execution came from, as kind:id (dashboard, job, alert, notebook, query, pipeline, genie)."
         }
       }
     },
@@ -287,6 +348,16 @@
           },
           "maxItems": 20,
           "description": "Kinds of variation the metric's owner approved, in their words; the advisory judge treats each as permitted."
+        },
+        "prohibited_variations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 20,
+          "description": "Kinds of variation the metric's owner prohibits, in their words; a use of one is an alert under criteria v4."
         }
       }
     },
