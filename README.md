@@ -378,7 +378,10 @@ to 167 (Opus 5.5); the open models a Databricks Free Edition workspace serves ma
 to 132. The labels
 are model-written (execution-checked where execution can decide), and no human has
 reviewed them, so these figures describe agreement with those labels on this synthetic
-set, not accuracy on a real estate. See [docs/assess.md](docs/assess.md).
+set, not accuracy on a real estate. On an independent live test (SQL written by
+Databricks Genie against governed views on the Databricks sample data, labeled before
+the verdicts and scored once), gpt-6-luna caught 21 of 21 drifts, called none of them
+permitted, and raised 4 false alarms on 20 permitted uses. See [docs/assess.md](docs/assess.md).
 
 ### Agents Schema: claims in, receipts out
 

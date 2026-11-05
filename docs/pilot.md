@@ -34,6 +34,8 @@ authority:
       snapshot: views/revenue_mv.yaml
       sha256: 3f1c…                        # of the snapshot file — refused on mismatch
       applies: {from: 2026-09-01T00:00:00Z, to: null}
+      approved_variations:                # optional — kinds of variation the owner approves
+        - "IS NOT NULL guards on the measure's own columns"
       approved_time_groupings:            # optional — see "Time groupings" below
         net_revenue: {order_date: [WEEK]} # a measure (or "*"): {date dimension: [units]}
 compare_against: as_of_execution          # or: current
@@ -59,6 +61,18 @@ Unknown keys are refused, and so is a window whose `from` is not before its `to`
 The `window` is applied: executions outside it are not judged, and are counted in the
 report (`executions_outside_window`), so an export that does not match its package
 shows itself.
+
+## Approved variations
+
+`approved_variations` lists, in the owner's own words, kinds of difference from the
+definition that the owner accepts for this metric: for example "IS NOT NULL guards on the
+measure's own columns", "inner joins along the declared joins", or "output names that
+qualify the metric's name (eu_revenue, revenue_1996)". The advisory judge
+(`touchstone assess run`) receives them with the definition and treats each as
+permitted. They are the owner's decision, not touchstone's: the default stays strict
+(a statement must equal the definition for every possible data). At most 20 texts of
+300 characters. On Databricks Genie's SQL, three such lines removed four of five false
+alarms ([assess.md](assess.md), "A live test").
 
 ## Time groupings
 

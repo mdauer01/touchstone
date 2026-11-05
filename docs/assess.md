@@ -324,6 +324,57 @@ touchstone assess benchmark --provider <backend> --model <model> --split all \
   --dataset src/touchstone/benchmark/metric_uses_exec
 ```
 
+## A live test: Genie's SQL on Databricks sample data
+
+The benchmark items above were written by models, and the first "pilot" replayed them
+through a workspace, so neither is independent. This test is: SQL written by Databricks
+Genie, judged against governed metric views on the Databricks sample data, through the
+real path (query history export, `monitor --export-comparisons`, `assess run`).
+
+- **Definitions.** `revenue` on `samples.tpch.lineitem` (net of discount, returned items
+  excluded, with the order, customer, nation and region joins declared) and
+  `fare_revenue` on `samples.nyctaxi.trips` (zero-distance trips excluded).
+- **SQL author.** Two Genie spaces over the raw tables, each with a two-line glossary of
+  the kind a team writes, asked ordinary business questions (totals, trends, rankings,
+  slices, and questions that are not revenue at all).
+- **Development data.** Genie round 1 on TPC-H (25 questions) was used to choose the
+  configuration, together with the benchmark sets.
+- **Test data.** 50 new questions (NYC taxi, and a second TPC-H round), asked after the
+  configuration was frozen (commit df9b896), labeled before any verdict, scored once.
+
+The configuration: gpt-6-luna through chat completions, criteria v3 with column types,
+and the metric owner's approved variations in `pilot.yml` (`approved_variations`: NULL
+guards on the measure's own columns, inner joins along the declared joins, qualified
+output names such as `eu_revenue`).
+
+| fresh test (scored once) | NYC taxi | TPC-H round 2 | total |
+|---|---|---|---|
+| drifts caught | 12 of 12 | 9 of 9 | **21 of 21** |
+| drifts called permitted | 0 | 0 | **0** |
+| false alarms | 1 of 8 | 3 of 12 | **4 of 20** |
+| left for a person | 1 | 0 | 1 |
+
+- The drifts it caught include the subtle ones: nine queries filtering
+  `trip_distance != 0` where the definition requires `trip_distance > 0` (the Genie
+  space's own glossary said "zero-distance trips are not counted"), an `AND`/`OR`
+  precedence bug that let every urgent order of every year (returns included) into a
+  1997 total, revenue by supplier nation where the governed nation is the customer's,
+  and totals that include returned items or zero-distance trips.
+- The four false alarms: two `DATE_TRUNC('DAY', …)` groupings read as a different grain,
+  and one query grouped by year inside a single-year window (two records), whose label
+  (permitted, as the year is constant there) is debatable.
+- On Genie round 1, before the owner's approvals and column types, the same model raised
+  5 false alarms on 11 permitted uses; with them, 1.
+- What did not help, measured on development data: rendering the definition as SQL
+  (false alarms rose), higher reasoning effort, voting on flags (`--votes`: fewer false
+  alarms but more misses), and OpenAI's Decisions API (above). OpenAI's Flex tier
+  (`--service-tier flex`) halves the price but refused 21 of 220 calls for capacity.
+- Cost: under a tenth of a cent per distinct statement, and no extra warehouse compute:
+  only the history export reads the warehouse.
+
+The labels are one model author's, written from the definitions before the verdicts;
+no person has reviewed them.
+
 ## From query history to verdicts
 
 ```bash
