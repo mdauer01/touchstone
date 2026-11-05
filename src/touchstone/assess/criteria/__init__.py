@@ -23,7 +23,7 @@ CHANGED = {"identity": "other_metric", "formula": "changed", "population": "chan
            "grain": "changed", "source": "different"}
 UNKNOWN = "unknown"
 NOT_A_USE = "not_a_use"
-LATEST = 2
+LATEST = 3
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,9 @@ class Criteria:
     version: int
     components: dict[str, dict]
     labels: dict[str, str]
+    # From v3: the policy every record is judged against, sent with the
+    # statement and the definition only (providers.render_prompt).
+    policy: str | None = None
 
     def answers(self, component: str) -> list[str]:
         return list(self.components[component]["answers"])
@@ -49,7 +52,7 @@ def load(version: int = LATEST) -> Criteria:
         if UNKNOWN not in answers or CHANGED[name] not in answers:
             raise ValueError(f"criteria v{version}: {name} needs `{UNKNOWN}` and "
                              f"`{CHANGED[name]}` answers")
-    return Criteria(version, components, data["labels"])
+    return Criteria(version, components, data["labels"], data.get("policy"))
 
 
 def aggregate(answers: dict[str, str], criteria: Criteria) -> str:

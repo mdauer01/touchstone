@@ -1,0 +1,101 @@
+# Advisory drift criteria, version 3: the statement against the source of truth.
+#
+# v3 asks whether the statement computes the metric THE WAY IT IS DEFINED, not
+# whether it would return the same number. The model sees only the statement,
+# the definition and the policy below — no schemas, session, execution
+# metadata or touchstone observations — and the policy travels with the
+# criteria, so every record is judged against the same text.
+#
+# Why: v2 records on real history carried the rules engine's coverage list as
+# their "policy" ("not covered: joins, DISTINCT, ..."), and the benchmark's
+# policy routed results that depend on key uniqueness or nullability to
+# insufficient evidence. Both sent the data-dependent cases — a join that
+# overstated net revenue by 42% among them — to a person. A step the
+# definition does not take is a difference whatever today's data holds.
+#
+# Answers are aggregated by fixed code (touchstone.assess.criteria.aggregate),
+# as in v2: identity not_a_use → not_a_use (guarded); any changed component →
+# suspected_drift; otherwise any unknown → insufficient_evidence; otherwise
+# likely_permitted. The result is ADVISORY.
+version: 3
+policy: |-
+  The definition is the only source of truth: its source, required filter, dimensions and
+  measures, and any stated facts. Nothing else is known about the data. For every question
+  the test is the same: is the statement equal to the definition for EVERY possible data
+  the definition allows — not only today's?
+  - Any column can be NULL unless a stated fact says otherwise. So arithmetic inside
+    the aggregate is not the same as arithmetic between aggregates: SUM(a - b) drops
+    every row where b is NULL, while SUM(a) - SUM(b) keeps a.
+  - Judge only what computes the metric's output column: follow it back through the CTEs
+    and subqueries that feed it. A join, filter or CTE that does not feed it - one that
+    only adds other columns, before or after the metric is aggregated - does not change
+    it.
+  - Equal for every possible data: answer same / preserved / permitted. Reading the
+    governed metric view itself (MEASURE(m)) is the definition. So is any rewrite that is
+    equal by logic alone: CTEs and subqueries; aliases; a cast that cannot change a value;
+    rearranged arithmetic; a predicate that is always true; LIKE without wildcards; a
+    grouped column pinned to a single value by HAVING; disjoint slices of the source added
+    up; filters and grouping on declared dimensions, including time windows on a declared
+    date dimension; ordering, ranking or limiting groups without changing any group's
+    value; dropping the total row of a ROLLUP or CUBE; a LEFT JOIN, used for other
+    columns, to a relation that is unique on the join key by construction (grouped by it,
+    or DISTINCT on it).
+  - Different for some possible data: answer changed / different, even if it matches
+    today. A join that can repeat or drop source rows (to a table whose uniqueness on the
+    join key the definition does not state, or an inner join that can drop rows); DISTINCT
+    or other de-duplication of source rows; a filter on a column that is not a declared
+    dimension; grouping by anything else, or returning the value once per row; a required
+    filter dropped, weakened, broadened or replaced; a different aggregation, column,
+    sign, factor or term.
+  - Answer unknown only when the statement cannot be read: it uses a view, temporary view
+    or function whose definition is not shown, or its text is cut off.
+components:
+  identity:
+    question: >-
+      Does the statement present its result as the governed metric (by its
+      output name, a query tag, or the asset it feeds), as a different metric,
+      or is it not a use of the governed metric at all?
+    answers:
+      same_metric: it is presented as the governed metric
+      other_metric: it is presented as a different metric, or the governed math is shown under another name
+      not_a_use: it computes something that is not this metric and does not present it as this metric (for example an order count or a discount total over the same tables)
+      unknown: the statement cannot be read well enough to tell which metric it presents
+  formula:
+    question: >-
+      Is the aggregate the definition's measure — the same aggregation over
+      the same columns with the same arithmetic, or a rewrite equal to it by
+      logic alone?
+    answers:
+      same: equal to the measure for every possible data
+      changed: different from the measure for some possible data
+      unknown: the statement cannot be read (an undefined view or function, cut-off text)
+  population:
+    question: >-
+      Does the statement keep every required filter exactly, restrict rows
+      only on declared dimensions, and leave the source rows otherwise as they
+      are (no de-duplication)?
+    answers:
+      preserved: the same rows for every possible data (required filter kept, extra filters only on declared dimensions, no de-duplication)
+      changed: different rows for some possible data
+      unknown: the statement cannot be read (an undefined view or function, cut-off text)
+  grain:
+    question: >-
+      Does the statement group only by declared dimensions exactly as declared
+      (or not group at all)?
+    answers:
+      permitted: no grouping, or groups equal to grouping by declared dimensions for every possible data
+      changed: different groups for some possible data, or the value returned once per row
+      unknown: the statement cannot be read (an undefined view or function, cut-off text)
+  source:
+    question: >-
+      Does the statement read only the definition's source relation, directly
+      or through steps that select, project, filter, group, order or limit it?
+    answers:
+      same: only the definition's source, or joins that cannot repeat or drop its rows for any possible data
+      different: a join that can repeat or drop source rows, a UNION with other data, or another relation
+      unknown: the statement reads a view or temporary view whose definition is not shown
+labels:
+  not_a_use: the statement does not use the governed metric (no finding)
+  suspected_drift: at least one component differs from the way the metric is defined
+  insufficient_evidence: no component differs, but the statement cannot be read well enough to decide one
+  likely_permitted: every component matches the definition or a permitted variation of it

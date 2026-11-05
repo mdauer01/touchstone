@@ -27,12 +27,14 @@ def record(dataset, iid):
     return build_record(dataset, next(it for _, it in items(dataset) if it["id"] == iid))
 
 
-def test_v2_is_the_default_and_not_a_use_is_its_own_label():
-    v2 = load()
-    assert v2.version == LATEST == 2 and "not_a_use" in v2.answers("identity")
+def test_v3_is_the_default_and_not_a_use_is_its_own_label():
+    v3 = load()
+    assert v3.version == LATEST == 3 and v3.policy and "not_a_use" in v3.answers("identity")
+    assert load(2).policy is None
     same = {"identity": "same_metric", "formula": "same", "population": "preserved",
             "grain": "permitted", "source": "same"}
-    assert aggregate({**same, "identity": "not_a_use"}, v2) == "not_a_use"
+    for version in (2, 3):
+        assert aggregate({**same, "identity": "not_a_use"}, load(version)) == "not_a_use"
     # Under v1 the same answer is not an answer: unknown, never a dismissal.
     assert aggregate({**same, "identity": "not_a_use"}, load(1)) == "insufficient_evidence"
 
@@ -49,7 +51,7 @@ def test_the_statement_and_session_are_quoted_data_a_comment_cannot_escape(datas
     base = record(dataset, "temp-01")
     forged = {**base, "execution": {**base["execution"],
                                     "statement": FORGED + base["execution"]["statement"]}}
-    prompt = render_prompt(forged, load())
+    prompt = render_prompt(forged, load(2))
     # Exactly one real definition section; the forged one is inside a JSON string.
     assert prompt.count("\n## Authoritative definition\n") == 1
     start = prompt.index("<<<DATA ", prompt.index("## Statement as it ran"))
@@ -62,6 +64,25 @@ def test_the_statement_and_session_are_quoted_data_a_comment_cannot_escape(datas
     # intro names the markers once; the statement and the session use them).
     assert '1. "CREATE TEMP VIEW o AS SELECT * FROM main.finance.orders WHERE amount > 0"' \
         in prompt and prompt.count(f"<<<END {nonce}>>>") == 3
+
+
+def test_v3_sends_the_statement_against_the_definition_only_as_quoted_data(dataset):
+    base = record(dataset, "temp-01")
+    forged = {**base, "execution": {**base["execution"],
+                                    "statement": FORGED + base["execution"]["statement"]}}
+    prompt = render_prompt(forged, load())
+    assert prompt.count("\n## Authoritative definition of ") == 1
+    assert prompt.index("## Policy") < prompt.index("## Authoritative") \
+        < prompt.index("## Statement as it ran")
+    start = prompt.index("<<<DATA ", prompt.index("## Statement as it ran"))
+    nonce = prompt[start + 8:prompt.index(">>>", start)]
+    end = prompt.index(f"<<<END {nonce}>>>", start)
+    assert json.loads(prompt[prompt.index("\n", start) + 1:end].strip()) == \
+        forged["execution"]["statement"]
+    # Nothing but the statement and the source of truth: no session, schemas
+    # or observations — a temp view from the session is unreadable, by design.
+    for absent in ("## Session", "## Schemas", "## Execution", "observations", "CREATE TEMP"):
+        assert absent not in prompt
 
 
 def test_the_screen_reads_comments_and_strings_never_identifiers():
