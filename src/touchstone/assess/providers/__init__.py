@@ -6,11 +6,17 @@ A provider answers the criteria's per-component questions for each record;
 * `fake` — deterministic, for tests and dry runs. Its "answers" are a
   function of the record id, so a run on it establishes that the machinery
   works and NOTHING about classification performance;
-* `databricks` — `ai_query` with a JSON-schema response format on a SQL
-  warehouse (providers/databricks.py), tested against mocked API responses;
-* `api` — Claude through the Anthropic API (providers/anthropic_api.py);
-* `snowflake` (Cortex `AI_COMPLETE`) — not implemented yet. Every backend reads its credential from the
-  environment; touchstone never stores, prints or logs it.
+* `databricks` — `ai_query` on a SQL warehouse (providers/databricks.py) and
+  `snowflake` — Cortex `AI_COMPLETE` on a warehouse (providers/snowflake.py):
+  the model runs inside the customer's own platform, so the statements and
+  definitions never leave it;
+* `anthropic` — Claude through the Anthropic API (providers/anthropic_api.py;
+  `api` is its former name) and `openai` — OpenAI's API or any server that
+  speaks it: a LiteLLM proxy, vLLM, Groq, Ollama (providers/openai_api.py).
+
+Every real backend takes the model to call as `--model`; touchstone does not
+pick one. Every backend reads its credential from the environment; touchstone
+never stores, prints or logs it.
 
 `render_prompt` is shared by every model-backed provider so the evidence
 order is the same everywhere: the original statement and the authoritative
@@ -26,7 +32,7 @@ from typing import Protocol
 
 from touchstone.assess.criteria import Criteria
 
-KINDS = ("fake", "api", "databricks", "snowflake")
+KINDS = ("fake", "anthropic", "openai", "databricks", "snowflake", "api")
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,65 @@ class Assessment:
         return asdict(self)
 
 
+class ProviderError(Exception):
+    """A failed call or an unusable reply, worded without any credential, with
+    its KIND (`HTTP 503`, `timeout`, `transport`, `invalid response`, …) for
+    the report's errors-by-kind."""
+
+    def __init__(self, message: str, kind: str = "error"):
+        super().__init__(message)
+        self.kind = kind
+
+
+def response_format(criteria: Criteria) -> dict:
+    """The JSON schema the model must answer in: one enum per component, plus a
+    self-reported confidence. The label is not in it — fixed code computes it."""
+    components = {name: {"type": "string", "enum": criteria.answers(name)}
+                  for name in criteria.components}
+    return {"type": "json_schema", "json_schema": {
+        "name": "touchstone_assessment",
+        "schema": {"type": "object",
+                   "properties": {
+                       "answers": {"type": "object", "properties": components,
+                                   "required": list(components),
+                                   "additionalProperties": False},
+                       "confidence": {"type": "number"}},
+                   "required": ["answers", "confidence"],
+                   "additionalProperties": False},
+        "strict": True}}
+
+
+def parse_answers(response: str, criteria: Criteria) -> tuple[dict, float]:
+    """The answers, checked against the response format that was requested:
+    every component present with one of its answers, a confidence in [0, 1],
+    nothing else. A violation is an error, never a partial label."""
+    import math
+
+    try:
+        data = json.loads(response)
+    except ValueError:
+        raise ProviderError("the model's response is not the requested JSON",
+                              "invalid response") from None
+    if not isinstance(data, dict) or set(data) != {"answers", "confidence"} \
+            or not isinstance(data["answers"], dict):
+        raise ProviderError("the response violates the requested schema: expected "
+                              "exactly `answers` and `confidence`", "invalid response")
+    answers = data["answers"]
+    problems = sorted(set(answers) - set(criteria.components))
+    for name in criteria.components:
+        if answers.get(name) not in criteria.answers(name):
+            problems.append(name)
+    if problems:
+        raise ProviderError(f"the response violates the requested schema: "
+                              f"{', '.join(problems)}", "invalid response")
+    confidence = data["confidence"]
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) \
+            or not math.isfinite(float(confidence)) or not 0.0 <= confidence <= 1.0:
+        raise ProviderError("the response violates the requested schema: confidence "
+                              "must be a number in [0, 1]", "invalid response")
+    return {k: answers[k] for k in criteria.components}, float(confidence)
+
+
 class Provider(Protocol):
     name: str
     model: str | None
@@ -79,13 +144,19 @@ def get_provider(config: ProviderConfig) -> Provider:
         from touchstone.assess.providers.databricks import DatabricksProvider
 
         return DatabricksProvider(config)
-    if config.kind == "api":
+    if config.kind == "snowflake":
+        from touchstone.assess.providers.snowflake import SnowflakeProvider
+
+        return SnowflakeProvider(config)
+    if config.kind in ("anthropic", "api"):
         from touchstone.assess.providers.anthropic_api import AnthropicProvider
 
         return AnthropicProvider(config)
-    raise NotImplementedError(
-        f"the {config.kind} provider is not implemented yet: Databricks (ai_query) and the "
-        f"direct API are the real backends in this release")
+    if config.kind == "openai":
+        from touchstone.assess.providers.openai_api import OpenAIProvider
+
+        return OpenAIProvider(config)
+    raise NotImplementedError(f"the {config.kind} provider is not implemented")
 
 
 def _unknown_relation(name: str, definition: dict, session: dict) -> str:

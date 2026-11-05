@@ -362,16 +362,20 @@ touchstone assess run --provider databricks --model <endpoint> --endpoint <wareh
   --batch-size 20 --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
 ```
 
-Backends: Databricks (`ai_query`, run against a real workspace), the Anthropic API
-(`--provider api`, tested against a scripted client) and a deterministic fake that
-measures nothing. Records whose comments carry prompt-like steering text are held for a
+Bring your own model: inside your data platform through Databricks (`ai_query`, run
+against a real workspace) or Snowflake (Cortex `AI_COMPLETE`), or with an API key through
+Anthropic or any OpenAI-compatible server (OpenAI, a LiteLLM proxy, vLLM, Groq, Ollama).
+`--model` is always yours to choose; [docs/assess.md](docs/assess.md) lists how the measured
+models did, and the Snowflake and API backends are tested against scripted responses only so
+far. A deterministic fake measures nothing. Records whose comments carry prompt-like steering text are held for a
 person, not sent. `touchstone assess benchmark` scores a backend on 66 labeled metric
 uses; a further 114 uses in `benchmark/metric_uses_exec` carry the queries their labels
 were checked against by execution.
 
 **What has been measured, and against what.** On 174 synthetic uses, the rules decided
-55, with no drift wrongly called permitted; a Claude Opus 5.5 judge matched 167 labels;
-the open models a Databricks Free Edition workspace serves matched 125 to 132. The labels
+55, with no drift wrongly called permitted; Claude judges matched 165 (Haiku, the default)
+to 167 (Opus 5.5); the open models a Databricks Free Edition workspace serves matched 125
+to 132. The labels
 are model-written (execution-checked where execution can decide), and no human has
 reviewed them, so these figures describe agreement with those labels on this synthetic
 set, not accuracy on a real estate. See [docs/assess.md](docs/assess.md).

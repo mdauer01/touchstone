@@ -55,14 +55,21 @@ class Client:
         return create
 
 
-def provider(client, model=None, **options):
-    return AnthropicProvider(ProviderConfig("api", model=model, options=options),
+def provider(client, model="claude-haiku-5-5", **options):
+    return AnthropicProvider(ProviderConfig("anthropic", model=model, options=options),
                              client=client)
+
+
+def test_the_model_is_required_and_api_still_names_this_backend():
+    with pytest.raises(ValueError, match="--model is required"):
+        provider(Client([]), model=None)
+    p = AnthropicProvider(ProviderConfig("api", model="claude-haiku-5-5"), client=Client([]))
+    assert p.name == "anthropic" and p.model == "claude-haiku-5-5"
 
 
 def test_the_request_carries_the_shared_prompt_and_schema_and_a_fallback(records):
     client = Client([reply()])
-    (a,) = provider(client, concurrency=1).assess(records[:1], load())
+    (a,) = provider(client, model="claude-opus-5-5", concurrency=1).assess(records[:1], load())
     (call,) = client.calls
     assert call["model"] == "claude-opus-5-5" and call["beta"] is True
     assert call["fallbacks"] == "default" and call["betas"] == ["server-side-fallback-2026-07-01"]
@@ -75,11 +82,13 @@ def test_the_request_carries_the_shared_prompt_and_schema_and_a_fallback(records
     assert a.cost_estimate_usd == round((1000 * 4 + 500 * 20) / 1e6, 6)
 
 
-def test_effort_is_sent_when_configured_and_haiku_takes_no_server_fallback(records):
+def test_haiku_takes_no_server_fallback_and_effort_is_sent_when_set(records):
     client = Client([reply()])
-    provider(client, model="claude-haiku-5-5", effort="low").assess(records[:1], load())
+    (a,) = provider(client, effort="low").assess(records[:1], load())
     (call,) = client.calls
+    assert call["model"] == "claude-haiku-5-5" and a.model == "claude-haiku-5-5"
     assert call["beta"] is False and "fallbacks" not in call
+    assert a.cost_estimate_usd == round((1000 * 0.10 + 500 * 0.50) / 1e6, 6)
     assert call["output_config"]["effort"] == "low"
     with pytest.raises(ValueError, match="effort"):
         provider(Client([]), effort="extreme")

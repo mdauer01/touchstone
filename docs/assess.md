@@ -18,7 +18,7 @@ triage only. They never change a finding, a funnel bucket or an exit code.
 |---|---|---|
 | Evidence record `touchstone-comparison/1` | `src/touchstone/assess/schema.json`, `record.py` | One record per distinct judgment of a candidate metric use, produced by `touchstone monitor --export-comparisons out.jsonl` (see "From query history to verdicts" below). It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, the session statements before it, and the executions it covers. touchstone's reading follows **last**, as `unverified_observations`, when the rules read the use; it can be removed for the ablation. |
 | Criteria v1 | `assess/criteria/v1.yaml` | One narrow question per component (identity, formula, population, grain, source), each answerable `unknown`. Fixed code turns the answers into `suspected_drift`, `insufficient_evidence` or `likely_permitted`; the model never chooses the label. |
-| Providers | `assess/providers/` | `assess(records, criteria) -> assessments`, a config model, `render_prompt` (the evidence order every model-backed provider uses), the deterministic `fake`, and **Databricks** (`databricks.py`, described below). |
+| Providers | `assess/providers/` | `assess(records, criteria) -> assessments`, a config model, `render_prompt` (the evidence order every model-backed provider uses), the deterministic `fake`, and four real backends: **Databricks** and **Snowflake** (the model runs inside your platform) and **Anthropic** and **OpenAI-compatible** APIs (see Backends below). |
 | Labeled metric uses | `src/touchstone/benchmark/metric_uses/` | 60 synthetic items in 9 query families. Labels are written from the business definitions and policy in its README, never from touchstone output. They are model-authored and model-reviewed (a blind model pass, adjudicated in `adjudication.yaml`), and have not yet been reviewed by a human. The split is by family: tune on `dev`, report `test`. |
 | Runner | `assess/runner.py`, `touchstone assess benchmark` | For drift: flagged, labeled permitted and undecided, always reported together. For permitted uses: confirmed, flagged as drift and undecided. Also abstention, calibration (reliability table and ECE), cost and latency, overall and per family. With `--with-observations` it adds the ablation and the touchstone-alone baseline. |
 
@@ -200,33 +200,115 @@ touchstone assess benchmark --provider databricks --model databricks-gpt-oss-120
   model, defined in the prompt as its probability that every answer is correct. It is a
   self-report, not a probability the model computed.
 
-## The direct API backend
+## Backends
 
-`--provider api` calls Claude through the Anthropic API with the same prompt and answer
-schema as the Databricks backend, so the two are comparable. It is for workspaces that do
-not serve a frontier model through `ai_query`: Databricks Free Edition serves only open
-models, and on the 174-use study those agreed with 125-132 labels against Claude Opus
-5.5's 167 (agreement with model-written labels on synthetic uses, not accuracy on a real
-estate).
+Every backend sends the same prompt and answer schema, and fixed code computes the label,
+so any two can be compared on the same benchmark. Every real backend needs `--model`:
+touchstone does not pick a model (see "Choosing a model" below). Credentials always come
+from the environment; touchstone never takes one as an argument, and never stores, prints
+or logs it.
+
+| backend | where the model runs | credential | run live? |
+|---|---|---|---|
+| `databricks` | `ai_query` in your workspace (above) | `DATABRICKS_TOKEN`, or a `databricks auth login` profile | yes (Free Edition, open models) |
+| `snowflake` | Cortex `AI_COMPLETE` in your account | `SNOWFLAKE_TOKEN`: a programmatic access token, OAuth token or key-pair JWT | not yet |
+| `anthropic` | Anthropic's API | `ANTHROPIC_API_KEY`, or an `ant auth login` profile | not yet |
+| `openai` | OpenAI's API, or any server that speaks it: a LiteLLM proxy, vLLM, Groq, Ollama | `OPENAI_API_KEY` | not yet |
+
+The warehouse backends keep the statements and definitions inside your own platform and
+bill to the contract you already have. On paid tiers both platforms serve frontier models
+as well as open ones; Databricks Free Edition serves only open models. "Not yet" means
+tested against scripted responses only.
+
+### Snowflake
 
 ```bash
-pip install 'touchstone[api]'
-ant auth login                       # or export ANTHROPIC_API_KEY yourself
-touchstone assess run --provider api --model claude-opus-5-5 \
+export SNOWFLAKE_ACCOUNT=myorg-myaccount      # or SNOWFLAKE_HOST=https://<account>.snowflakecomputing.com
+export SNOWFLAKE_TOKEN=...                    # set it yourself; a programmatic access token
+touchstone assess run --provider snowflake --model claude-sonnet-4-5 --endpoint ANALYTICS_WH \
   --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
 ```
 
-- Credentials are resolved by the SDK (`ANTHROPIC_API_KEY`, or an `ant auth login`
-  profile); touchstone never reads, stores or prints them.
-- `output_config.format` constrains the reply to the criteria's JSON schema; the label is
-  computed by code. Thinking stays at the model's default; `--effort` is sent only when
-  given; no sampling parameters are sent.
+- The prompt travels as a bind variable through the SQL API, never spliced into SQL. The
+  response format is a SQL OBJECT constant generated from the criteria; the answer is
+  checked against it here.
+- `SNOWFLAKE_TOKEN_TYPE` names the token: `PROGRAMMATIC_ACCESS_TOKEN` (the default),
+  `OAUTH` or `KEYPAIR_JWT`. The warehouse is `--endpoint` (or `SNOWFLAKE_WAREHOUSE`), the
+  role `SNOWFLAKE_ROLE`; each defaults to the user's own. The role needs the
+  `SNOWFLAKE.CORTEX_USER` database role, and some models (the newest Claude models among
+  them) need cross-region inference enabled in the account.
+- `AI_COMPLETE` has no per-row error mode, so one failing record fails its whole batch:
+  keep `--batch-size` small.
+- Built from Snowflake's documentation (checked 2026-11-04). Three details are inferred
+  until the first live run: a bind variable as `AI_COMPLETE`'s prompt, the form the OBJECT
+  result arrives in, and the shape of a result partition past the first.
+
+### Anthropic
+
+```bash
+pip install 'touchstone[anthropic]'
+ant auth login                       # or export ANTHROPIC_API_KEY yourself
+touchstone assess run --provider anthropic --model claude-haiku-5-5 \
+  --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
+```
+
+- `output_config.format` constrains the reply to the criteria's JSON schema. Thinking stays
+  at the model's default; `--effort` is sent only when given; no sampling parameters are
+  sent.
 - On Opus 5.5, Opus 5, Fable 5.1 and Sonnet 5.5, server-side `fallbacks: "default"`
   re-runs a declined request on Anthropic's recommended fallback. A refusal that survives
   is an error on that assessment, never a label. Haiku has no server-side fallback.
 - Records run concurrently (`--concurrency`, default 8). The cost estimate uses list
   prices; cache reads and batch discounts are not modelled.
-- Tested against a scripted client only; no live run yet.
+- `--provider api` is the former name and still works.
+
+### OpenAI and compatible servers
+
+```bash
+pip install 'touchstone[openai]'
+touchstone assess run --provider openai --model <model> \
+  --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
+touchstone assess run --provider openai --base-url https://litellm.example.com/v1 --model <model> \
+  --comparisons uses.jsonl --out verdicts.jsonl --cache verdicts.cache.jsonl
+```
+
+- `--base-url` (or `OPENAI_BASE_URL`) points it at any Chat Completions server: a LiteLLM
+  proxy (and every provider behind it), vLLM, Groq, Ollama. It must be `https://`, or
+  `http://` on this machine only. `OPENAI_API_KEY` holds that server's key.
+- The response format is the criteria's JSON schema in strict mode. A server that cannot
+  enforce it may still answer; an answer that violates the schema is an error, never a
+  label.
+- `--max-tokens`, `--temperature` and `--effort` are sent only when given: reasoning
+  models reject sampling parameters, and not every compatible server accepts every field.
+- A refusal, a content-filter stop or a truncated answer is an error. No cost is
+  estimated: the same model is priced differently on each server this reaches.
+
+## Choosing a model
+
+Any model can be used; not every model judges well. On the 174-use study:
+
+| model | where it ran | labels matched (of 174) | price per million tokens (in / out) | about per judgment |
+|---|---|---|---|---|
+| Claude Opus 5.5 | Anthropic | 167 | $4 / $20 | 2¢ |
+| Claude Sonnet | Anthropic | 166 | $2 / $10 (Sonnet 5.5) | 1¢ |
+| Claude Haiku | Anthropic | 165 | $0.10 / $0.50 (Haiku 5.5) | under 0.1¢ |
+| gpt-oss-120b | Databricks Free Edition | 132 | workspace pricing | — |
+| Qwen3.5-122B | Databricks Free Edition | 125 | workspace pricing | — |
+
+- These are agreement with model-written labels on synthetic uses, not accuracy on a real
+  estate. The Sonnet and Haiku runs did not record the model version.
+- The cost per judgment assumes about 2,000 input tokens and a few hundred output tokens.
+  Duplicates are collapsed before judging, so a warehouse pays per distinct statement,
+  not per execution.
+- Claude Haiku is the best value measured so far. The same models served inside Databricks
+  or Snowflake are billed through the platform instead.
+- **Measure the model you choose before trusting it:**
+
+```bash
+touchstone assess benchmark --provider <backend> --model <model> --split all
+touchstone assess benchmark --provider <backend> --model <model> --split all \
+  --dataset src/touchstone/benchmark/metric_uses_exec
+```
 
 ## From query history to verdicts
 
@@ -270,7 +352,7 @@ touchstone assess run --provider databricks --model <endpoint> --endpoint <wareh
 
 ## What comes next
 
-- **Snowflake Cortex `AI_COMPLETE`, then a direct API adapter.**
+- **Live runs of the Snowflake, Anthropic and OpenAI backends.** Each is tested against scripted responses only so far.
 - **The plain-prompt baseline.** It needs a running backend.
 - **Controlled execution comparisons.** These attach a `controlled_comparison`: the
   governed SQL run with the same slices, grouping, data snapshot and settings. A

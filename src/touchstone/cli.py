@@ -368,34 +368,46 @@ def main(argv: list[str] | None = None) -> int:
              "report says so)")
     def provider_args(p) -> None:
         p.add_argument("--provider", default="fake",
-                       choices=["fake", "api", "databricks", "snowflake"],
-                       help="assessment backend: fake (measures nothing), databricks "
-                            "(ai_query; the token is read from DATABRICKS_TOKEN, or from a "
-                            "`databricks auth login` profile) or api (Claude through the "
-                            "Anthropic API; credentials resolved by the SDK)")
-        p.add_argument("--model", help="databricks: the serving endpoint ai_query calls, "
-                                       "e.g. system.ai.<model>; api: the Claude model "
-                                       "(default claude-opus-5-5)")
-        p.add_argument("--endpoint", help="databricks: the SQL warehouse id (or "
-                                          "DATABRICKS_WAREHOUSE_ID) — never a secret")
+                       choices=["fake", "anthropic", "openai", "databricks", "snowflake",
+                                "api"],
+                       help="assessment backend: fake (measures nothing); inside your data "
+                            "platform: databricks (ai_query; DATABRICKS_TOKEN or a "
+                            "`databricks auth login` profile) or snowflake (Cortex "
+                            "AI_COMPLETE; SNOWFLAKE_TOKEN); with an API key: anthropic "
+                            "(ANTHROPIC_API_KEY; `api` is its former name) or openai "
+                            "(OPENAI_API_KEY; OpenAI or any compatible server, see "
+                            "--base-url)")
+        p.add_argument("--model", help="the model to call — required for every backend but "
+                                       "fake: a databricks serving endpoint (system.ai.<model>"
+                                       "), a Snowflake Cortex model, a Claude model, or a "
+                                       "model the openai server serves")
+        p.add_argument("--endpoint", help="the warehouse: databricks, its SQL warehouse id (or "
+                                          "DATABRICKS_WAREHOUSE_ID); snowflake, its name (or "
+                                          "SNOWFLAKE_WAREHOUSE; default: the user's) — never "
+                                          "a secret")
         p.add_argument("--host", help="databricks: the workspace URL (or DATABRICKS_HOST, or "
-                                      "the profile's host)")
+                                      "the profile's host); snowflake: the account URL (or "
+                                      "SNOWFLAKE_HOST, or SNOWFLAKE_ACCOUNT)")
         p.add_argument("--profile", help="databricks: a `databricks auth login` profile to "
                                          "take the host and a short-lived OAuth token from "
                                          "when DATABRICKS_TOKEN is unset (or "
                                          "DATABRICKS_CONFIG_PROFILE)")
+        p.add_argument("--base-url", dest="base_url",
+                       help="openai: the server's API URL — a LiteLLM proxy, vLLM, Groq, "
+                            "Ollama (or OPENAI_BASE_URL; default: OpenAI's API)")
         p.add_argument("--batch-size", dest="batch_size", type=int, default=1,
-                       help="databricks: records per ai_query statement (default 1)")
+                       help="databricks, snowflake: records per statement (default 1; on "
+                            "snowflake one failing record fails its whole batch)")
         p.add_argument("--max-tokens", dest="max_tokens", type=int,
-                       help="databricks: max_tokens per answer, reasoning included "
-                            "(default 8192)")
+                       help="max tokens per answer, reasoning included (default: 8192 on the "
+                            "warehouses, 16000 on anthropic, not sent on openai)")
         p.add_argument("--temperature", type=float,
-                       help="databricks: sampling temperature (default: not sent — "
-                            "reasoning endpoints reject it)")
+                       help="databricks, snowflake, openai: sampling temperature (default: "
+                            "not sent — reasoning models reject it)")
         p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
-                       help="api: reasoning effort (default: the model's own)")
+                       help="anthropic, openai: reasoning effort (default: the model's own)")
         p.add_argument("--concurrency", type=int,
-                       help="api: records assessed at once (default 8)")
+                       help="anthropic, openai: records assessed at once (default 8)")
         p.add_argument("--seed", default="", help="seed for the fake provider")
 
     provider_args(p_ab)
@@ -1165,7 +1177,7 @@ def _print_graph(rows: list[dict]) -> None:
 
 
 def _assess_run(args: argparse.Namespace, provider) -> int:
-    from touchstone.assess.providers.databricks import DatabricksError
+    from touchstone.assess.providers import ProviderError
     from touchstone.assess.record import validate
     from touchstone.assess.runner import ADVISORY_NOTE, assess_records
 
@@ -1194,7 +1206,7 @@ def _assess_run(args: argparse.Namespace, provider) -> int:
         verdicts, stats = assess_records(provider, records,
                                          with_observations=not args.without_observations,
                                          cache=cache)
-    except DatabricksError as e:
+    except ProviderError as e:
         print(f"touchstone assess: {e}", file=sys.stderr)
         return 2
     with open(args.out, "w", encoding="utf-8") as f:
@@ -1235,7 +1247,7 @@ def _cmd_assess(args: argparse.Namespace) -> int:
 
     try:
         options = {"seed": args.seed, "batch_size": args.batch_size}
-        for name in ("host", "profile", "max_tokens", "temperature", "effort",
+        for name in ("host", "profile", "base_url", "max_tokens", "temperature", "effort",
                      "concurrency"):
             if getattr(args, name) is not None:
                 options[name] = getattr(args, name)
@@ -1249,12 +1261,12 @@ def _cmd_assess(args: argparse.Namespace) -> int:
     dataset = load_dataset(args.dataset)
     observations = (observations_from_monitor(dataset, args.split)
                     if args.with_observations else None)
-    from touchstone.assess.providers.databricks import DatabricksError
+    from touchstone.assess.providers import ProviderError
 
     try:
         report = run_benchmark(provider, dataset=dataset, split=args.split,
                                observations=observations)
-    except DatabricksError as e:
+    except ProviderError as e:
         print(f"touchstone assess: {e}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

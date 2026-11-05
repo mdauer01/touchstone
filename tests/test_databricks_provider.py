@@ -184,7 +184,7 @@ def test_configuration_is_refused_without_ever_echoing_a_secret(env, config, mes
 def test_the_token_never_appears_in_the_provider_or_its_output(dataset):
     p = provider(Fake([succeeded()]))
     assert TOKEN not in repr(p) and TOKEN not in json.dumps(
-        {k: str(v) for k, v in vars(p).items() if not k.startswith("_DatabricksProvider")})
+        {k: str(v) for k, v in vars(p).items() if not k.startswith("_WarehouseProvider")})
     (a,) = p.assess([build_record(dataset, items(dataset)[0][1])], load(1))
     assert TOKEN not in json.dumps(a.as_dict())
 
