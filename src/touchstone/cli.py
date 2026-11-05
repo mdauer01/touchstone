@@ -395,6 +395,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--base-url", dest="base_url",
                        help="openai: the server's API URL — a LiteLLM proxy, vLLM, Groq, "
                             "Ollama (or OPENAI_BASE_URL; default: OpenAI's API)")
+        p.add_argument("--decisions", action="store_true",
+                       help="openai: send each record to OpenAI's Decisions API (typed "
+                            "answers with a probability for each; gpt-6-luna) instead of "
+                            "chat completions")
         p.add_argument("--batch-size", dest="batch_size", type=int, default=1,
                        help="databricks, snowflake: records per statement (default 1; on "
                             "snowflake one failing record fails its whole batch)")
@@ -1246,7 +1250,8 @@ def _cmd_assess(args: argparse.Namespace) -> int:
         return _assess_compare_labels(args)
 
     try:
-        options = {"seed": args.seed, "batch_size": args.batch_size}
+        options = {"seed": args.seed, "batch_size": args.batch_size,
+                   "decisions": args.decisions}
         for name in ("host", "profile", "base_url", "max_tokens", "temperature", "effort",
                      "concurrency"):
             if getattr(args, name) is not None:

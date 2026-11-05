@@ -25,7 +25,8 @@ import time
 from typing import Callable
 
 from touchstone.assess.criteria import Criteria
-from touchstone.assess.providers import ProviderConfig, ProviderError, response_format
+from touchstone.assess.providers import (ProviderConfig, ProviderError, render_prompt,
+                                         response_format)
 from touchstone.assess.providers.direct import DirectProvider
 
 # Models that take server-side `fallbacks: "default"` on the Claude API.
@@ -67,8 +68,8 @@ class AnthropicProvider(DirectProvider):
             client = anthropic.Anthropic(max_retries=4)
         self._client = client
 
-    def _reply(self, prompt: str, criteria: Criteria) -> tuple[str, float | None]:
-        response = self._call(prompt, criteria)
+    def _reply(self, record: dict, criteria: Criteria) -> tuple[str, float | None]:
+        response = self._call(render_prompt(record, criteria), criteria)
         if response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
             raise ProviderError(

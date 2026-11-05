@@ -102,7 +102,7 @@ items:
     FROM main.finance.orders
     WHERE status = 'completed'
     GROUP BY channel
-  label: insufficient_evidence
+  label: formula_drift
   rationale: 'COALESCE(amount, 0) changes the result only when every completed amount in a channel is NULL: the governed SUM gives NULL there and this query gives 0. Nothing else differs, because SUM already skips NULLs and adding 0 is exact. Only refund_amount is declared nullable; whether amount can be NULL is not stated. So equivalence depends on unstated nullability.'
   counterpart_sql: |
     SELECT channel,
@@ -302,7 +302,7 @@ items:
       WHERE status <> 'completed'
     )
     GROUP BY country
-  label: insufficient_evidence
+  label: population_drift
   rationale: The required filter is expressed as an anti-join on order_id. If order_id is unique and non-NULL and status is non-NULL, this keeps exactly the completed orders. Otherwise it does not. A NULL order_id among non-completed orders makes NOT IN yield no rows at all. A NULL-status order is never in the subquery and so is kept. A completed row sharing its order_id with a non-completed row is dropped. Uniqueness and nullability of order_id and status are not stated, so the text cannot decide.
   counterpart_sql: |
     SELECT country,
@@ -456,7 +456,7 @@ items:
     WHERE o.status = 'completed'
       AND o.customer_id = c.customer_id
     GROUP BY o.channel
-  label: insufficient_evidence
+  label: population_drift
   rationale: 'The WHERE clause repeats the join key against the customers side. That rejects the NULL-extended rows, so the LEFT JOIN behaves as an inner join: orders with no matching customer (or a NULL customer_id) are dropped. Duplicate customer_ids in customers would also fan out orders. Reading another relation through a join that can change which orders are counted changes the source.'
   counterpart_sql: |
     SELECT channel,
@@ -473,7 +473,7 @@ items:
     WHERE status = 'completed'
       AND customer_id = customer_id
     GROUP BY country
-  label: insufficient_evidence
+  label: population_drift
   rationale: customer_id = customer_id looks like a tautology, but for a NULL customer_id it evaluates to NULL, so the predicate removes completed orders with no customer. If customer_id is never NULL, nothing is removed and the query equals the governed one. The definitions do not state whether customer_id is nullable.
   counterpart_sql: |
     SELECT country,

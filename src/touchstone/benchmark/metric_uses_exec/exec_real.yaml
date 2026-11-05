@@ -134,7 +134,7 @@ items:
     ORDER BY
         2 DESC, 1
     LIMIT 500
-  label: insufficient_evidence
+  label: formula_drift
   rationale: Looker's COALESCE(SUM(amount), 0) equals SUM(amount) for every non-empty group unless all of a country's completed amounts are NULL (then 0 vs NULL); the spec does not state whether amount is nullable, so the text alone cannot decide.
   counterpart_sql: |
     SELECT country AS orders_country,
@@ -230,7 +230,7 @@ items:
       LEFT JOIN main.finance.customers Customers ON (Orders.customer_id = Customers.customer_id)
     WHERE (Orders.status = 'completed')
     GROUP BY 1
-  label: insufficient_evidence
+  label: source_drift
   rationale: The Tableau data source's LEFT JOIN to customers keeps every order and uses no customer column, so it changes nothing if customers.customer_id is unique but fans out amounts if it is not; key uniqueness is not stated.
   counterpart_sql: |
     SELECT country AS country,
@@ -323,7 +323,7 @@ items:
            sum(amount) - sum(refund_amount) as net_revenue
     from completed
     group by channel
-  label: insufficient_evidence
+  label: population_drift
   rationale: The staging step keeps one row per order_id; that is a no-op if order_id is unique in orders and drops rows (possibly the completed ones) if it is not, and the spec does not state key uniqueness.
   counterpart_sql: |
     SELECT channel,

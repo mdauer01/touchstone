@@ -1168,7 +1168,7 @@ items:
     LEFT JOIN monthly_shape AS ms ON ms.country = s.country AND ms.channel = s.channel
     LEFT JOIN segment_reach AS sr ON sr.country = s.country AND sr.channel = s.channel
     ORDER BY s.country NULLS LAST, s.channel NULLS LAST
-  label: insufficient_evidence
+  label: grain_drift
   rationale: 'CTE revenue is fully governed: status = ''completed'', a month IN (Sep/Oct/Nov 2025) window on a declared dimension, SUM(amount) - SUM(refund_amount), grouped by country and channel. The output rows, however, come from activity JOIN revenue USING (country, channel), an inner equi-join on the grouping keys. activity covers all statuses over the same window, so every revenue group with non-NULL keys has a match and passes through unchanged. A group whose country or channel is NULL can never match, and it is silently dropped. The output equals the governed result only if country and channel are non-nullable. The definitions do not state nullability for these columns, so whether this statement matches the governed metric cannot be decided from the evidence.'
   counterpart_sql: |
     SELECT country, channel, SUM(amount) - SUM(refund_amount) AS net_revenue

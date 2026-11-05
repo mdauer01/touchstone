@@ -47,6 +47,11 @@ policy: |-
     dimension; grouping by anything else, or returning the value once per row; a required
     filter dropped, weakened, broadened or replaced; a different aggregation, column,
     sign, factor or term.
+  - Not a use: when the statement computes something other than this metric and does
+    not present it as this metric (by its output name, a query tag or the asset it
+    feeds) - a count of buyers, a discount total - answer identity not_a_use. A
+    statement that presents its result under the metric's name is a use, whatever it
+    computes.
   - Answer unknown only when the statement cannot be read: it uses a view, temporary view
     or function whose definition is not shown, or its text is cut off.
 components:

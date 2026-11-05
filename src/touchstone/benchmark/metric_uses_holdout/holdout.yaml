@@ -1,0 +1,381 @@
+# Held out from the criteria v3 policy work: none of these items, and none of their
+# patterns as written, were seen while the v3 policy was refined against
+# metric_uses and metric_uses_exec. Labels are decided by logic under the v3 test:
+# equal to the definition for every possible data the definition allows
+# (permitted), different for some possible data (a drift), or unreadable
+# (insufficient_evidence). Model-authored (Claude Opus 5.5, 2026-11-04); no
+# execution check and no human review yet.
+family: holdout
+split: test
+items:
+# ---------------------------------------------------------------- equal by logic
+- id: hold-01
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) FILTER (WHERE status = 'completed') AS gross_revenue
+    FROM main.finance.orders
+  label: permitted_variation
+  rationale: An aggregate FILTER on the required condition sums exactly the completed rows, as a WHERE would; with no grouping both return one row, NULL when there are none.
+- id: hold-02
+  metric: net_revenue
+  sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE NOT (status <> 'completed')
+  label: permitted_variation
+  rationale: NOT (status <> 'completed') is true exactly when status = 'completed' is true; for a NULL status both are NULL and the row is excluded, so the required filter is unchanged.
+- id: hold-03
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND YEAR(order_date) = 2026
+  label: permitted_variation
+  rationale: YEAR(order_date) = 2026 is a time window on the declared order_date dimension (the calendar year 2026), so it is a permitted filter.
+- id: hold-04
+  metric: gross_revenue
+  sql: |
+    SELECT country, channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY GROUPING SETS ((country, channel))
+  label: permitted_variation
+  rationale: A single grouping set is the same as GROUP BY country, channel, both declared dimensions.
+- id: hold-05
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(amount + 0) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: permitted_variation
+  rationale: Adding 0 to a DOUBLE leaves it unchanged and a NULL stays NULL, so each row contributes exactly what it does to SUM(amount).
+- id: hold-06
+  metric: gross_revenue
+  sql: |
+    SELECT country, SUM(amount) AS gross_revenue, SUM(SUM(amount)) OVER () AS all_countries
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+  label: permitted_variation
+  rationale: The window column is an extra output; gross_revenue per country is the governed value grouped by a declared dimension.
+- id: hold-07
+  metric: gross_revenue
+  sql: |
+    SELECT country, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country
+    QUALIFY DENSE_RANK() OVER (ORDER BY SUM(amount) DESC) <= 5
+  label: permitted_variation
+  rationale: QUALIFY keeps the top five countries by value; it limits which groups are returned without changing any group's value.
+- id: hold-08
+  metric: net_revenue
+  sql: |
+    SELECT o.channel, SUM(o.amount) - SUM(o.refund_amount) AS net_revenue
+    FROM main.finance.orders o
+    CROSS JOIN (SELECT 1 AS k) AS one
+    WHERE o.status = 'completed'
+    GROUP BY o.channel
+  label: permitted_variation
+  rationale: The cross join is with a one-row relation built in the statement, so it can neither repeat nor drop an order row.
+- id: hold-09
+  metric: gross_revenue
+  sql: |
+    SELECT country, SUM(channel_gross) AS gross_revenue
+    FROM (
+      SELECT country, channel, SUM(amount) AS channel_gross
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY country, channel
+    ) t
+    GROUP BY country
+  label: permitted_variation
+  rationale: A sum of per-channel sums is the per-country sum; SUM skips a channel whose sum is NULL exactly as it skips NULL amounts, and an all-NULL country is NULL both ways.
+- id: hold-10
+  metric: gross_revenue
+  sql: |
+    SELECT DISTINCT country, SUM(amount) OVER (PARTITION BY country) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+  label: permitted_variation
+  rationale: The window sum gives every row of a country the same per-country value, and DISTINCT collapses those identical output rows to one per country; source rows are not de-duplicated before summing. It equals GROUP BY country, NULL country included.
+- id: hold-11
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+    HAVING SUM(amount) > 1000
+  label: permitted_variation
+  rationale: HAVING on the aggregate drops small channels from the result without changing any returned channel's value.
+- id: hold-12
+  metric: net_revenue
+  sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND order_date < CURRENT_DATE()
+  label: permitted_variation
+  rationale: A relative time window on the declared order_date dimension is a permitted filter.
+- id: hold-13
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) / 1.0 AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+  label: permitted_variation
+  rationale: Dividing a DOUBLE by 1.0 is exact, and NULL stays NULL.
+- id: hold-14
+  metric: net_revenue
+  sql: |
+    WITH completed AS (
+      SELECT order_date, amount, refund_amount
+      FROM main.finance.orders
+      WHERE status = 'completed'
+    )
+    SELECT DATE_TRUNC('MONTH', order_date) AS month,
+           SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM completed
+    WHERE DATE_TRUNC('MONTH', order_date) >= DATE '2026-01-01'
+    GROUP BY DATE_TRUNC('MONTH', order_date)
+  label: permitted_variation
+  rationale: The CTE only projects and applies the required filter; the outer query groups by the declared month dimension and filters on it, with the declared formula.
+- id: hold-15
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND channel <> 'internal' AND order_date IS NOT NULL
+    GROUP BY channel
+  label: permitted_variation
+  rationale: Both extra filters are on declared dimensions (channel, order_date), which the definition permits.
+- id: hold-16
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND channel IN (SELECT channel FROM main.finance.orders WHERE channel IN ('web', 'app'))
+  label: permitted_variation
+  rationale: The subquery lists the web and app channel values present in the source itself, so every web or app order passes and no other does; it is the declared-dimension filter channel IN ('web', 'app').
+# ------------------------------------------------------------ different for some data
+- id: hold-17
+  metric: gross_revenue
+  sql: |
+    SELECT o.country, SUM(o.amount) AS gross_revenue
+    FROM main.finance.orders o
+    WHERE o.status = 'completed'
+      AND EXISTS (SELECT 1 FROM main.finance.orders x WHERE x.order_id = o.order_id)
+    GROUP BY o.country
+  label: population_drift
+  rationale: The self semi-join keeps every order whose order_id matches itself, but an order with a NULL order_id never matches and is dropped; order_id's nullability is not stated.
+- id: hold-18
+  metric: net_revenue
+  sql: |
+    SELECT channel, SUM(amount) - COALESCE(SUM(refund_amount), 0) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: formula_drift
+  rationale: For a channel whose refunds are all NULL the governed formula is NULL (SUM(amount) minus NULL) while this returns SUM(amount); the formula differs for that data.
+- id: hold-19
+  metric: gross_revenue
+  sql: |
+    SELECT country, SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) AS gross_revenue
+    FROM main.finance.orders
+    GROUP BY country
+  label: population_drift
+  rationale: Without the WHERE, every country appears, those with no completed orders at 0 instead of being absent, and a country whose completed amounts are all NULL gets 0 instead of NULL.
+- id: hold-20
+  metric: gross_revenue
+  sql: |
+    SELECT DATE_TRUNC('QUARTER', order_date) AS quarter, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY 1
+  label: grain_drift
+  rationale: Quarter is not a declared dimension; only order_date and month are, and month does not authorize other truncations.
+- id: hold-21
+  metric: gross_revenue
+  sql: |
+    SELECT DATE_TRUNC('MONTH', from_utc_timestamp(order_date, 'America/New_York')) AS month,
+           SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY 1
+  label: grain_drift
+  rationale: Shifting order_date into another time zone before truncating moves orders near month boundaries into other months, so the groups differ from the declared month.
+- id: hold-22
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) / 100 AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+  label: formula_drift
+  rationale: The result is scaled by a factor of 1/100.
+- id: hold-23
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(ROUND(amount, 0)) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: formula_drift
+  rationale: Rounding each amount before summing changes the total whenever amounts have fractions.
+- id: hold-24
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(DISTINCT amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: formula_drift
+  rationale: SUM(DISTINCT) counts two orders with the same amount once.
+- id: hold-25
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE LOWER(status) = 'completed'
+  label: population_drift
+  rationale: LOWER(status) also admits 'COMPLETED' or 'Completed', which the required filter status = 'completed' excludes; the filter is broadened.
+- id: hold-26
+  metric: net_revenue
+  sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND refund_amount IS NULL
+  label: population_drift
+  rationale: refund_amount is not a declared dimension; filtering on it keeps only orders without a refund.
+- id: hold-27
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' OR channel = 'web'
+  label: population_drift
+  rationale: The OR admits non-completed web orders; the required filter is weakened.
+- id: hold-28
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) AS gross_revenue
+    FROM main.finance.orders TIMESTAMP AS OF '2026-01-01'
+    WHERE status = 'completed'
+  label: source_drift
+  rationale: Time travel reads the table as it was on 2026-01-01, not the current source; any change since then changes the result.
+- id: hold-29
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(amount) * 10 AS gross_revenue
+    FROM main.finance.orders TABLESAMPLE (10 PERCENT)
+    WHERE status = 'completed'
+  label: population_drift
+  rationale: A 10 percent sample scaled by ten estimates the total from a subset of rows; it equals the governed value only by chance.
+- id: hold-30
+  metric: net_revenue
+  sql: |
+    SELECT o.country, SUM(o.amount) - SUM(o.refund_amount) AS net_revenue
+    FROM main.finance.orders o
+    JOIN (SELECT customer_id, MAX(segment) AS segment
+          FROM main.finance.customers GROUP BY customer_id) c
+      ON c.customer_id = o.customer_id
+    WHERE o.status = 'completed'
+    GROUP BY o.country
+  label: source_drift
+  rationale: The customer subquery is unique on customer_id, so it cannot repeat orders, but the inner join drops every order whose customer_id has no customer row (or is NULL); referential integrity is not stated.
+- id: hold-31
+  metric: gross_revenue
+  sql: |
+    SELECT country, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY country, channel
+  label: grain_drift
+  rationale: Grouping by channel as well returns one row per country and channel, each labeled only by country, so a country's value is split across rows.
+- id: hold-32
+  metric: gross_revenue
+  sql: |
+    SELECT country, MAX(channel_gross) AS gross_revenue
+    FROM (
+      SELECT country, channel, SUM(amount) AS channel_gross
+      FROM main.finance.orders
+      WHERE status = 'completed'
+      GROUP BY country, channel
+    ) t
+    GROUP BY country
+  label: formula_drift
+  rationale: The largest channel's sum is not the country's sum unless a country has a single channel.
+- id: hold-33
+  metric: gross_revenue
+  sql: |
+    SELECT order_date, SUM(amount) OVER (ORDER BY order_date) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+  label: grain_drift
+  rationale: A running total over order_date, returned once per order row, is cumulative revenue, not the measure per group.
+- id: hold-34
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(o.amount) AS gross_revenue
+    FROM main.finance.orders o
+    WHERE o.status = 'completed'
+      AND o.customer_id IN (SELECT customer_id FROM main.finance.customers
+                            WHERE segment = 'enterprise')
+  label: population_drift
+  rationale: The filter restricts orders by the customer's segment, an attribute of another table that is not a declared dimension.
+# -------------------------------------------------------------------- identity
+- id: hold-35
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(amount) - SUM(refund_amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: identity_mismatch
+  rationale: The net revenue formula is presented under the name gross_revenue.
+# ------------------------------------------------------------------ not a use
+- id: hold-36
+  metric: gross_revenue
+  sql: |
+    SELECT channel, COUNT(DISTINCT customer_id) AS buyers
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: not_a_use
+  rationale: A count of distinct buyers over the governed source, not presented as revenue.
+- id: hold-37
+  metric: gross_revenue
+  sql: |
+    SELECT SUM(discount) AS total_discount
+    FROM main.finance.orders
+    WHERE status = 'completed'
+  label: not_a_use
+  rationale: A discount total, not presented as revenue.
+# -------------------------------------------------------------------- unreadable
+- id: hold-38
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(amount) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed' AND channel IN ('web', 'ap
+  label: insufficient_evidence
+  rationale: The statement text is cut off (as query logs truncate long statements), so the filter that ran is not shown.
+- id: hold-39
+  metric: gross_revenue
+  sql: |
+    SELECT channel, SUM(fx_to_usd(amount, order_date)) AS gross_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+    GROUP BY channel
+  label: insufficient_evidence
+  rationale: An unknown function is applied to each amount inside the aggregate; what it does is not in the evidence.
+- id: hold-40
+  metric: net_revenue
+  sql: |
+    SELECT SUM(amount) - SUM(refund_amount) AS net_revenue
+    FROM main.finance.orders
+    WHERE status = 'completed'
+      AND channel = ${channel_param}
+  label: permitted_variation
+  rationale: 'Corrected after the first runs (2026-11-04): first labeled insufficient_evidence (an unresolved template parameter), but whatever value fills it, the filter is on the declared channel dimension, so the statement is permitted for every value. All four first runs answered permitted.'

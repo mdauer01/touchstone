@@ -286,31 +286,36 @@ touchstone assess run --provider openai --base-url https://litellm.example.com/v
 ## Choosing a model
 
 Any model can be used; not every model judges well. Measured live on 2026-11-04 with
-criteria v2 over both labeled sets (180 uses: 83 drift, 76 permitted):
+criteria v3. "Tuned" is the 180 uses of `metric_uses` and `metric_uses_exec`, which the v3
+policy was refined against; "held out" is the 40 uses of `metric_uses_holdout`, written
+afterwards (the not-a-use rule was added after a first held-out run, so even these are
+not untouched).
 
-| model | where it ran | exact (of 180) | drift called permitted | permitted confirmed (of 76) | cost for the 180 |
-|---|---|---|---|---|---|
-| Claude Haiku 5.5 | Anthropic API | **159** | **2** | 71 | $0.11 |
-| gpt-oss-120b | Databricks Free Edition | 139 | 9 | 60 | workspace pricing |
-| Qwen3-Next-80B | Databricks Free Edition | 114 | 28 | 55 | workspace pricing |
-| Llama 4 Maverick | Databricks Free Edition | 86 | 20 | 35 | workspace pricing |
+| model | how | tuned: exact (of 180) | drift approved | permitted kept (of 76) | held out: exact (of 40) | per judgment |
+|---|---|---|---|---|---|---|
+| **gpt-6-luna** | chat (`--provider openai`) | **169** | **0** | 67 | **37** | ~$0.0005, ~3 s |
+| gpt-6-luna | Decisions API (`--decisions`) | 136 | 3 | 39 | 28 | ~$0.0002, ~0.3 s |
+| Claude Haiku 5.5 | Anthropic API | 160 | 5 | 67 | 33 | ~$0.0005 |
+| gpt-oss-120b | Databricks Free Edition | 117 | 2 | 21 | 25 | workspace pricing |
 
-An earlier study run (174 uses, criteria v1) put Claude Opus 5.5 at 167, Claude Sonnet at
-166 and Claude Haiku at 165. Prices per million tokens (input / output): Opus 5.5 $4 / $20,
-Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50.
+The Haiku and gpt-oss-120b rows were measured before the not-a-use rule (two held-out
+items it decides). Under criteria v2, gpt-6-luna and Haiku each matched 34 of the held-out
+40 (35 under the corrected `hold-40`).
 
 - These are agreement with model-written labels on synthetic uses, not accuracy on a real
   estate. Duplicates are collapsed before judging, so a warehouse pays per distinct
   statement, not per execution.
-- **On real history, approve with a second model.** On the pilot (162 distinct
-  statements), Haiku called a `JOIN` to `order_items` permitted; executed, it overstates
-  net revenue by 42% (up to three items per order). Sonnet 5.5 and Opus 5.5 both withheld
-  approval on it. Of the 12 statements gpt-oss-120b flagged and Haiku permitted, Sonnet
-  confirmed 10 and withheld exactly the two risky ones. Until escalation is built in, run
-  a stronger model over the uses a cheap one calls `likely_permitted`.
-- The same models served inside Databricks or Snowflake are billed through the platform
-  instead. Databricks Free Edition serves no Claude or GPT model, and some of its endpoints
-  (DeepSeek V4 Flash) are not enabled for `ai_query` at all.
+- **The Decisions API is fast and cheap but over-flags.** It answers each question
+  without working through the SQL, and called half the permitted uses drift. Its
+  per-answer probabilities do not separate right from wrong well enough to route review
+  by threshold: sending everything below 0.5 to a person routes 81 of 220 judgments,
+  of which only 36 were wrong.
+- **gpt-oss-120b over-flags under v3** (21 of 76 permitted kept), so on Databricks Free
+  Edition it is not a substitute for a frontier model.
+- On the pilot (162 real statements), gpt-6-luna under v3 left nothing for a person and
+  flagged every drift that was checked against the data: a join to `order_items` (+42%),
+  a row-wise `amount - refund_amount` (−68%: 103 of 192 orders have a NULL refund) and a
+  `DISTINCT` that merges identical orders.
 - **Measure the model you choose before trusting it:**
 
 ```bash

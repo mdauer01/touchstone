@@ -35,3 +35,8 @@ decisions:
   decision: grain_drift
   why: grouping by anything other than a declared dimension exactly as declared changes the grain; an
     unknown function of country is not country (as week is not month, time-05)
+- id: joins-04
+  authored: insufficient_evidence
+  blind: insufficient_evidence
+  decision: source_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'

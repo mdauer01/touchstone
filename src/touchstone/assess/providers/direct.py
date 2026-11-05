@@ -21,7 +21,7 @@ from typing import Callable
 
 from touchstone.assess.criteria import Criteria, aggregate
 from touchstone.assess.providers import (Assessment, ProviderConfig, ProviderError,
-                                         parse_answers, render_prompt)
+                                         parse_answers)
 
 
 class DirectProvider:
@@ -50,28 +50,31 @@ class DirectProvider:
         with ThreadPoolExecutor(self.concurrency) as pool:
             return list(pool.map(lambda r: self._one(r, criteria), records))
 
-    def _reply(self, prompt: str, criteria: Criteria) -> tuple[str, float | None]:
-        """(the reply's text, its estimated cost or None); a refusal, a
-        truncation or a reply without text raises ProviderError."""
+    def _reply(self, record: dict, criteria: Criteria) -> tuple:
+        """(the reply's text, its estimated cost or None[, the probability of
+        each component's answer]); a refusal, a truncation or a reply without
+        text raises ProviderError."""
         raise NotImplementedError
 
     def _one(self, record: dict, criteria: Criteria) -> Assessment:
-        def result(answers, confidence, error=None, kind=None, latency=None, cost=None):
+        def result(answers, confidence, error=None, kind=None, latency=None, cost=None,
+                   probabilities=None):
             return Assessment(
                 record_id=record["record_id"], provider=self.name, model=self.model,
                 criteria_version=criteria.version, answers=answers,
                 label=aggregate(answers, criteria) if error is None else "insufficient_evidence",
-                probabilities=None, confidence=confidence, latency_ms=latency,
+                probabilities=probabilities, confidence=confidence, latency_ms=latency,
                 cost_estimate_usd=cost, error=error, error_kind=kind)
 
         if self.stopped:
             return result({}, None, f"not attempted: {self.stopped}", "not attempted")
         started = self._clock()
         try:
-            text, cost = self._reply(render_prompt(record, criteria), criteria)
+            text, cost, *rest = self._reply(record, criteria)
             latency = round((self._clock() - started) * 1000, 1)
             answers, confidence = parse_answers(text, criteria)
-            return result(answers, confidence, latency=latency, cost=cost)
+            return result(answers, confidence, latency=latency, cost=cost,
+                          probabilities=rest[0] if rest else None)
         except ProviderError as e:
             return result({}, None, str(e), e.kind,
                           round((self._clock() - started) * 1000, 1))

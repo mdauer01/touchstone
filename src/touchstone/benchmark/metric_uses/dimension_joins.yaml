@@ -19,7 +19,7 @@ items:
   - id: joins-04
     metric: net_revenue
     sql: SELECT SUM(o.amount) - SUM(o.refund_amount) AS net_revenue FROM main.finance.orders o JOIN main.finance.customers c ON o.customer_id = c.customer_id WHERE o.status = 'completed'
-    label: insufficient_evidence
+    label: source_drift
     rationale: the inner join drops orders without a matching customer and repeats orders if customer_id is not unique; neither integrity nor uniqueness is stated
   - id: joins-05
     metric: gross_revenue

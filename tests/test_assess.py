@@ -630,7 +630,7 @@ def test_the_cli_exits_nonzero_when_nothing_answered(capsys, monkeypatch):
     monkeypatch.setattr(providers, "get_provider", lambda config: _Broken())
     assert cli.main(["assess", "benchmark", "--split", "test"]) == 1
     out = capsys.readouterr()
-    assert "failed 16/16" in out.out and "nothing was measured" in out.err
+    assert "failed 17/17" in out.out and "nothing was measured" in out.err
     assert "errors: 36" in out.out
 
 

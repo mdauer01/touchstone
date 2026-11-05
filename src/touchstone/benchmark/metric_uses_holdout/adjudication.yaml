@@ -1,0 +1,10 @@
+# Held-out items for criteria v3: written after the v3 policy was refined, and not
+# used to refine it. Labels are decided by logic (equal for every possible data,
+# different for some, or unreadable), each with its rationale in holdout.yaml.
+pass: none
+label_provenance:
+  authored_by: model (Claude Opus 5.5, 2026-11-04), after the v3 policy work
+  reviewed_by: none yet (no execution check, no blind pass)
+  human_review: none yet
+  note: one author and no review; a disagreement with a judge is a question about the item as much as about the judge
+decisions: []

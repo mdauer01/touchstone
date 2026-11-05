@@ -7,13 +7,53 @@ label_provenance:
 decisions:
 - id: llmhard-25
   authored: source_drift
-  decision: insufficient_evidence
-  why: 'differs only when RI/uniqueness fail (execution: targeted_nulls/dirty only); the repo labels the same shape (joins-04) insufficient_evidence under the policy clause on unstated integrity'
+  decision: population_drift
+  why: 'differs only when RI/uniqueness fail (execution: targeted_nulls/dirty only); the repo labels the same shape (joins-04) insufficient_evidence under the policy clause on unstated integrity — superseded: criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
 - id: llmhard-06
   authored: insufficient_evidence
-  decision: insufficient_evidence
-  why: execution found no difference because no channel had all-NULL completed amounts; the difference (NULL vs 0 for an all-NULL group) is verified by reasoning and depends on unstated nullability of amount
+  decision: formula_drift
+  why: 'execution found no difference because no channel had all-NULL completed amounts; the difference (NULL vs 0 for an all-NULL group) is verified by reasoning and depends on unstated nullability of amount — superseded: criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
 - id: longnb-04
   authored: formula_drift
   decision: formula_drift
   why: executed identically on the generated datasets (they barely cover calendar 2025, its window); SUM(amount - refund_amount) differs on targeted data with a NULL refund (90 vs 140)
+- id: llmhard-17
+  authored: insufficient_evidence
+  decision: population_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: llmhard-26
+  authored: insufficient_evidence
+  decision: population_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: parsehard-08
+  authored: insufficient_evidence
+  decision: formula_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: parsehard-25
+  authored: insufficient_evidence
+  decision: source_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: parsehard-29
+  authored: insufficient_evidence
+  decision: formula_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: real-07
+  authored: insufficient_evidence
+  decision: formula_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: real-11
+  authored: insufficient_evidence
+  decision: source_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: real-16
+  authored: insufficient_evidence
+  decision: population_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: longbi-06
+  authored: insufficient_evidence
+  decision: population_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'
+- id: longnb-08
+  authored: insufficient_evidence
+  decision: grain_drift
+  why: 'criteria v3 (2026-11-04): the result depends on a property of the data the definition does not state (key uniqueness, referential integrity or nullability), so the statement does not compute the metric the way it is defined; only an unreadable statement stays insufficient_evidence'

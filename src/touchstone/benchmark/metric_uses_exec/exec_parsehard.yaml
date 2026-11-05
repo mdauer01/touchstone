@@ -138,7 +138,7 @@ items:
              WHERE o.status = 'completed'
                AND o.country = c.country) AS net_revenue
     FROM (SELECT DISTINCT country FROM main.finance.orders WHERE status = 'completed') c
-  label: insufficient_evidence
+  label: formula_drift
   rationale: For every non-NULL country the correlated subquery equals the GROUP BY value, but a NULL country row survives DISTINCT and then matches nothing under o.country = c.country, returning NULL instead of that group's revenue; whether this differs depends on country being nullable, which the definitions do not state.
   counterpart_sql: |
     SELECT country,
@@ -466,7 +466,7 @@ items:
     WHERE o.status = 'completed'
       AND o.order_date >= DATE '2026-01-01'
     GROUP BY o.channel
-  label: insufficient_evidence
+  label: source_drift
   rationale: No customers column is used and a LEFT JOIN never drops orders, so the only possible effect is fan-out; whether any happens depends on customers.customer_id being unique, which is not stated.
   counterpart_sql: |
     SELECT channel,
@@ -546,7 +546,7 @@ items:
     FROM main.finance.orders
     WHERE status = 'completed'
     GROUP BY country
-  label: insufficient_evidence
+  label: formula_drift
   rationale: COALESCE(amount, 0) only matters for a country whose completed amounts are all NULL (0 instead of NULL); amount's nullability is not stated, so whether the result differs cannot be decided from the definitions.
   counterpart_sql: |
     SELECT country,

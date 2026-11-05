@@ -678,9 +678,21 @@ def run_benchmark(provider, *, dataset: dict | None = None, split: str = "test",
             rows_all.append(row)
             rows_fam.setdefault(fam, []).append(row)
         overall = _metrics(rows_all)
+        # Per item: what was asked and what came back, so a run can be
+        # re-scored against revised labels without calling the model again.
+        per_item = []
+        for (fam, item), record in zip(chosen, records):
+            a = assessments.get(record["record_id"])
+            per_item.append({"id": item["id"], "family": fam, "gold": item["label"],
+                             "label": a.label if a else None,
+                             "answers": a.answers if a else {},
+                             "confidence": a.confidence if a else None,
+                             "probabilities": a.probabilities if a else None,
+                             "error_kind": a.error_kind if a else "no assessment"})
         # Per arm: an arm in which no call answered measured nothing, whatever
         # the other arm did.
         arms[arm] = {"overall": overall, "by_family": _by_family(rows_fam),
+                     "items": per_item,
                      "performance_measured": bool(provider.measures_performance)
                      and overall["answered"] > 0}
         if overall["errors"]["count"]:

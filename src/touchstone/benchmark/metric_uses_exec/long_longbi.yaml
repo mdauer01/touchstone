@@ -683,7 +683,7 @@ items:
       ON customer_attrs.country IS NOT DISTINCT FROM channel_gross.country
      AND customer_attrs.channel IS NOT DISTINCT FROM channel_gross.channel
     ORDER BY channel_gross.country NULLS LAST, channel_rank_in_country, channel_gross.channel NULLS LAST
-  label: insufficient_evidence
+  label: population_drift
   rationale: The Hex cell orders_deduped keeps one row per order_id (QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY order_date DESC, amount DESC) = 1), and it does so BEFORE the status = 'completed' filter is applied in orders_in_window. If order_id is unique, this is a no-op and gross_revenue equals the governed SUM(amount) per (country, channel) over the declared order_date window. The definitions do not state that order_id is unique. With duplicate order_ids, the dedupe drops completed rows, and it can keep a later non-completed version in place of a completed one. Whether this is a permitted variation or a population change therefore depends on unstated key uniqueness.
   counterpart_sql: |
     SELECT
