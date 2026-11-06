@@ -1,0 +1,93 @@
+# Advisory criteria, version 6: one assessment, with evidence, three review states.
+#
+# v4 and v5 asked five separate facts and routed them through owner approvals and
+# prohibitions to seven outcomes. Their fresh tests showed the model contradicting its own
+# facts (citing the rule that makes a join safe, then answering that the rows changed) and
+# no evidence a reviewer could check. v6 asks one question - is the result presented as
+# this metric computed the way the definition computes it? - and requires the clause that
+# departs. touchstone.assess.criteria.decide_single maps the answer:
+#
+#   no output presents the metric      -> no_issue_flagged (a result carrying the
+#                                         metric's exact name: could_not_assess)
+#   departs, with an explanation and an
+#     excerpt found in the statement or
+#     the definition                   -> review_needed (a missing required filter is
+#                                         cited from the definition alone)
+#   departs, no excerpt found          -> could_not_assess
+#   preserved                          -> no_issue_flagged
+#   undetermined                       -> could_not_assess
+#
+# Definitions whose joins are not many-to-one (one_to_many) are out of scope for this
+# release: their uses are could_not_assess without a model call.
+#
+# Approvals and prohibitions are not routed: what the metric means (relationship facts,
+# what a dimension means) comes from the definition itself - its comments and stated
+# facts. Every outcome is ADVISORY: a model's reading that orders review, never a positive
+# verdict.
+version: 6
+mode: single
+policy: |-
+  You compare a SQL statement with the authoritative definition of a business metric and
+  say whether a result the statement presents as this metric is computed the way the
+  definition computes it. Fixed code turns your answer into a review state.
+  - The definition is the source of truth: its source, required filters (which rows are
+    eligible), declared joins, dimensions, measure, its comments and any stated facts.
+    Nothing else is known about the data: no column is non-NULL, no key is unique and no
+    row has a match unless the definition says so.
+  - The definition's declared joins are many-to-one lookups, as in a governed metric view:
+    each is applied only when a query uses the joined table's columns and keeps every
+    source row once (left outer). A statement that reads the source alone counts the
+    definition's rows. A statement's own join along a declared key is a different
+    operation: it keeps each row once only if the definition states that each row matches
+    exactly one row there (at least one match makes an INNER JOIN equal to a LEFT JOIN on
+    the same condition; `rely: at_most_one_match` says neither that a match exists nor
+    that it was checked).
+  - Extra filters, groupings, orderings and limits are legitimate variations when they
+    preserve the calculation and the required filters. A slice is not a departure.
+  - A departure: another measure expression, aggregate, column, sign, factor or term; a
+    value transformed after aggregation and still presented as the metric (a running
+    total, a share, an average of sums); a re-aggregation that changes values; a required
+    filter dropped, weakened or replaced, so excluded rows are counted; a join,
+    de-duplication or other relation that repeats or drops counted rows; a dimension
+    presented under the definition's name with another meaning than the definition gives
+    it.
+  - Joins, denominators and re-aggregation always need checking. Whether a join keeps
+    each counted row once depends on the definition's stated facts. An INNER JOIN, a join
+    to a table the definition does not declare, or a join on other keys can drop or repeat
+    rows: if the result depends on facts the definition does not state, the comparison is
+    undetermined, not a departure.
+  - A NULL check preserves the calculation only if the rows it removes cannot change this
+    measure (a SUM ignores rows whose input is NULL; a COUNT(*) does not), or if a required
+    filter already excludes them (a comparison is never true for NULL).
+  - A rewrite equal by logic alone preserves the calculation: CTEs and subqueries, aliases,
+    a cast that cannot change a value, rearranged arithmetic, a predicate that is always
+    true, a date truncated to its own precision.
+  - The output that presents the metric carries the metric's name, alone or qualified
+    only by which rows it covers (a place, a period, a segment). A name that states
+    another quantity - an average, a share or ratio, a growth, a count, a running total,
+    the metric before or after an adjustment - is a separate measure: no output presents
+    this metric.
+  - Answer undetermined when the evidence cannot decide: a view or function whose
+    definition is not shown, cut-off text, a name you cannot resolve.
+components:
+  comparison:
+    question: >-
+      Is the result presented as this metric computed the way the definition computes it,
+      after accounting for the statement's own filters and groupings?
+    answers:
+      departs: it departs from the definition
+      preserved: the calculation, the required filters and the counted rows are the definition's; extra filters and groupings are legitimate variations (also when no output presents the metric)
+      undetermined: the result depends on facts the definition does not state, or the evidence cannot decide
+texts:
+  presented_as: the output column that presents this metric, as the statement names it; empty if no output presents it
+  statement_clause: the statement's text that departs or whose effect depends on unstated facts, quoted exactly; empty when what departs is something the statement lacks (a missing required filter), or when preserved
+  definition_clause: the definition's text it departs from or depends on (a required filter the statement lacks), quoted exactly; empty when preserved
+  explanation: one sentence - what changes in the number and why, or which fact is missing
+labels:
+  review_needed: presented as the metric, but computed differently from the definition (the clause is cited)
+  no_issue_flagged: computed the way the definition computes it, with any legitimate variations, or not presented as this metric
+  could_not_assess: the comparison depends on facts the definition does not state, or the evidence cannot decide
+treatment:
+  review_needed: alert
+  could_not_assess: unresolved
+  no_issue_flagged: none

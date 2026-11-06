@@ -33,6 +33,8 @@ class FakeProvider:
         for record in records:
             rid = record["record_id"]
             answers = {c: self._pick(rid, c, criteria.answers(c)) for c in criteria.components}
+            # v6 evidence: placeholder text, so every review state can occur.
+            answers.update({t: self._pick(rid, t, ["", f"fake {t}"]) for t, _ in criteria.texts})
             label = aggregate(answers, criteria)
             digest = hashlib.sha256(f"{self.seed}|{rid}|p".encode()).digest()
             confidence = 0.34 + (digest[1] / 255) * 0.66

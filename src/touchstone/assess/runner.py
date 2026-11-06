@@ -41,7 +41,7 @@ from sqlglot import exp
 
 from touchstone.adapters.loadutil import load_yaml, parse_yaml
 from touchstone.assess import ADVISORY_LABELS
-from touchstone.assess.criteria import Criteria, finalize, load
+from touchstone.assess.criteria import Criteria, evidence, finalize, load
 from touchstone.assess.record import FORMAT, OBSERVATIONS_NOTE, validate, without_observations
 
 DATASET_DIR = Path(__file__).resolve().parent.parent / "benchmark" / "metric_uses"
@@ -831,6 +831,8 @@ def assess_records(provider, records: list[dict], criteria: Criteria | None = No
             verdict.update({
                 "label": label, "treatment": criteria.treatment_of(label),
                 **({"cited_rules": cited} if cited else {}),
+                **({"evidence": evidence(a["answers"], record)}
+                   if criteria.mode == "single" and not a["error"] else {}),
                 "answers": a["answers"], "confidence": a["confidence"],
                 "provider": a["provider"], "model": a["model"],
                 "criteria_version": a["criteria_version"], "error": a["error"],

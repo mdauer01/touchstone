@@ -34,4 +34,7 @@ ADVISORY_LABELS_V3 = ("suspected_drift", "insufficient_evidence", "likely_permit
 ADVISORY_LABELS_V4 = ("likely_permitted", "unreviewed_variation", "separate_measure",
                       "suspected_definition_change", "prohibited_variation",
                       "insufficient_evidence", "not_a_use")
-ADVISORY_LABELS = tuple(dict.fromkeys(ADVISORY_LABELS_V3 + ADVISORY_LABELS_V4))
+# Criteria v6: one assessment, three review states (see criteria/v6.yaml).
+ADVISORY_LABELS_V6 = ("review_needed", "no_issue_flagged", "could_not_assess")
+ADVISORY_LABELS = tuple(dict.fromkeys(ADVISORY_LABELS_V3 + ADVISORY_LABELS_V4
+                                      + ADVISORY_LABELS_V6))

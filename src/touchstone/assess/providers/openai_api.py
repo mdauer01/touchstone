@@ -157,9 +157,9 @@ class OpenAIProvider(DirectProvider):
         """One Decisions API request: the instructions, policy and definition
         as developer text, the statement as user text (DATA between nonce
         markers), and one `choice` question per component."""
-        if not criteria.policy or criteria.citations:
+        if not criteria.policy or criteria.citations or criteria.texts:
             raise ProviderError("the Decisions API is used with criteria v3 (a policy, no "
-                                "rule citations)", "unsupported criteria")
+                                "rule citations, no free-text evidence)", "unsupported criteria")
         parts = against_definition_parts(record, criteria)
         questions = [{"type": "choice", "name": name,
                       "instructions": spec["question"].strip(),

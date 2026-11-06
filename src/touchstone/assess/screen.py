@@ -19,7 +19,8 @@ _MARKERS = (
     (re.compile(r"\"answers\"\s*:"), "an answers object"),
     (re.compile(r"\bconfidence\b[\"']?\s*[:=]\s*[0-9.]", re.I), "a confidence value"),
     (re.compile(r"\b(likely_permitted|suspected_drift|insufficient_evidence|not_a_use|"
-                r"same_metric|other_metric|permitted_variation)\b", re.I),
+                r"same_metric|other_metric|permitted_variation|review_needed|"
+                r"no_issue_flagged|could_not_assess)\b", re.I),
      "a classifier answer"),
     (re.compile(r"\b(ignore|disregard|override)\b[^\n]{0,60}\b(instruction|previous|above|"
                 r"policy|rules?|definition)", re.I), "an instruction to the reader"),

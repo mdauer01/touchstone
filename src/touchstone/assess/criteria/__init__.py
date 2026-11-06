@@ -31,6 +31,11 @@ V4_COMPONENTS = ("identity", "calculation", "eligibility", "source_rows", "varia
 CORE = {"calculation": ("same", "changed"), "eligibility": ("kept", "changed"),
         "source_rows": ("same", "changed")}
 ALERT, INFORMATIONAL, UNRESOLVED, NONE = "alert", "informational", "unresolved", "none"
+# From v6 (`mode: single`) the model answers one question with evidence;
+# `decide_single` maps it to one of three review states.
+SINGLE_ANSWERS = ("departs", "preserved", "undetermined")
+SINGLE_LABELS = ("review_needed", "no_issue_flagged", "could_not_assess")
+EVIDENCE = ("presented_as", "statement_clause", "definition_clause", "explanation")
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,10 @@ class Criteria:
     # and each outcome has a treatment (alert, informational, unresolved, none).
     citations: bool = False
     treatment: tuple = ()
+    # From v6: "single" — one comparison answer plus free-text evidence
+    # (`texts`: name -> what to write), no owner rules.
+    mode: str = "facts"
+    texts: tuple = ()
 
     def treatment_of(self, label: str | None) -> str | None:
         return dict(self.treatment).get(label) if label else None
@@ -53,13 +62,26 @@ class Criteria:
         return list(self.components[component]["answers"])
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def load(version: int = LATEST) -> Criteria:
     data = load_yaml(_DIR / f"v{version}.yaml")
     if data.get("version") != version:
         raise ValueError(f"criteria v{version}: file declares version {data.get('version')}")
     components = data["components"]
-    if version >= 4:
+    mode = data.get("mode", "facts")
+    texts = tuple((data.get("texts") or {}).items())
+    if mode == "single":
+        if tuple(components) != ("comparison",) \
+                or tuple(components["comparison"]["answers"]) != SINGLE_ANSWERS:
+            raise ValueError(f"criteria v{version}: a single assessment answers `comparison` "
+                             f"with {list(SINGLE_ANSWERS)}")
+        if tuple(name for name, _ in texts) != EVIDENCE:
+            raise ValueError(f"criteria v{version}: texts must be {list(EVIDENCE)}")
+        if tuple(data["labels"]) != SINGLE_LABELS or set(data.get("treatment") or {}) \
+                != set(SINGLE_LABELS):
+            raise ValueError(f"criteria v{version}: labels and treatments must be "
+                             f"{list(SINGLE_LABELS)}")
+    elif version >= 4:
         if tuple(components) != V4_COMPONENTS:
             raise ValueError(f"criteria v{version}: components must be {list(V4_COMPONENTS)}")
         for name, (kept, changed) in CORE.items():
@@ -76,12 +98,15 @@ def load(version: int = LATEST) -> Criteria:
                 raise ValueError(f"criteria v{version}: {name} needs `{UNKNOWN}` and "
                                  f"`{CHANGED[name]}` answers")
     return Criteria(version, components, data["labels"], data.get("policy"),
-                    bool(data.get("citations")), tuple((data.get("treatment") or {}).items()))
+                    bool(data.get("citations")), tuple((data.get("treatment") or {}).items()),
+                    mode, texts)
 
 
 def aggregate(answers: dict[str, str], criteria: Criteria) -> str:
     """The advisory label for one record's component answers. A missing or
     unrecognized answer counts as unknown — never as a match."""
+    if criteria.mode == "single":
+        return decide_single(answers, criteria)
     if criteria.version >= 4:
         return decide(answers, criteria)[0]
     normalized = {}
@@ -188,6 +213,14 @@ def finalize(label: str | None, answers: dict, record: dict,
     Before v4 only `guarded` applies."""
     if label is None:
         return None, {}
+    if criteria.mode == "single":
+        outcome = decide_single(answers, criteria, record)
+        if outcome == "no_issue_flagged" and not _text(answers, "presented_as") \
+                and _named_exactly(record):
+            # Its own output carries the metric's exact name: "nothing presents
+            # the metric" cannot set it aside.
+            return "could_not_assess", {}
+        return outcome, {}
     if criteria.version < 4:
         return guarded(label, record), {}
     outcome, cited = decide(answers, criteria, record)
@@ -198,6 +231,69 @@ def finalize(label: str | None, answers: dict, record: dict,
         # itself as the metric, so it cannot be set aside as another measure.
         return "insufficient_evidence", {}
     return outcome, cited
+
+
+def decide_single(answers: dict, criteria: Criteria, record: dict | None = None) -> str:
+    """Criteria v6: the review state from one comparison answer and its
+    evidence. A departure needs an explanation and at least one excerpt that
+    occurs in the text it quotes — the definition's clause alone is enough
+    when what departs is missing from the statement. Without the record (a
+    provider's provisional label) excerpts are taken at their word, and
+    `finalize` decides again with the record."""
+    comparison = answers.get("comparison")
+    if comparison not in SINGLE_ANSWERS:
+        comparison = "undetermined"
+    if not _text(answers, "presented_as") or comparison == "preserved":
+        return "no_issue_flagged"
+    if comparison == "departs" and _text(answers, "explanation"):
+        found = excerpts_found(answers, record) if record is not None else {
+            k: bool(_text(answers, k)) for k in ("statement_clause", "definition_clause")}
+        if any(found.values()):
+            return "review_needed"
+    return "could_not_assess"
+
+
+def excerpts_found(answers: dict, record: dict) -> dict[str, bool | None]:
+    """Whether each quoted excerpt occurs in the text it quotes — the
+    statement, or the definition's snapshot — ignoring whitespace, case and
+    identifier quoting; parts around an ellipsis must occur in order. None:
+    no excerpt was given."""
+    import re
+
+    def norm(text: str) -> str:
+        return re.sub(r"[\s`\"]+", "", text.lower()).rstrip(";")
+
+    definition = record.get("definition") or {}
+    sources = {"statement_clause": (record.get("execution") or {}).get("statement") or "",
+               "definition_clause": definition.get("snapshot_text") or " ".join(
+                   [str(definition.get("expr") or ""),
+                    *map(str, definition.get("required_filters") or [])])}
+    out: dict[str, bool | None] = {}
+    for key, source in sources.items():
+        quoted = _text(answers, key)
+        if not quoted:
+            out[key] = None
+            continue
+        haystack, at = norm(source), 0
+        for part in filter(None, (norm(p) for p in re.split(r"\.\.\.|…", quoted))):
+            at = haystack.find(part, at)
+            if at < 0:
+                break
+            at += len(part)
+        out[key] = at >= 0
+    return out
+
+
+def evidence(answers: dict, record: dict) -> dict:
+    """Criteria v6: the evidence a verdict shows a reviewer — what the model
+    wrote, and whether each excerpt was found in the text it quotes."""
+    return {**{k: _text(answers, k) for k in EVIDENCE},
+            "excerpts_found": excerpts_found(answers, record)}
+
+
+def _text(answers: dict, key: str) -> str:
+    value = answers.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _named_exactly(record: dict) -> bool:

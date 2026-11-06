@@ -83,6 +83,8 @@ def response_format(criteria: Criteria) -> dict:
     self-reported confidence. The label is not in it — fixed code computes it."""
     components = {name: {"type": "string", "enum": criteria.answers(name)}
                   for name in criteria.components}
+    # From v6: the evidence, as text, beside the one comparison answer.
+    components.update({name: {"type": "string"} for name, _ in criteria.texts})
     return {"type": "json_schema", "json_schema": {
         "name": "touchstone_assessment",
         "schema": {"type": "object",
@@ -124,10 +126,12 @@ def parse_answers(response: str, criteria: Criteria) -> tuple[dict, float]:
         raise ProviderError("the response violates the requested schema: expected exactly "
                             + ", ".join(f"`{k}`" for k in sorted(keys)), "invalid response")
     answers = data["answers"]
-    problems = sorted(set(answers) - set(criteria.components))
+    texts = [name for name, _ in criteria.texts]
+    problems = sorted(set(answers) - set(criteria.components) - set(texts))
     for name in criteria.components:
         if answers.get(name) not in criteria.answers(name):
             problems.append(name)
+    problems += [name for name in texts if not isinstance(answers.get(name), str)]
     if problems:
         raise ProviderError(f"the response violates the requested schema: "
                               f"{', '.join(problems)}", "invalid response")
@@ -137,6 +141,7 @@ def parse_answers(response: str, criteria: Criteria) -> tuple[dict, float]:
         raise ProviderError("the response violates the requested schema: confidence "
                               "must be a number in [0, 1]", "invalid response")
     out = {k: answers[k] for k in criteria.components}
+    out.update({k: answers[k].strip()[:2000] for k in texts})
     if criteria.citations:
         for key, prefix in (("approved_rules", "A"), ("prohibited_rules", "P")):
             ids = data[key]
@@ -188,6 +193,10 @@ def _make_provider(config: ProviderConfig) -> Provider:
     raise NotImplementedError(f"the {config.kind} provider is not implemented")
 
 
+# The labels that are drift flags: v1-v3's, and v6's review state.
+FLAGS = ("suspected_drift", "review_needed")
+
+
 class ConfirmFlags:
     """Votes on drift flags. Every record a first pass labels suspected_drift
     is asked `votes - 1` more times, and the flag stands when at least half of
@@ -207,7 +216,7 @@ class ConfirmFlags:
     def assess(self, records: list[dict], criteria: Criteria) -> list[Assessment]:
         first = self._inner.assess(records, criteria)
         flagged = [r for r, a in zip(records, first)
-                   if a.error is None and a.label == "suspected_drift"]
+                   if a.error is None and a.label in FLAGS]
         if not flagged:
             return first
         again: dict[str, list[Assessment]] = {}
@@ -216,15 +225,15 @@ class ConfirmFlags:
                 again.setdefault(a.record_id, []).append(a)
         out = []
         for a in first:
-            if a.error is not None or a.label != "suspected_drift":
+            if a.error is not None or a.label not in FLAGS:
                 out.append(a)
                 continue
             answered = [a] + [v for v in again.get(a.record_id, []) if v.error is None]
-            drift = sum(v.label == "suspected_drift" for v in answered)
+            drift = sum(v.label == a.label for v in answered)
             if 2 * drift >= len(answered):
                 out.append(a)
                 continue
-            others = [v for v in answered if v.label != "suspected_drift"]
+            others = [v for v in answered if v.label != a.label]
             common = max({v.label for v in others},
                          key=lambda label: sum(v.label == label for v in others))
             out.append(next(v for v in others if v.label == common))
@@ -263,7 +272,12 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
         "questions": "## Questions\n" + "\n".join(
             f"- {name}: {spec['question'].strip()} Answers: {', '.join(spec['answers'])}"
             for name, spec in criteria.components.items())
-            + ("\nReply as JSON: {\"answers\": {component: answer}, \"approved_rules\": "
+            + "".join(f"\n- {name} (text): {what}" for name, what in criteria.texts)
+            + ("\nReply as JSON: {\"answers\": {"
+               + ", ".join(['"comparison": answer'] + [f'"{n}": text' for n, _ in criteria.texts])
+               + "}, \"confidence\": c}"
+               if criteria.mode == "single" else
+               "\nReply as JSON: {\"answers\": {component: answer}, \"approved_rules\": "
                "[ids], \"prohibited_rules\": [ids], \"confidence\": c}, citing only rule ids "
                "listed with the definition (empty lists when none apply)"
                if criteria.citations else
@@ -277,7 +291,8 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
                       + (_owner_rules_text(definition) if criteria.citations else
                          "\nVariations the metric's owner approved (each is permitted, "
                          "whatever the policy says):" + "".join(f"\n- {v}" for v in approved)
-                         if approved else ""),
+                         # v6 routes no approvals: the definition says what the metric means.
+                         if approved and criteria.mode != "single" else ""),
         "statement": "## How the statement names its result\n" + named + "\n\n"
                      + _column_types(record)
                      + f"## Statement as it ran ({record['execution'].get('dialect')})\n"
