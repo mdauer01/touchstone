@@ -142,7 +142,9 @@ def render_check(result: dict) -> str:
         f"criteria v{_e(result.get('criteria_version'))}</div>",
         "<p class='note'>Advisory: a model's reading of each statement against the approved "
         "definition, with the clauses it relies on. It orders review; it is not a verdict "
-        "that any number is right or wrong.</p>",
+        "that any number is right or wrong. No issue flagged does not certify a statement "
+        "correct, and a quoted clause found in the text shows it exists, not that the "
+        "model interpreted it correctly.</p>",
     ]
     if not result.get("measures_performance", True):
         out.append("<p class='note'><b>Fake provider:</b> these answers are a hash of the "

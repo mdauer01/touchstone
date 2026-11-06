@@ -2,8 +2,8 @@
 
 ## 0.1.0 — 2026-11-06
 
-The first release of the narrow product: check the SQL that AI agents and BI tools run
-against your approved metric definitions.
+The first release of the narrow product, advisory metric drift detection: check the SQL
+that AI agents and BI tools run against your approved metric definitions.
 
 - **`touchstone check`**: definitions (Databricks metric views) and a query-history
   export in, `report.html` out. No scan or store needed. Each distinct use of a governed
@@ -18,9 +18,12 @@ against your approved metric definitions.
   could not assess in this release.
 - **Models**: OpenAI or compatible servers, Anthropic, or inside your platform
   (Databricks `ai_query`, Snowflake Cortex).
-- **Measured** on a fresh, frozen test of 26 Genie statements: 7 of 7 drift cases caught,
-  7 of 7 review-needed answers right, 4 could not assess as expected
+- **Measured**: on one frozen test of 26 queries against one metric, it identified all
+  seven expected drifts, raised no false alerts, and abstained on four cases
   ([src/touchstone/benchmark/v6_fresh](src/touchstone/benchmark/v6_fresh/README.md)).
+  One small test, one model; not a production rate.
+- **Advisory**: no issue flagged does not certify a statement correct; a quoted clause
+  found in the text shows it exists, not that the model interpreted it correctly.
 - **Parked** under `touchstone experimental`: the estate scan and reconciliation, the
   bitemporal store, signed receipts and MCP, relationship mining, the equivalence
   oracle, publish, propose and diff. Kept and tested, off the main path.

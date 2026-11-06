@@ -1,8 +1,8 @@
 # touchstone
 
-touchstone checks the SQL that AI agents and BI tools actually run against your approved
-metric definitions, and flags results presented as a governed metric but computed
-differently, with the evidence.
+Advisory metric drift detection. touchstone checks the SQL that AI agents and BI tools
+actually run against your approved metric definitions, and flags results presented as a
+governed metric but computed differently, with the evidence.
 
 Give it your semantic layer's definitions (Databricks metric views today) and a query
 history. For each distinct statement that uses a governed metric it answers one question:
@@ -19,7 +19,10 @@ answer is one of three review states:
   slices; a separately named quantity (an average, a share) is not judged as the metric.
 
 The assessment is advisory: a model's reading that orders review, never a verdict that a
-number is right. Status: 0.1.0, an early release; see [How well it works](#how-well-it-works).
+number is right. **No issue flagged** does not certify a statement correct. Each quoted
+clause is checked against the statement or the definition; a clause found there shows the
+text exists, not that the model interpreted it correctly. Status: 0.1.0, an early release;
+see [How well it works](#how-well-it-works).
 
 - License: [Apache-2.0](LICENSE)
 
@@ -82,14 +85,21 @@ the statements on local data, scored for recall of review-needed cases (an abste
 one counts as a miss), precision of review-needed answers, and abstention.
 
 - On the **dev set** (57 cases from two earlier tests, already seen, used to tune):
-  13 of 13 review-needed cases caught, no false alarm, 9 could not assess. The earlier
-  five-question classifier caught the same 13 with 42 alerts.
-- On a **fresh, frozen test** (26 new Genie statements, judged once, sealed, then scored:
-  [src/touchstone/benchmark/v6_fresh](src/touchstone/benchmark/v6_fresh/README.md)):
-  7 of 7 drift cases caught, 7 of 7 review-needed answers right, 4 could not assess
-  (all four the expected undeclared joins), 26 of 26 states as expected. That met the
-  0.1.0 release bar (no missed drift, at least 80% of review-needed answers right). It is
-  one small test with one model and one metric, not a production rate.
+  13 of 13 review-needed cases caught, no false alarm, 9 could not assess.
+- On **one frozen test of 26 queries against one metric** (new Genie statements, judged
+  once, sealed, then scored:
+  [src/touchstone/benchmark/v6_fresh](src/touchstone/benchmark/v6_fresh/README.md)),
+  it identified all seven expected drifts, raised no false alerts, and abstained on four
+  cases (the four expected joins the definition says nothing about). That met the 0.1.0
+  release bar (no missed drift, at least 80% of review-needed answers right). It is one
+  small test with one model and one metric, not a production rate, and its expected
+  states were written by the developer, challenged by execution and agreed by a second
+  model, not reviewed by an independent person.
+
+Historical comparison, not like for like: on the dev set the earlier five-question
+classifier (criteria v4) raised 42 alerts to catch the same 13. It received owner rules
+instead of the definition's stated facts, under a different policy, so the difference
+reflects the inputs and the policy as well as the classifier.
 
 ### Lower-level commands
 
@@ -418,7 +428,10 @@ person, not sent. `touchstone assess benchmark` scores a backend on 66 labeled m
 uses; a further 114 uses in `benchmark/metric_uses_exec` carry the queries their labels
 were checked against by execution.
 
-**What has been measured, and against what.** On 174 synthetic uses, the rules decided
+**What has been measured, and against what.** These are historical results for the
+earlier criteria (v1–v5), which received owner rules rather than the definition's stated
+facts and were scored against their own labels; they are not comparable with the 0.1.0
+test above. On 174 synthetic uses, the rules decided
 55, with no drift wrongly called permitted; Claude judges matched 165 (Haiku, the default)
 to 167 (Opus 5.5); the open models a Databricks Free Edition workspace serves matched 125
 to 132. The labels

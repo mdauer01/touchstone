@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "touchstone"
 version = "0.1.0"
-description = "Checks that the SQL people run computes governed business metrics the way they are defined, and reports suspected drift clause by clause."
+description = "Advisory metric drift detection: flags SQL presented as a governed metric but computed differently from its approved definition, with the evidence."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

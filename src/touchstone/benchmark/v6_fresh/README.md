@@ -51,6 +51,8 @@ right). What this does and does not show:
 - The expectations were written by the developer from the SQL, challenged by execution
   (one fixture limit, examined) and agreed by a blind second model, 26 of 26. They are
   not independent human labels.
+- No issue flagged does not certify a statement correct, and a quoted clause found in
+  the text shows it exists, not that the model interpreted it correctly.
 - Genie wrote every statement; the questions were chosen to cover drift, ordinary
   investigations, declared slices, undeclared joins, a dimension with another meaning
   and separately named measures.

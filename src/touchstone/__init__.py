@@ -1,4 +1,4 @@
-"""touchstone — checks executed SQL against approved metric definitions.
+"""touchstone — advisory metric drift detection for executed SQL.
 
 Reads a semantic layer's definitions and the query history, and flags results
 presented as a governed metric but computed differently, with the evidence
