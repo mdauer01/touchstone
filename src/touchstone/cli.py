@@ -1306,7 +1306,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
     """Exit 0 when the assessment completed, whatever it found; 1 when some
     statements could not be assessed (a failed model request: the report
     lists them); 2 when the check could not run (invalid input, a provider
-    that cannot be set up, a report that cannot be written)."""
+    that cannot be set up, a report that cannot be written). A use no
+    definition could be compared with is listed as not assessed, with why;
+    it is a fact about the inputs, not a failed run."""
     from collections import Counter
 
     from touchstone.assess.criteria import load as load_criteria
@@ -1315,8 +1317,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
     from touchstone.services.check import run_check
 
     try:
-        provider = _provider_from(args)
         criteria = load_criteria(args.criteria or 6)
+        if criteria.mode != "single":
+            raise ValueError(f"criteria v{criteria.version} does not produce the three "
+                             f"review states check reports; use --criteria 6, or "
+                             f"`touchstone assess run` for older criteria")
+        provider = _provider_from(args)
     except (NotImplementedError, ValueError) as e:
         print(f"touchstone check: {e}", file=sys.stderr)
         return 2
@@ -1327,7 +1333,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     known = set(cache)
     try:
         result = run_check(args.pilot_dir, provider, criteria, dialect=args.dialect, cache=cache)
-    except ProviderError as e:
+    except (ProviderError, ValueError, OSError) as e:
         print(f"touchstone check: {e}", file=sys.stderr)
         return 2
     out = Path(args.out)
@@ -1358,6 +1364,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
           f"{labels['could_not_assess']} · no issue flagged {labels['no_issue_flagged']}")
     stats = result["stats"]
     print(f"  model calls {stats['calls']} · from cache {stats['from_cache']}")
+    if result["not_assessed"]:
+        print(f"  NOT ASSESSED, no definition could be compared (the report says why): "
+              f"{len(result['not_assessed'])}")
     if result["held"]:
         print(f"  NOT ASSESSED, held for a person (steering text in the statement): "
               f"{len(result['held'])}")

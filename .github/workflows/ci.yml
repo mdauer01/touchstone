@@ -1,8 +1,8 @@
 name: ci
 
-# Every claim touchstone makes about itself is re-checked here: the suite, the
-# canonicalization benchmark in four dialects, and the execution oracle, which
-# runs every pair the engine would certify as equal against adversarial data.
+# Every claim touchstone makes about itself is re-checked here: the suite, and for the
+# parked equivalence engine the canonicalization benchmark in four dialects and the
+# execution oracle, which runs every pair it would certify equal on adversarial data.
 
 on:
   push:
@@ -34,6 +34,6 @@ jobs:
       - name: Test suite
         run: pytest -q
       - name: Equivalence benchmark (fails on any false certification)
-        run: touchstone bench
+        run: touchstone experimental bench
       - name: Execution oracle (fails on any disagreement)
-        run: touchstone oracle
+        run: touchstone experimental oracle

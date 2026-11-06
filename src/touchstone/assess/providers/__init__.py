@@ -244,11 +244,17 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
     """From criteria v3: the parts every v3 request is made of — what is the
     same for every record (instructions, policy, questions), the definition
     (the same for every use of a metric), how the statement names its result,
-    and the statement itself, DATA between nonce markers. No schemas, session,
-    execution metadata or touchstone observations."""
+    and the statement itself, DATA between nonce markers. No execution
+    metadata or touchstone observations; column types from v4. In single mode
+    (v6) the session it ran in, when one was recorded: an earlier USE or temp
+    view changes what its names read. When it ran is not sent: `check` only
+    compares a use with a definition that applied at every execution counted."""
     statement = record["execution"]["statement"]
     definition = record["definition"]
-    nonce = hashlib.sha256(json.dumps([statement]).encode()).hexdigest()[:12]
+    session = record.get("session_evidence") or {}
+    events = (session.get("events") or []) if criteria.mode == "single" else []
+    nonce = hashlib.sha256(json.dumps([statement, events] if events else [statement])
+                           .encode()).hexdigest()[:12]
     if definition.get("snapshot_text"):
         truth = definition["snapshot_text"].strip()
     else:
@@ -295,9 +301,30 @@ def against_definition_parts(record: dict, criteria: Criteria) -> dict[str, str]
                          if approved and criteria.mode != "single" else ""),
         "statement": "## How the statement names its result\n" + named + "\n\n"
                      + _column_types(record)
+                     + (_session_text(session, events, nonce) if criteria.mode == "single"
+                        else "")
                      + f"## Statement as it ran ({record['execution'].get('dialect')})\n"
                      f"<<<DATA {nonce}>>>\n{json.dumps(statement)}\n<<<END {nonce}>>>",
     }
+
+
+def _session_text(session: dict, events: list, nonce: str) -> str:
+    """The session a statement ran in, when anything about it was recorded;
+    the earlier statements are DATA, like the statement itself."""
+    context = session.get("context")
+    unresolved = session.get("unresolved") or []
+    if not (context or events or unresolved):
+        return ""
+    return ("## The session it ran in\n"
+            + (f"context: {json.dumps(context)}\n" if context else "")
+            + ("statements recorded before it that can change what its names read, in order "
+               "(a note in parentheses says when its session or order is not certain):\n"
+               f"<<<DATA {nonce}>>>\n"
+               + "\n".join(f"{i}. {json.dumps(e)}" for i, e in enumerate(events, 1))
+               + f"\n<<<END {nonce}>>>\n" if events else "")
+            + ("not resolved to a full catalog.schema.table name, so what they read is not "
+               "known: " + ", ".join(unresolved) + "\n" if unresolved else "")
+            + "\n")
 
 
 def _owner_rules_text(definition: dict) -> str:

@@ -47,6 +47,8 @@ h2{font-size:18px;margin:32px 0 10px}
 @media (max-width:640px){.pair{grid-template-columns:1fr}}
 .pair div{background:var(--code);border-radius:6px;padding:8px 10px;overflow-x:auto}
 .pair span{display:block;font-size:12px;color:var(--muted);margin-bottom:2px}
+.pair code{white-space:pre-wrap}
+.tile{flex:1 1 120px}
 code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 pre{background:var(--code);border-radius:6px;padding:10px;overflow-x:auto;white-space:pre-wrap}
 table{width:100%;border-collapse:collapse;font-size:14px}
@@ -89,7 +91,8 @@ def _finding(v: dict) -> str:
     state = _state(v)
     title = {"review_needed": "Review needed", "could_not_assess": "Could not assess",
              "not_assessed": "Not assessed"}.get(state, state)
-    head = (f"<span class='badge {state}'>{title}</span><b>{_e(v.get('metric'))}</b>"
+    head = (f"<span class='badge {state}'>{title}</span>"
+            f"<b>{_e(v.get('metric') or 'a statement')}</b>"
             + (f" as <code>{_e(ev.get('presented_as'))}</code>" if ev.get("presented_as") else "")
             + f" <span class='note'>{_e(v.get('view'))} &middot; {_e(v.get('executions'))} "
               f"execution(s)</span>")
@@ -123,6 +126,25 @@ def _quiet(v: dict) -> str:
             "</details></td></tr>")
 
 
+def _coverage(history: dict) -> str:
+    """What was read and what was left out, so an empty queue can be told
+    apart from missing coverage."""
+    queries = history.get("queries", 0)
+    parts = [f"Read {history.get('statements', 0)} statement(s) from "
+             f"{history.get('rows', 0)} history row(s): {queries} "
+             f"{'query' if queries == 1 else 'queries'}, "
+             f"{history.get('candidate_statements', 0)} of them computing or naming a "
+             f"governed metric, against {history.get('definitions', 0)} definition(s)."]
+    if history.get("unparseable"):
+        parts.append(f"{history['unparseable']} could not be parsed; "
+                     f"{history.get('unparseable_unrelated', 0)} of them mention no governed "
+                     f"view, source or metric, and the rest are listed as not assessed.")
+    if history.get("executions_outside_window"):
+        parts.append(f"{history['executions_outside_window']} execution(s) fell outside the "
+                     f"package's window and were not read.")
+    return " ".join(parts)
+
+
 def render_check(result: dict) -> str:
     verdicts = result["verdicts"]
     by = {s: [v for v in verdicts if _state(v) == s]
@@ -152,6 +174,7 @@ def render_check(result: dict) -> str:
                    "any statement.</p>")
     out.append("<div class='tiles'>" + "".join(
         f"<div class='tile'><b>{_e(n)}</b>{_e(t)}</div>" for t, n in tiles) + "</div>")
+    out.append(f"<p class='note'>{_e(_coverage(history))}</p>")
     for state, title in [("review_needed", "Review needed"),
                          ("could_not_assess", "Could not assess"),
                          ("not_assessed", "Not assessed")]:

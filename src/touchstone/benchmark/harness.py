@@ -98,7 +98,7 @@ def challenge(test: Path) -> dict:
 
     expected = yaml.safe_load((test / "expected.yaml").read_text())
     ingredients = yaml.safe_load((test / "ingredients.yaml").read_text()) or {}
-    _, _, records = export_records(test / "pilot")
+    _, _, records, _ = export_records(test / "pilot")
     statements = {r["record_id"]: r["execution"]["statement"] for r in records}
     conflicts, checked = [], Counter()
     if set(expected) != set(statements):
