@@ -236,12 +236,12 @@ def test_mining_from_a_warehouse_query_log(tmp_path, capsys):
     con.close()
 
     db = str(tmp_path / "wh-rel.db")
-    assert main(["mine-relationships", "--warehouse", str(wh_path),
+    assert main(["experimental", "mine-relationships", "--warehouse", str(wh_path),
                  "--history-query", "SELECT query_text FROM meta.query_history",
                  "--db", db]) == 0
     assert "mined 2 edge(s)" in capsys.readouterr().out
 
-    assert main(["verify-relationships", "--warehouse", str(wh_path), "--db", db]) == 0
+    assert main(["experimental", "verify-relationships", "--warehouse", str(wh_path), "--db", db]) == 0
     assert "1 checks passed on observed data, 1 failed" in capsys.readouterr().out
 
 
@@ -417,13 +417,13 @@ def test_unsupported_warehouse_names_the_seam():
 
 def test_cli_mine_verify_relationships_roundtrip(acme, tmp_path, capsys):
     db = str(tmp_path / "cli.db")
-    assert main(["mine-relationships", "--history-file", str(acme / "query_history.sql"),
+    assert main(["experimental", "mine-relationships", "--history-file", str(acme / "query_history.sql"),
                  "--catalog", str(acme / "catalog.yml"), "--db", db]) == 0
     out = capsys.readouterr().out
     assert "1 unparseable, skipped" in out
     assert "UNVERIFIED" in out and "orphan" in out
 
-    assert main(["verify-relationships", "--seed", str(acme / "seed.sql"),
+    assert main(["experimental", "verify-relationships", "--seed", str(acme / "seed.sql"),
                  "--dbt", str(acme / "dbt_project"), "--db", db]) == 0
     out = capsys.readouterr().out
     assert "checked 4 edge(s): 2 checks passed on observed data, 2 failed" in out
@@ -431,7 +431,7 @@ def test_cli_mine_verify_relationships_roundtrip(acme, tmp_path, capsys):
     assert "N:M" in out
 
     json_out = tmp_path / "graph.json"
-    assert main(["relationships", "--table", "raw.payments",
+    assert main(["experimental", "relationships", "--table", "raw.payments",
                  "--db", db, "--json", str(json_out)]) == 0
     graph = json.loads(json_out.read_text())
     assert len(graph) == 2 and all(e["status"] == "failed" for e in graph)
@@ -439,21 +439,21 @@ def test_cli_mine_verify_relationships_roundtrip(acme, tmp_path, capsys):
 
 def test_cli_requires_a_source(tmp_path, capsys):
     db = str(tmp_path / "empty.db")
-    assert main(["mine-relationships", "--db", db]) == 2
+    assert main(["experimental", "mine-relationships", "--db", db]) == 2
     assert "needs --history-file" in capsys.readouterr().err
 
     # Read commands refuse a nonexistent store rather than silently creating
     # one — a typo'd --db used to leave a stray empty .db behind and make the
     # error look like a data problem instead of a path problem.
     missing = str(tmp_path / "typo.db")
-    assert main(["relationships", "--db", missing]) == 2
+    assert main(["experimental", "relationships", "--db", missing]) == 2
     assert "no store at" in capsys.readouterr().err
     assert not (tmp_path / "typo.db").exists()
 
     Store(db)  # now the store exists but holds nothing
-    assert main(["verify-relationships", "--db", db]) == 2
+    assert main(["experimental", "verify-relationships", "--db", db]) == 2
     assert "needs --warehouse" in capsys.readouterr().err
-    assert main(["relationships", "--db", db]) == 2
+    assert main(["experimental", "relationships", "--db", db]) == 2
     assert "no relationships recorded" in capsys.readouterr().err
 
 
@@ -461,9 +461,9 @@ def test_mcp_relationships_tool(acme, tmp_path):
     from touchstone.mcp import McpServer
 
     db = str(tmp_path / "mcp.db")
-    main(["mine-relationships", "--history-file", str(acme / "query_history.sql"),
+    main(["experimental", "mine-relationships", "--history-file", str(acme / "query_history.sql"),
           "--catalog", str(acme / "catalog.yml"), "--db", db])
-    main(["verify-relationships", "--seed", str(acme / "seed.sql"),
+    main(["experimental", "verify-relationships", "--seed", str(acme / "seed.sql"),
           "--dbt", str(acme / "dbt_project"), "--db", db])
 
     server = McpServer(db)

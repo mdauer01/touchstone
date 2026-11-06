@@ -129,7 +129,7 @@ def test_cli_never_counts_unverified_edges_as_certified(store, tmp_path, capsys,
     seed = tmp_path / "seed.sql"
     seed.write_text(GOOD)
 
-    assert main(["verify-relationships", "--seed", str(seed), "--db", db]) == 0
+    assert main(["experimental", "verify-relationships", "--seed", str(seed), "--db", db]) == 0
     out = capsys.readouterr().out
     assert "0 checks passed on observed data" in out
     assert "unverified" in out.lower()

@@ -36,12 +36,15 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from touchstone.adapters.base import DeclaredSpec, spec_content_text
 from touchstone.adapters.loadutil import load_yaml
 from touchstone.adapters.uc_metrics import load_uc_metrics
 from touchstone.extraction.sqlutil import UNITS, canonical_unit
-from touchstone.store import Store
+
+if TYPE_CHECKING:   # only verify_against_scan reads a store
+    from touchstone.store import Store
 
 _TOP_KEYS = frozenset({"history", "window", "execution_context", "authority",
                        "compare_against", "snapshots_taken_at", "catalog",

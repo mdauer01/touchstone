@@ -1,27 +1,18 @@
-"""touchstone CLI.
+"""touchstone: check executed SQL against your approved metric definitions.
 
-    touchstone scan (--dbt <dir> | --sql-dir <dir> | --views <dump.sql>)
-                  [--metrics m.yml] [--agents-schema export.json|agents.duckdb]
-                  [--osi osi/|osi_document.json] [--uc-metrics views/]
-                  [--catalog c.yml]
-                  [--execute seed.sql]
-                  [--db touchstone.db] [--report out.html] [--json out.json]
-                  [--dialect duckdb] [--label "..."] [--fail-on contradiction]
-    touchstone publish   --db touchstone.db --warehouse agents.duckdb
-    touchstone diff      --db touchstone.db [--markdown pr.md] [--fail-on-new contradiction]
-    touchstone concepts  --db touchstone.db
-    touchstone history   --db touchstone.db <concept>
-    touchstone asof      --db touchstone.db <concept> --at 2026-03-01T00:00:00Z
-    touchstone attest    --db touchstone.db <concept> [--as-of TS]
-                       [--dbt <dir> | --sql-dir <dir> | --views <dump.sql>]
-                       [--metrics m.yml] [--agents-schema ...] [--osi ...]   # freshness check
-    touchstone bench     [--dialects duckdb,databricks,snowflake,bigquery]
-    touchstone oracle    [--full]          # execute every pair the experimental rules equate
-    touchstone catalog   --warehouse duckdb:///wh.db --out catalog.yml
-    touchstone propose   --db touchstone.db --out proposals/ [--format metrics|ossie|uc-metrics]
-    touchstone monitor   --db touchstone.db --history-file history.sql
-                       [--dbt <dir>] [--catalog c.yml] [--min-runs 2]
-                       [--fail-on-alt]        # alt definitions in the query stream
+    touchstone check --pilot <package dir> --out <dir>
+                     --provider openai|anthropic|databricks|snowflake --model <model>
+        reads the approved metric-view definitions and the query history the package
+        names, assesses every distinct use of a governed metric, and writes report.html:
+        review needed (with the clauses), could not assess (and why), no issue flagged.
+
+    touchstone monitor --pilot <dir> [--export-comparisons f.jsonl]   # rules + records
+    touchstone assess  run --comparisons f.jsonl --out v.jsonl          # assessment alone
+    touchstone catalog --warehouse duckdb:///wh.db --out catalog.yml
+
+Parked features (estate scan and reconciliation, the bitemporal store, signed receipts
+and MCP, relationship mining, the equivalence oracle, publish, propose, diff) live under
+`touchstone experimental <command>`.
 """
 
 from __future__ import annotations
@@ -30,20 +21,32 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from touchstone import __version__
-from touchstone.engine import run_scan
 from touchstone.models import VerdictType
-from touchstone.report.html import render_report, report_json
-from touchstone.store import Store
+
+if TYPE_CHECKING:
+    from touchstone.store import Store
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="touchstone", description=__doc__)
+    parser = argparse.ArgumentParser(prog="touchstone", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"touchstone {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    order = ["check", "monitor", "assess", "catalog", "experimental"]
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{" + ",".join(order) + "}")
+    # The product: `check` (and `monitor`, `assess`, `catalog` beneath it). Everything
+    # else - the estate scan and its store, receipts, relationship mining, the
+    # equivalence oracle, writeback - is parked here: kept and tested, off the main path.
+    p_exp = sub.add_parser(
+        "experimental",
+        help="parked features: estate scan and reconciliation, the bitemporal store, signed "
+             "receipts and MCP, relationship mining, the equivalence oracle, publish and "
+             "propose")
+    exp_sub = p_exp.add_subparsers(dest="experimental_command", required=True)
 
-    p_scan = sub.add_parser("scan", help="scan an estate and reconcile it against declared semantics")
+    p_scan = exp_sub.add_parser("scan", help="scan an estate and reconcile it against declared semantics")
     p_scan.add_argument("--dbt", help="dbt project dir (contains [target/]manifest.json)")
     p_scan.add_argument("--sql-dir", dest="sql_dir",
                         help="directory of .sql files (no dbt required)")
@@ -108,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
              "measured divergence to contradictions",
     )
 
-    p_diff = sub.add_parser(
+    p_diff = exp_sub.add_parser(
         "diff",
         help="newly introduced / resolved verdicts vs a baseline scan (the CI comment)",
     )
@@ -122,19 +125,19 @@ def main(argv: list[str] | None = None) -> int:
         help="non-zero exit only for *newly introduced* verdicts",
     )
 
-    p_concepts = sub.add_parser("concepts", help="list concepts and verdicts from the latest scan")
+    p_concepts = exp_sub.add_parser("concepts", help="list concepts and verdicts from the latest scan")
     p_concepts.add_argument("--db", default="touchstone.db")
 
-    p_history = sub.add_parser("history", help="derived valid-time history of a concept")
+    p_history = exp_sub.add_parser("history", help="derived valid-time history of a concept")
     p_history.add_argument("concept")
     p_history.add_argument("--db", default="touchstone.db")
 
-    p_asof = sub.add_parser("asof", help="what did this concept mean at a point in time")
+    p_asof = exp_sub.add_parser("asof", help="what did this concept mean at a point in time")
     p_asof.add_argument("concept")
     p_asof.add_argument("--at", required=True, help="ISO timestamp, e.g. 2026-03-01T00:00:00Z")
     p_asof.add_argument("--db", default="touchstone.db")
 
-    p_attest = sub.add_parser("attest", help="issue a signed semantic receipt for a concept")
+    p_attest = exp_sub.add_parser("attest", help="issue a signed semantic receipt for a concept")
     p_attest.add_argument("concept")
     p_attest.add_argument("--as-of", dest="as_of")
     p_attest.add_argument("--db", default="touchstone.db")
@@ -143,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     # describe what is deployed (fresh/partial/stale); omitted → unknown.
     _add_estate_args(p_attest)
 
-    p_verify = sub.add_parser(
+    p_verify = exp_sub.add_parser(
         "verify-receipt",
         help="verify a receipt's Ed25519 signature offline (no store needed); "
              "with --db and the estate sources, also re-check the estate NOW "
@@ -164,10 +167,10 @@ def main(argv: list[str] | None = None) -> int:
              "tamper-evidence against the embedded key",
     )
 
-    p_pubkey = sub.add_parser("pubkey", help="print this store's receipt-signing public key")
+    p_pubkey = exp_sub.add_parser("pubkey", help="print this store's receipt-signing public key")
     p_pubkey.add_argument("--db", default="touchstone.db")
 
-    p_mcp = sub.add_parser(
+    p_mcp = exp_sub.add_parser(
         "mcp",
         help="serve attest/asof/history/concepts as MCP tools over stdio "
              "(agents check receipts in the answer path)",
@@ -177,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     # freshness against the live estate before answering.
     _add_estate_args(p_mcp)
 
-    p_bench = sub.add_parser(
+    p_bench = exp_sub.add_parser(
         "bench",
         help="development benchmark of the experimental equality rules across a "
              "SQL-dialect matrix: detection rate, known gaps, and the zero-false-"
@@ -191,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_bench.add_argument("--json", dest="json_out", help="write full results JSON here")
 
-    p_publish = sub.add_parser(
+    p_publish = exp_sub.add_parser(
         "publish",
         help="write signed receipts, their policy assessments and the verdicts "
              "projection into a warehouse (AGENTS.ROOT + touchstone.verdicts)",
@@ -208,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     p_publish.add_argument("--warehouse", required=True,
                            help="DuckDB file to publish AGENTS.ROOT rows into")
 
-    p_mine = sub.add_parser(
+    p_mine = exp_sub.add_parser(
         "mine-relationships",
         help="mine join edges from executed SQL (BI query history) and record "
              "them as candidate relationships — used is not valid",
@@ -223,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     p_mine.add_argument("--db", default="touchstone.db")
     p_mine.add_argument("--dialect", default="duckdb")
 
-    p_verify_rel = sub.add_parser(
+    p_verify_rel = exp_sub.add_parser(
         "verify-relationships",
         help="run cardinality checks (uniqueness, orphans) for known edges "
              "against a warehouse — the step that upgrades used to valid",
@@ -238,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
                                                 "are checked against reality too")
     p_verify_rel.add_argument("--db", default="touchstone.db")
 
-    p_rel = sub.add_parser("relationships",
+    p_rel = exp_sub.add_parser("relationships",
                            help="the relationship graph: checks passed on observed "
                                 "data / failed / unverified, by usage (declared+used / "
                                 "shadow / orphan)")
@@ -246,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     p_rel.add_argument("--json", dest="json_out", help="write full graph JSON here")
     p_rel.add_argument("--db", default="touchstone.db")
 
-    p_oracle = sub.add_parser(
+    p_oracle = exp_sub.add_parser(
         "oracle",
         help="development check: execute every query pair the experimental rules "
              "equate against adversarial DuckDB datasets; exits 1 on any disagreement")
@@ -262,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     p_cat.add_argument("--out", dest="out_path", required=True,
                        help="catalog YAML to write")
 
-    p_prop = sub.add_parser(
+    p_prop = exp_sub.add_parser(
         "propose",
         help="draft resolutions for contradictions and declarations for "
              "shadow metrics — a PR body plus declaration files, nothing applied")
@@ -485,7 +488,10 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--dialect", default="databricks",
                          help="SQL dialect of the history (default: databricks)")
 
+    sub._choices_actions.sort(key=lambda action: order.index(action.dest))  # help: check first
     args = parser.parse_args(argv)
+    if args.command == "experimental":
+        args.command = args.experimental_command
     handler = {
         "scan": _cmd_scan,
         "diff": _cmd_diff,
@@ -572,6 +578,9 @@ def _estate_kwargs(args: argparse.Namespace) -> dict | None:
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
+    from touchstone.engine import run_scan
+    from touchstone.report.html import render_report, report_json
+
     if not (args.dbt or args.sql_dir or args.views_path):
         print("scan needs a computed-SQL source: --dbt, --sql-dir, or --views",
               file=sys.stderr)
@@ -761,13 +770,15 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
-def _open_existing(db: str) -> Store:
+def _open_existing(db: str) -> "Store":
     """Open a store that must already exist.
 
     Read commands used to CREATE an empty .db on a typo'd --db path and then
     report "no scans recorded" — leaving a stray store behind and making the
     error look like a data problem rather than a path problem.
     """
+    from touchstone.store import Store
+
     if not Path(db).exists():
         from touchstone.store import former_store
 
@@ -1061,6 +1072,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 
 def _cmd_mine_relationships(args: argparse.Namespace) -> int:
+    from touchstone.store import Store
+
     from touchstone.adapters.catalog import load_catalog, load_declared_relationships
     from touchstone.extraction.registry import SchemaRegistry
     from touchstone.services.relationships import (
@@ -1579,14 +1592,18 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         print("monitor: --authority does not apply with --pilot — the pilot "
               "package names its own authority", file=sys.stderr)
         return 2
-    store = _open_existing(args.db)
-    scan = store.latest_scan()
-    if scan is None:
-        print("touchstone: no scans recorded — monitor compares the query "
-              "stream against a scan's reference set; run `touchstone scan` "
+    # A pilot package names its approved definitions: no scan needed unless a store
+    # exists to cross-check. Without one, the scan's reference set is the authority.
+    store = scan = None
+    if not args.pilot_dir or Path(args.db).exists():
+        store = _open_existing(args.db)
+        scan = store.latest_scan()
+    if scan is None and not args.pilot_dir:
+        print("touchstone: no scans recorded — without --pilot, monitor compares the query "
+              "stream against a scan's reference set; run `touchstone experimental scan` "
               "first", file=sys.stderr)
         return 2
-    dialect = args.dialect or scan.get("dialect") or "duckdb"
+    dialect = args.dialect or (scan or {}).get("dialect") or "duckdb"
 
     pilot = None
     if args.pilot_dir:
@@ -1624,8 +1641,8 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     if args.views_path:
         from touchstone.adapters.sql_dir import load_views_file
         artifacts += load_views_file(args.views_path, dialect)[0]
-    scan_read_models = any(r["kind"] == "computed"
-                           for r in store.scan_snapshot(scan["scan_id"]))
+    scan_read_models = scan is not None and any(
+        r["kind"] == "computed" for r in store.scan_snapshot(scan["scan_id"]))
     if not artifacts and scan_read_models:
         # Without the scan's models, observed lineage resolves to different
         # terminals than the reference cores' and byte-exact reruns of the
@@ -1688,7 +1705,8 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
 
 def _print_monitor(result: dict) -> None:
     ref = result["reference"]
-    print(f"monitor · against scan {result['scan_id']} · authority "
+    against = f"against scan {result['scan_id']}" if result["scan_id"] else "no scan"
+    print(f"monitor · {against} · authority "
           f"{', '.join(ref['authority_systems']) or 'none'}: {ref['definitions']} "
           f"definition(s) across {ref['concepts']} concept(s)"
           + (f" ({ref['excluded_below_proof']} outside the supported grammar excluded)"
@@ -1961,6 +1979,8 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
 
 
 def _cmd_pubkey(args: argparse.Namespace) -> int:
+    from touchstone.store import Store
+
     from touchstone.signing import ensure_keypair
 
     # A typo'd --db silently CREATED a store and minted a fresh key, which the

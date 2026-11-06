@@ -131,7 +131,7 @@ def test_cli_json_carries_per_execution_attribution(tmp_path, capsys):
             row("B1", GROSS.format(name="net_revenue"), "analyst_b")]
     root, models = make_pilot(tmp_path, rows, view_text=TWO)
     db = str(tmp_path / "cli.db")
-    assert main(["scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
+    assert main(["experimental", "scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
                  "--catalog", str(root / "catalog.yml"), "--dialect", "databricks",
                  "--db", db]) == 0
     out = tmp_path / "f.json"

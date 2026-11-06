@@ -90,7 +90,7 @@ def test_cli_gate_still_fails_after_a_rerun(estate, tmp_path):
     scan(estate, db)
     scan(estate, db)  # retry
 
-    assert main(["diff", "--db", db, "--fail-on-new", "contradiction"]) == 1
+    assert main(["experimental", "diff", "--db", db, "--fail-on-new", "contradiction"]) == 1
 
 
 def test_a_genuine_fix_still_reads_as_resolved(estate, tmp_path):

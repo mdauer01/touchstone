@@ -92,7 +92,7 @@ def test_the_gate_fails_on_an_empty_estate(tmp_path, capsys):
     or a forgotten `dbt compile` turned CI green because nothing was verified
     and so nothing objected."""
     sql_dir, catalog = _estate(tmp_path, {})
-    code = main(["scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
+    code = main(["experimental", "scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
                  "--db", str(tmp_path / "a.db"), "--fail-on", "any"])
     assert code == 1
     assert "no computed SQL" in capsys.readouterr().err
@@ -100,7 +100,7 @@ def test_the_gate_fails_on_an_empty_estate(tmp_path, capsys):
 
 def test_the_gate_fails_when_nothing_yielded_a_measure(tmp_path, capsys):
     sql_dir, catalog = _estate(tmp_path, {"x.sql": "this is not sql at all ((("})
-    code = main(["scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
+    code = main(["experimental", "scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
                  "--db", str(tmp_path / "b.db"), "--fail-on", "any"])
     assert code == 1
     err = capsys.readouterr().err
@@ -111,7 +111,7 @@ def test_parse_failures_are_named(tmp_path, capsys):
     """`unparseable` was computed and never exposed, so an operator saw only
     "yielded no measure" — which reads as "this model defines no metric"."""
     sql_dir, catalog = _estate(tmp_path, {"x.sql": "this is not sql at all ((("})
-    main(["scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
+    main(["experimental", "scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
           "--db", str(tmp_path / "c.db")])
     assert "COULD NOT BE PARSED" in capsys.readouterr().out
 
@@ -119,7 +119,7 @@ def test_parse_failures_are_named(tmp_path, capsys):
 def test_min_coverage_fails_a_scan_that_understood_little(tmp_path, capsys):
     sql_dir, catalog = _estate(tmp_path, {
         "a.sql": "select sum(amount) as revenue from nowhere.unknown_table"})
-    code = main(["scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
+    code = main(["experimental", "scan", "--sql-dir", str(sql_dir), "--catalog", str(catalog),
                  "--db", str(tmp_path / "d.db"), "--min-coverage", "90"])
     assert code == 1
     assert "below the required" in capsys.readouterr().err
@@ -132,7 +132,7 @@ def test_triage_flags_bound_the_output_without_hiding_the_evidence(
     """A first scan of a real estate emits one verdict per undeclared measure —
     764 from 800 models in one measured run. Filtering the terminal must never
     mean dropping them from the store, the report or the JSON."""
-    main(["scan", "--dbt", str(acme / "dbt_project"),
+    main(["experimental", "scan", "--dbt", str(acme / "dbt_project"),
           "--metrics", str(acme / "metrics.yml"),
           "--catalog", str(acme / "catalog.yml"),
           "--db", str(tmp_path / "t.db"), "--min-severity", "40",
@@ -146,7 +146,7 @@ def test_triage_flags_bound_the_output_without_hiding_the_evidence(
 # ----------------------------------------------------------------- operator
 
 def test_a_missing_manifest_is_an_error_not_a_traceback(tmp_path, capsys):
-    code = main(["scan", "--dbt", str(tmp_path / "nope"),
+    code = main(["experimental", "scan", "--dbt", str(tmp_path / "nope"),
                  "--db", str(tmp_path / "e.db")])
     assert code == 2
     assert "touchstone:" in capsys.readouterr().err
@@ -155,7 +155,7 @@ def test_a_missing_manifest_is_an_error_not_a_traceback(tmp_path, capsys):
 def test_a_malformed_metrics_file_names_itself(acme, tmp_path, capsys):
     bad = tmp_path / "bad.yml"
     bad.write_text("metrics: [\n")
-    code = main(["scan", "--dbt", str(acme / "dbt_project"), "--metrics", str(bad),
+    code = main(["experimental", "scan", "--dbt", str(acme / "dbt_project"), "--metrics", str(bad),
                  "--db", str(tmp_path / "f.db")])
     assert code == 2
     err = capsys.readouterr().err
@@ -167,7 +167,7 @@ def test_pubkey_does_not_mint_a_key_for_a_typo(tmp_path, capsys):
     operator then published as the pin — after which every real receipt fails
     verification, and the failure looks like tampering rather than a typo."""
     missing = tmp_path / "typo.db"
-    code = main(["pubkey", "--db", str(missing)])
+    code = main(["experimental", "pubkey", "--db", str(missing)])
     assert code == 2
     assert not missing.exists()
     assert "will not create one" in capsys.readouterr().err

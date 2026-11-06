@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlglot
 from sqlglot import exp
 
 
@@ -380,3 +381,88 @@ def faithful_render(node: exp.Expression, dialect: str) -> str | None:
         return text if sqlglot.parse_one(text, read=dialect) == node else None
     except Exception:  # noqa: BLE001 — a rendering that does not parse is not faithful
         return None
+
+
+def statement_chunks(text: str, dialect: str) -> list[tuple[str, exp.Expression | None]]:
+    """(text, tree) for every statement in a history blob, in order; the tree
+    None for one that does not parse, so what came before what is never lost.
+
+    Statements are split on semicolons OUTSIDE strings and comments, using
+    the dialect's tokenizer, and each is parsed on its own. The previous
+    fallback split the raw text on `;`, so a semicolon inside a literal or a
+    comment split one statement into fragments — a valid statement was lost
+    and double-counted as unparseable, a comment fragment parsed as a
+    "non-query statement", and a SELECT embedded in an INSERT's string
+    literal was counted as an EXECUTION. Counts here are per statement the
+    operator actually ran.
+
+    A comment on the SAME line after a statement's semicolon belongs to that
+    statement (`SELECT …; -- touchstone: metric=gross_revenue`): attached to the
+    next one, it named the wrong query.
+    """
+    from sqlglot.tokens import TokenType
+
+    try:
+        tokens = sqlglot.tokenize(text, read=dialect)
+    except Exception:  # noqa: BLE001 — a blob the tokenizer rejects outright
+        whole, bad = _parse_whole(text, dialect)
+        return [(t.meta.get("source_text") or text.strip(), t) for t in whole] + \
+            [(text.strip(), None)] * bad
+    chunks: list[str] = []
+    start = 0
+    for tok in tokens:
+        if tok.token_type == TokenType.SEMICOLON:
+            if tok.start < start:
+                continue   # consumed with a trailing comment
+            chunk = text[start:tok.start]
+            after = tok.end + 1
+            eol = text.find("\n", after)
+            line = text[after: eol if eol >= 0 else len(text)]
+            tail = line.strip()
+            if tail and (tail.startswith("--") or (tail.startswith("/*") and tail.endswith("*/")
+                                                  and "*/" not in tail[2:-2])):
+                chunk = f"{chunk} {tail}"
+                after = eol if eol >= 0 else len(text)
+            chunks.append(chunk)
+            start = after
+    chunks.append(text[start:])
+
+    statements: list[tuple[str, exp.Expression | None]] = []
+    for chunk in chunks:
+        if not _has_code(chunk, dialect):
+            continue  # whitespace or comments only — nothing was executed
+        try:
+            parsed = sqlglot.parse_one(chunk, read=dialect)
+        except Exception:  # noqa: BLE001
+            statements.append((chunk.strip(), None))
+            continue
+        if parsed is None or isinstance(parsed, exp.Semicolon):
+            continue
+        annotate_truncations(parsed, chunk, dialect)
+        # The text as it ran, for evidence records (assess.record): the tree
+        # is qualified in place later, and a re-render is not always faithful.
+        parsed.meta["source_text"] = chunk.strip()
+        statements.append((chunk.strip(), parsed))
+    return statements
+
+
+def _has_code(chunk: str, dialect: str) -> bool:
+    """True when a chunk holds anything besides whitespace and comments."""
+    if not chunk.strip():
+        return False
+    try:
+        from sqlglot.tokens import TokenType
+        return any(t.token_type != TokenType.SEMICOLON
+                   for t in sqlglot.tokenize(chunk, read=dialect))
+    except Exception:  # noqa: BLE001 — let the parser report it
+        return True
+
+
+def _parse_whole(text: str, dialect: str) -> tuple[list[exp.Expression], int]:
+    try:
+        trees = [s for s in sqlglot.parse(text, read=dialect) if s is not None]
+    except Exception:  # noqa: BLE001
+        return [], 1
+    for tree in trees:
+        annotate_truncations(tree, text, dialect)
+    return trees, 0

@@ -29,8 +29,8 @@ def test_a_store_under_the_former_name_is_never_replaced_by_a_new_one(tmp_path):
     assert not (tmp_path / "touchstone.db").exists()
     Store(former).close()                         # named explicitly, it opens
     Store(tmp_path / "other.db").close()          # only the default name is guarded
-    assert main(["concepts", "--db", str(tmp_path / "touchstone.db")]) == 2
-    assert main(["pubkey", "--db", str(tmp_path / "touchstone.db")]) == 2
+    assert main(["experimental", "concepts", "--db", str(tmp_path / "touchstone.db")]) == 2
+    assert main(["experimental", "pubkey", "--db", str(tmp_path / "touchstone.db")]) == 2
     assert not (tmp_path / "touchstone.db").exists()
 
 
@@ -55,11 +55,11 @@ def test_every_command_that_reads_a_store_refuses_beside_the_former_one(tmp_path
     default = str(here / "touchstone.db")
     capsys.readouterr()
     # Skipping the store dropped the issued-by-this-store check without a word.
-    assert main(["verify-receipt", str(tmp_path / "receipt.json"), "--db", default]) == 2
+    assert main(["experimental", "verify-receipt", str(tmp_path / "receipt.json"), "--db", default]) == 2
     assert "semantix.db exists" in capsys.readouterr().err
     wh = _former_warehouse(tmp_path / "wh.duckdb")
     assert wh is not None
-    assert main(["publish", "--refresh-policy", "--warehouse", str(tmp_path / "wh.duckdb"),
+    assert main(["experimental", "publish", "--refresh-policy", "--warehouse", str(tmp_path / "wh.duckdb"),
                  "--db", default]) == 2
     assert "semantix.db exists" in capsys.readouterr().err
     assert not (here / "touchstone.db").exists()

@@ -89,7 +89,7 @@ def test_a_new_scan_reports_no_positive_or_definitive_verdict(acme_scan, tmp_pat
     assert {VerdictType.CERTIFIED, VerdictType.ALIASING,
             VerdictType.CONTRADICTION} <= engine_kinds(result.verdicts)
     out = tmp_path / "scan.json"
-    assert main(["scan", "--dbt", str(acme_scan["estate"] / "dbt_project"),
+    assert main(["experimental", "scan", "--dbt", str(acme_scan["estate"] / "dbt_project"),
                  "--metrics", str(acme_scan["estate"] / "metrics.yml"),
                  "--catalog", str(acme_scan["estate"] / "catalog.yml"),
                  "--db", str(tmp_path / "x.db"), "--json", str(out)]) == 0
@@ -131,7 +131,7 @@ def test_legacy_stored_rows_surface_mapped_on_every_read(acme_scan, capsys):
         assert receipt.status not in SUSPENDED
     finally:
         store.close()
-    assert main(["concepts", "--db", str(db)]) == 0
+    assert main(["experimental", "concepts", "--db", str(db)]) == 0
     out = capsys.readouterr().out
     assert "CERTIFIED" not in out and "ALIASING" not in out and "CONTRADICTION" not in out
     concepts = _call(McpServer(str(db)), "concepts", {})
@@ -172,7 +172,7 @@ def test_an_old_signed_certified_receipt_is_authentic_but_never_usable(acme_scan
     assert verdict["policy_assessment"]["note"].endswith("the signed receipt is unchanged")
     path = acme_scan["tmp"] / "legacy.json"
     path.write_text(json.dumps(receipt))
-    assert main(["verify-receipt", str(path), "--require-current", "--db", str(acme_scan["db"]),
+    assert main(["experimental", "verify-receipt", str(path), "--require-current", "--db", str(acme_scan["db"]),
                  "--dbt", str(acme_scan["estate"] / "dbt_project"),
                  "--metrics", str(acme_scan["estate"] / "metrics.yml"),
                  "--catalog", str(acme_scan["estate"] / "catalog.yml")]) == 1
@@ -245,7 +245,7 @@ def test_an_already_published_table_is_refreshed_without_touching_receipts(acme_
     con.execute("INSERT INTO agents.root VALUES ('touchstone', 'receipt/gmv', ?)", (content,))
     con.close()
 
-    assert main(["publish", "--refresh-policy", "--warehouse", str(warehouse),
+    assert main(["experimental", "publish", "--refresh-policy", "--warehouse", str(warehouse),
                  "--db", str(acme_scan["db"])]) == 0
     con = duckdb.connect(str(warehouse))
     rows = con.execute("SELECT concept, verdict, published_verdict, usable_for_reliance "
@@ -279,7 +279,7 @@ def test_dbt_gates_cannot_pass_on_a_suspended_claim():
 
 def test_scan_and_diff_gates_still_fail_on_suspected_divergence(acme_scan, tmp_path):
     estate = acme_scan["estate"]
-    args = ["scan", "--dbt", str(estate / "dbt_project"), "--metrics", str(estate / "metrics.yml"),
+    args = ["experimental", "scan", "--dbt", str(estate / "dbt_project"), "--metrics", str(estate / "metrics.yml"),
             "--catalog", str(estate / "catalog.yml"), "--db", str(tmp_path / "g.db")]
     assert main(args + ["--fail-on", "contradiction"]) == 1
 
@@ -333,7 +333,7 @@ def test_breaking_an_experimental_equality_is_lost_not_resolved(acme_scan, tmp_p
 
 
 def test_attest_without_estate_sources_says_not_checked(acme_scan, capsys):
-    assert main(["attest", "gmv", "--db", str(acme_scan["db"])]) == 0
+    assert main(["experimental", "attest", "gmv", "--db", str(acme_scan["db"])]) == 0
     err = capsys.readouterr().err
     assert "estate unchanged: not checked" in err and "claim usable: no" in err
 
@@ -380,7 +380,7 @@ def test_an_as_of_certified_receipt_never_passes_verification(acme_scan, capsys)
     path = acme_scan["tmp"] / "asof.json"
     path.write_text(json.dumps(receipt))
     for extra in ([], ["--db", str(acme_scan["db"])]):
-        assert main(["verify-receipt", str(path), *extra]) == 1, extra
+        assert main(["experimental", "verify-receipt", str(path), *extra]) == 1, extra
     captured = capsys.readouterr()
     assert "claim usable: no" in captured.out
     # The signed status is named as signed, never as a current conclusion.
@@ -402,7 +402,7 @@ def test_a_receipt_the_store_did_not_issue_is_not_a_historical_record(acme_scan,
     _scan(acme_scan["estate"], forged)[1].close()     # a different store
     path = acme_scan["tmp"] / "asof.json"
     path.write_text(json.dumps(receipt))
-    assert main(["verify-receipt", str(path), "--db", str(forged)]) == 1
+    assert main(["experimental", "verify-receipt", str(path), "--db", str(forged)]) == 1
     out = capsys.readouterr().out
     assert "signature authentic: no" in out and "NOT a valid attestation" in out
     verdict = _call(McpServer(str(forged)), "verify_receipt", {"receipt": receipt})
@@ -479,7 +479,7 @@ def test_a_suspected_divergence_states_no_equality_as_fact(acme_scan, tmp_path):
 def test_propose_memo_never_clears_a_site_on_a_suspended_equality(acme_scan, tmp_path, capsys):
     estate = acme_scan["estate"]
     out = tmp_path / "proposals"
-    assert main(["propose", "--db", str(acme_scan["db"]), "--out", str(out),
+    assert main(["experimental", "propose", "--db", str(acme_scan["db"]), "--out", str(out),
                  "--dbt", str(estate / "dbt_project"),
                  "--catalog", str(estate / "catalog.yml")]) == 0
     printed = capsys.readouterr().out
@@ -495,15 +495,15 @@ def test_propose_memo_never_clears_a_site_on_a_suspended_equality(acme_scan, tmp
 def test_refresh_policy_refuses_a_target_with_nothing_published(acme_scan, capsys):
     pytest.importorskip("duckdb")
     typo = acme_scan["tmp"] / "typo.duckdb"
-    assert main(["publish", "--refresh-policy", "--warehouse", str(typo),
+    assert main(["experimental", "publish", "--refresh-policy", "--warehouse", str(typo),
                  "--db", str(acme_scan["db"])]) == 2
     assert not typo.exists()                       # a refresh never creates one
-    assert main(["publish", "--refresh-policy", "--warehouse", "duckdb://",
+    assert main(["experimental", "publish", "--refresh-policy", "--warehouse", "duckdb://",
                  "--db", str(acme_scan["db"])]) == 2
     import duckdb
     empty = acme_scan["tmp"] / "empty.duckdb"
     duckdb.connect(str(empty)).close()
-    assert main(["publish", "--refresh-policy", "--warehouse", str(empty),
+    assert main(["experimental", "publish", "--refresh-policy", "--warehouse", str(empty),
                  "--db", str(acme_scan["db"])]) == 2
     assert "nothing published there" in capsys.readouterr().err
 

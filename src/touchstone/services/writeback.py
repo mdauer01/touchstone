@@ -148,7 +148,7 @@ def publish_receipts(store: Store, warehouse_path: str,
 
     scan = store.latest_scan()
     if scan is None:
-        raise ValueError("no scans in this store — run `touchstone scan` first")
+        raise ValueError("no scans in this store — run `touchstone experimental scan` first")
 
     labels = sorted({v["concept_label"] for v in store.verdicts_for_scan(scan["scan_id"])})
     rows: list[tuple[str, str, str]] = []

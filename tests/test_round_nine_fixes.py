@@ -92,7 +92,7 @@ def test_mcp_fresh_current_receipt_is_current_use(acme, tmp_path):
 # ------------------------------------------------------------- CLI endpoints
 
 def test_cli_attest_never_calls_a_historical_receipt_current(edited_estate, capsys):
-    assert main(["attest", "m", "--as-of", edited_estate["as_of"], "--db", edited_estate["db"]]) == 0
+    assert main(["experimental", "attest", "m", "--as-of", edited_estate["as_of"], "--db", edited_estate["db"]]) == 0
     reliance = [line for line in capsys.readouterr().err.splitlines() if line.startswith("reliance:")]
     assert reliance and "CURRENT" not in reliance[0] and "re-checked" not in reliance[0]
     # Wording under the reliance policy: a record of the instant, with the
@@ -102,7 +102,7 @@ def test_cli_attest_never_calls_a_historical_receipt_current(edited_estate, caps
 
 
 def test_cli_attest_unchecked_current_receipt_is_historical(edited_estate, capsys):
-    assert main(["attest", "m", "--db", edited_estate["db"]]) == 0
+    assert main(["experimental", "attest", "m", "--db", edited_estate["db"]]) == 0
     err = capsys.readouterr().err
     # The reliance line now reads "NOT valid for current use (… claim usable: no)".
     assert "NOT valid for current use" in err and "valid for CURRENT use" not in err
@@ -110,17 +110,17 @@ def test_cli_attest_unchecked_current_receipt_is_historical(edited_estate, capsy
 
 
 def test_cli_verify_receipt_require_current_rejects_historical(edited_estate, capsys):
-    assert main(["attest", "m", "--as-of", edited_estate["as_of"], "--db", edited_estate["db"],
+    assert main(["experimental", "attest", "m", "--as-of", edited_estate["as_of"], "--db", edited_estate["db"],
                  "--sql-dir", edited_estate["sql_dir"], "--metrics", edited_estate["metrics"]]) == 0
     receipt_path = edited_estate["tmp"] / "r.json"
     receipt_path.write_text(capsys.readouterr().out)
     # Historically valid, but its claim is suspended under the conclusions
     # policy: not valid for its stated use either.
-    assert main(["verify-receipt", str(receipt_path)]) == 1
+    assert main(["experimental", "verify-receipt", str(receipt_path)]) == 1
     captured = capsys.readouterr()
     assert "a record of what was said about that instant only" in captured.out
     assert "a record of that instant only" in captured.err   # the stated-use warning
-    assert main(["verify-receipt", str(receipt_path), "--require-current"]) == 1
+    assert main(["experimental", "verify-receipt", str(receipt_path), "--require-current"]) == 1
 
 
 # --------------------------------------------------- oracle comparator

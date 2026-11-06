@@ -102,14 +102,14 @@ def test_broken_dialect_reports_unproven_not_distinguished():
 
 
 def test_cli_rejects_unknown_and_empty_dialects(capsys):
-    assert main(["bench", "--dialects", "duckddb"]) == 2
+    assert main(["experimental", "bench", "--dialects", "duckddb"]) == 2
     assert "unknown dialect(s): duckddb" in capsys.readouterr().err
-    assert main(["bench", "--dialects", " , "]) == 2
+    assert main(["experimental", "bench", "--dialects", " , "]) == 2
     assert "names no dialects" in capsys.readouterr().err
 
 
 def test_cli_dedupes_and_strips_dialects(capsys):
-    assert main(["bench", "--dialects", "duckdb, duckdb"]) == 0
+    assert main(["experimental", "bench", "--dialects", "duckdb, duckdb"]) == 0
     stdout = capsys.readouterr().out
     assert "dialects: duckdb ·" in stdout  # one entry, not two
     assert "18/18" not in stdout           # not double-counted
@@ -126,14 +126,14 @@ def test_false_certification_fails_the_cli_gate(tmp_path, capsys):
     poisoned = tmp_path / "poisoned.yaml"
     poisoned.write_text(yaml.safe_dump(corpus))
 
-    assert main(["bench", "--corpus", str(poisoned)]) == 1
+    assert main(["experimental", "bench", "--corpus", str(poisoned)]) == 1
     err = capsys.readouterr().err
     assert "FALSE EQUALITIES: poisoned-pair" in err
 
 
 def test_cli_bench_reports_and_writes_json(tmp_path, capsys):
     out = tmp_path / "bench.json"
-    assert main(["bench", "--json", str(out)]) == 0
+    assert main(["experimental", "bench", "--json", str(out)]) == 0
     stdout = capsys.readouterr().out
     assert "false equalities: 0" in stdout
     assert "known gaps: 2 confirmed" in stdout
@@ -142,7 +142,7 @@ def test_cli_bench_reports_and_writes_json(tmp_path, capsys):
 
 
 def test_cli_bench_dialects_flag(capsys):
-    assert main(["bench", "--dialects", "duckdb,snowflake"]) == 0
+    assert main(["experimental", "bench", "--dialects", "duckdb,snowflake"]) == 0
     stdout = capsys.readouterr().out
     assert "dialects: duckdb, snowflake" in stdout
     assert "bigquery" not in stdout

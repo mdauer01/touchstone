@@ -170,7 +170,7 @@ def test_publish_receipts_into_agents_root(acme, tmp_path):
 def test_publish_without_scans_is_a_clean_error(tmp_path, capsys):
     empty = tmp_path / "empty.db"
     Store(str(empty)).close()
-    rc = main(["publish", "--db", str(empty),
+    rc = main(["experimental", "publish", "--db", str(empty),
                "--warehouse", str(tmp_path / "w.duckdb")])
     assert rc == 2
-    assert "run `touchstone scan` first" in capsys.readouterr().err
+    assert "run `touchstone experimental scan` first" in capsys.readouterr().err

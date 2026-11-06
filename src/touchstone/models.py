@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -360,3 +361,17 @@ class Receipt:
             "proof_policy": self.proof_policy,
             "signature": self.signature,
         }
+
+
+def utcnow() -> str:
+    """Now, to MILLISECONDS.
+
+    Whole seconds could not represent a change that happens inside one, so two
+    scans in the same second produced a ZERO-LENGTH valid interval: a
+    definition that genuinely existed was live at no instant, and an `asof`
+    query at the only moment it was ever observed returned its replacement.
+    Millisecond precision sorts identically as text (fixed width, zero-padded)
+    and stays comparable with the whole-second timestamps already in a store —
+    `normalize_ts` renders both to this shape.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"

@@ -35,6 +35,7 @@ from pathlib import Path
 # again at attest time — yielding a SIGNED receipt with an empty
 # definition_version and empty lineage.
 from touchstone.extraction.proof import POLICY_ID, policy_in_force
+from touchstone.models import utcnow  # noqa: F401 — re-exported
 from touchstone.models import (
     VERDICT_PRECEDENCE,
     Claim,
@@ -213,20 +214,6 @@ CREATE INDEX IF NOT EXISTS idx_verdicts_scan ON verdicts (scan_id);
 CREATE INDEX IF NOT EXISTS idx_scan_artifacts_scan ON scan_artifacts (scan_id);
 CREATE INDEX IF NOT EXISTS idx_rel_checks_edge ON relationship_checks (edge_id, checked_at);
 """
-
-
-def utcnow() -> str:
-    """Now, to MILLISECONDS.
-
-    Whole seconds could not represent a change that happens inside one, so two
-    scans in the same second produced a ZERO-LENGTH valid interval: a
-    definition that genuinely existed was live at no instant, and an `asof`
-    query at the only moment it was ever observed returned its replacement.
-    Millisecond precision sorts identically as text (fixed width, zero-padded)
-    and stays comparable with the whole-second timestamps already in a store —
-    `normalize_ts` renders both to this shape.
-    """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 @dataclass

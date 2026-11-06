@@ -225,14 +225,14 @@ def test_fresh_receipt_is_not_current_after_the_estate_changes_cli(certified, ca
     capsys.readouterr()
     # Positive verdicts are suspended: --require-current fails even over the
     # unchanged estate — but the estate answer is still yes.
-    assert main(["verify-receipt", str(path), "--require-current", *live]) == 1
+    assert main(["experimental", "verify-receipt", str(path), "--require-current", *live]) == 1
     out = capsys.readouterr().out
     assert "signature authentic: yes · estate unchanged: yes · claim usable: no" in out
-    assert main(["verify-receipt", str(path), "--require-current"]) == 1   # offline
+    assert main(["experimental", "verify-receipt", str(path), "--require-current"]) == 1   # offline
     assert "estate unchanged: not checked" in capsys.readouterr().out
     _edit(certified)
     capsys.readouterr()
-    assert main(["verify-receipt", str(path), "--require-current", *live]) == 1
+    assert main(["experimental", "verify-receipt", str(path), "--require-current", *live]) == 1
     out = capsys.readouterr().out
     assert "live re-check against scan" in out
     assert "signature authentic: yes · estate unchanged: no · claim usable: no" in out

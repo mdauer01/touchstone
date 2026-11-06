@@ -68,7 +68,7 @@ def test_cli_verify_roundtrip(acme, tmp_path, capsys):
     # historical attestation, not permission for current use (round eight).
     receipt_path = tmp_path / "r.json"
     receipt_path.write_text(json.dumps(store.issue_receipt("gmv").as_dict()))
-    assert main(["verify-receipt", str(receipt_path)]) == 1
+    assert main(["experimental", "verify-receipt", str(receipt_path)]) == 1
     assert "signature valid" in capsys.readouterr().out
     # Issued fresh: still only historical OFFLINE — its freshness block says
     # what was true at issuance, not now (round fourteen).
@@ -77,13 +77,13 @@ def test_cli_verify_roundtrip(acme, tmp_path, capsys):
                             catalog_path=str(acme / "catalog.yml"))
     assert fresh["status"] == "fresh", fresh
     receipt_path.write_text(json.dumps(store.issue_receipt("gmv", freshness=fresh).as_dict()))
-    assert main(["verify-receipt", str(receipt_path)]) == 1
+    assert main(["experimental", "verify-receipt", str(receipt_path)]) == 1
     db = str(tmp_path / "s.db")
     capsys.readouterr()
     # Re-checked NOW against the receipt's own scan: the signature is authentic
     # and the estate unchanged — but under the conclusions policy no semantic
     # claim is usable, so the receipt is still not valid for current use.
-    assert main(["verify-receipt", str(receipt_path), "--require-current", "--db", db,
+    assert main(["experimental", "verify-receipt", str(receipt_path), "--require-current", "--db", db,
                  "--dbt", str(acme / "dbt_project"),
                  "--metrics", str(acme / "metrics.yml"),
                  "--catalog", str(acme / "catalog.yml")]) == 1
@@ -91,6 +91,6 @@ def test_cli_verify_roundtrip(acme, tmp_path, capsys):
     assert "signature authentic: yes" in current
     assert "estate unchanged: yes" in current
     assert "claim usable: no" in current
-    assert main(["pubkey", "--db", db]) == 0
+    assert main(["experimental", "pubkey", "--db", db]) == 0
     out = capsys.readouterr().out
     assert "sk_" in out

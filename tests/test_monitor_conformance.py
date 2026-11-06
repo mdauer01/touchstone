@@ -463,7 +463,7 @@ def test_cli_pilot_run_reports_denominators_and_gates_on_violations(tmp_path, ca
     ]
     root, models = make_pilot(tmp_path, _rows(*queries))
     db = str(tmp_path / "cli.db")
-    assert main(["scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
+    assert main(["experimental", "scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
                  "--catalog", str(root / "catalog.yml"), "--dialect", D, "--db", db]) == 0
     capsys.readouterr()
     args = ["monitor", "--pilot", str(root), "--sql-dir", str(models), "--db", db,
@@ -652,7 +652,7 @@ def test_cli_pulls_history_from_a_warehouse_with_named_columns(tmp_path, capsys)
     q = (f"SELECT {GOVERNED} AS net_revenue FROM orders WHERE status = 'completed'")
     root, models = make_pilot(tmp_path, [])
     db = str(tmp_path / "w.db")
-    assert main(["scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
+    assert main(["experimental", "scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
                  "--catalog", str(root / "catalog.yml"), "--dialect", D, "--db", db]) == 0
     wh = tmp_path / "hist.duckdb"
     con = duckdb.connect(str(wh))
@@ -678,7 +678,7 @@ def test_cli_context_assertion_is_explicit(tmp_path, capsys):
     hist = tmp_path / "h.sql"
     hist.write_text(q + ";\n")
     db = str(tmp_path / "c.db")
-    assert main(["scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
+    assert main(["experimental", "scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
                  "--catalog", str(root / "catalog.yml"), "--dialect", D, "--db", db]) == 0
     base = ["monitor", "--history-file", str(hist), "--sql-dir", str(models),
             "--catalog", str(root / "catalog.yml"), "--db", db, "--min-runs", "1",

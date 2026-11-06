@@ -44,7 +44,7 @@ def build_proposals(store: Store, fmt: str = "metrics",
                     dialect: str | None = None) -> dict:
     scan = store.latest_scan()
     if scan is None:
-        raise ValueError("no scans recorded — run `touchstone scan` first")
+        raise ValueError("no scans recorded — run `touchstone experimental scan` first")
     dialect = dialect or scan.get("dialect") or "duckdb"
     concepts = store.concepts_for_scan(scan["scan_id"])
     target = normalize_name(concept) if concept else None

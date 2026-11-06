@@ -75,7 +75,7 @@ def test_breaking_a_metric_is_a_new_verdict_and_fails_the_gate(acme, tmp_path, c
     _scan(estate, db, "after")
 
     md_out = tmp_path / "pr.md"
-    rc = main(["diff", "--db", str(db), "--markdown", str(md_out),
+    rc = main(["experimental", "diff", "--db", str(db), "--markdown", str(md_out),
                "--fail-on-new", "contradiction"])
     assert rc == 1  # the PR introduced a contradiction → gate fails
     md = md_out.read_text()
@@ -100,11 +100,11 @@ def test_no_changes_means_clean_comment_and_exit_zero(acme, tmp_path):
     diff = diff_verdicts(Store(str(db)))
     assert diff["new"] == [] and diff["resolved"] == []
     assert "no new semantic verdicts" in markdown_comment(diff)
-    assert main(["diff", "--db", str(db), "--fail-on-new", "any"]) == 0
+    assert main(["experimental", "diff", "--db", str(db), "--fail-on-new", "any"]) == 0
 
 
 def test_first_scan_has_no_baseline(acme, tmp_path):
     db = tmp_path / "d.db"
     _scan(acme, db, "only")
     assert diff_verdicts(Store(str(db))) is None
-    assert main(["diff", "--db", str(db)]) == 2
+    assert main(["experimental", "diff", "--db", str(db)]) == 2

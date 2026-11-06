@@ -194,7 +194,7 @@ def test_cli_attest_with_estate_sources(acme, tmp_path, capsys):
     scan(estate, db)
 
     assert main([
-        "attest", "net_revenue", "--db", str(db),
+        "experimental", "attest", "net_revenue", "--db", str(db),
         "--dbt", str(estate / "dbt_project"),
         "--metrics", str(estate / "metrics.yml"),
         "--catalog", str(estate / "catalog.yml"),
@@ -208,7 +208,7 @@ def test_cli_attest_with_estate_sources(acme, tmp_path, capsys):
         "select sum(amount) as net_revenue from analytics.stg_orders\n"
     )
     assert main([
-        "attest", "net_revenue", "--db", str(db),
+        "experimental", "attest", "net_revenue", "--db", str(db),
         "--dbt", str(estate / "dbt_project"),
         "--metrics", str(estate / "metrics.yml"),
         "--catalog", str(estate / "catalog.yml"),

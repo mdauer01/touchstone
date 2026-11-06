@@ -1,63 +1,105 @@
 # touchstone
 
-touchstone checks that the SQL people actually run computes your business metrics the
-way they are defined. It reads governed definitions and the SQL that computes or uses
-them, and reports where the two appear to disagree, clause by clause: a dropped filter,
-a changed formula, a different source table, a grouping the definition does not allow.
+touchstone checks the SQL that AI agents and BI tools actually run against your approved
+metric definitions, and flags results presented as a governed metric but computed
+differently, with the evidence.
 
-- **Scan** compares computed definitions (dbt projects, SQL directories, view DDL) with
-  declared ones (metrics YAML, the dbt Semantic Layer, Unity Catalog metric views,
-  Apache Ossie, Agents Schema): suspected divergences, aliases, orphan and shadow metrics,
-  each with clause-level blame.
-- **Monitor** reads warehouse query history and finds uses of governed metrics that
-  depart from their definition, including ad-hoc queries and long BI or notebook SQL.
-- **Advisory assessment** can have a model (Databricks `ai_query` or the Anthropic API)
-  judge every candidate metric use, once per distinct query, cached. It orders triage;
-  it never changes a finding or an exit code.
-- **Receipts and agents.** Signed receipts, an MCP server agents can check before quoting
-  a number, a dbt package and a scan-over-scan diff for CI.
+Give it your semantic layer's definitions (Databricks metric views today) and a query
+history. For each distinct statement that uses a governed metric it answers one question:
+is the number presented as this metric computed the way the definition computes it? The
+answer is one of three review states:
 
-Status: a research preview. touchstone reports *suspected* differences and
-*experimental* matches, not verdicts to rely on: see [Status](#status).
+- **Review needed**: presented as the metric, computed differently. The report shows the
+  definition's clause beside the statement's (or "missing from the statement"), a
+  one-sentence explanation, and where the statement ran: dashboards, jobs, Genie, the editor.
+- **Could not assess**: the answer depends on facts the definition does not state (for
+  example an INNER JOIN to a table the definition does not declare), or the SQL cannot be
+  read. The report says what is missing.
+- **No issue flagged**: computed as defined. Extra filters and groupings are legitimate
+  slices; a separately named quantity (an average, a share) is not judged as the metric.
 
-- Concept: [docs/concept-one-pager.md](docs/concept-one-pager.md)
-- Architecture: [docs/architecture-spec.md](docs/architecture-spec.md)
+The assessment is advisory: a model's reading that orders review, never a verdict that a
+number is right. Status: a research preview; see [How well it works](#how-well-it-works).
+
 - License: [Apache-2.0](LICENSE)
 
 ## Quickstart
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                      # full suite
+.venv/bin/pip install -e ".[dev,openai]"
+export OPENAI_API_KEY=...     # or another provider, below
 
-.venv/bin/touchstone scan \
-  --dbt examples/acme/dbt_project \
-  --metrics examples/acme/metrics.yml \
-  --catalog examples/acme/catalog.yml \
-  --execute examples/acme/seed.sql \
-  --db out/touchstone.db \
-  --report out/acme-report.html \
-  --label "acme demo estate"
+.venv/bin/touchstone check \
+  --pilot src/touchstone/benchmark/v6_dev/pilot \
+  --provider openai --model <model> \
+  --out out/check
 
-open out/acme-report.html
+open out/check/report.html
 ```
 
-(`--execute` is optional; estates without dbt scan via `--sql-dir <dir>` — one SELECT
-per `.sql` file, `-- touchstone: relation=…` header to override naming — and/or
-`--views dump.sql` for a file of `CREATE VIEW` statements.)
+`--provider fake` runs the same pipeline without a key; its answers are placeholders and
+measure nothing. The example package is the TPC-H `revenue` metric view on the Databricks
+sample data with 116 statements from Genie, the TPC-H queries and their reruns on
+dashboards and jobs.
 
-The demo estate is seven compiled dbt models plus a three-metric declared ontology,
-engineered so one scan produces every verdict type:
+### What you bring
 
-| Concept | Verdict | Why |
-| --- | --- | --- |
-| `net_revenue` | **SUSPECTED_DIVERGENCE** (sev 94) | Finance's model appears to match the declared definition; the engine's own blame sentence (unverified observations): *"growth_net_revenue diverges: missing filter status = 'completed'; adds filter status IN ('completed', 'pending'); expression omits refund_amount; reads analytics.stg_orders instead of analytics.fct_orders."* With `--execute`, an observed discrepancy on seed data: totals 114,000 vs baseline 84,000 (+35.7%). |
-| `gmv` | **UNRESOLVED** — experimental comparison | Under the experimental rules, `total_gmv` and `gross_merchandise_value` are equal to the declared metric (the engine would have said CERTIFIED + ALIASING) — CTE vs. inline, flipped predicate order, `NOT =` vs. `<>` and `SELECT *`. Not a conclusion while positive verdicts are suspended. |
-| `customer_ltv` | **ORPHAN_CLAIM** | Declared, never computed anywhere. |
-| `refund_rate` | **SHADOW_METRIC** | Computed in ops, absent from the ontology. |
+A package directory whose `pilot.yml` names:
 
-## Status
+- **the definitions**: each metric view's YAML (`views/*.yaml`, as deployed, with its
+  sha256) and the window it applies in. What a definition states is all the check
+  knows. Write relationship facts ("each line item matches exactly one order") and what
+  a dimension means ("nation is the customer's") in the view's own comments; nothing is
+  assumed. Join forms other than many-to-one (`cardinality: one_to_many`) are not
+  assessed in this release.
+- **the query history**: an export of `system.query.history`
+  ([scripts/export_databricks_history.sql](scripts/export_databricks_history.sql)), as
+  CSV or JSON lines.
+- optionally **a catalog** of column types (`touchstone catalog` writes one).
+
+### Models
+
+The assessment runs where you choose: `--provider openai` (OpenAI or any compatible
+server: LiteLLM, vLLM, Groq, Ollama via `--base-url`), `anthropic`, or inside your data
+platform: `databricks` (`ai_query`) or `snowflake` (Cortex `AI_COMPLETE`), so statements
+and definitions never leave it. Credentials come from the environment, never from
+arguments. Every distinct statement is one call; `--cache` reuses answers across runs.
+
+### Output and exit codes
+
+`report.html` (one self-contained page), `findings.jsonl` (one verdict per use, with the
+evidence and whether each quoted clause was found verbatim) and `comparisons.jsonl` (the
+records as assessed). Exit 0 when the assessment completed, whatever it found; 1 when
+some model requests failed (the report lists what was not assessed); 2 when the check
+could not run or the report could not be written.
+
+### How well it works
+
+Measured with an automatic harness ([src/touchstone/benchmark/harness.py](src/touchstone/benchmark/harness.py)):
+expected states written from each statement and the definition, challenged by running
+the statements on local data, scored for recall of review-needed cases (an abstention on
+one counts as a miss), precision of review-needed answers, and abstention.
+
+- On the **dev set** (57 cases from two earlier tests, already seen, used to tune):
+  13 of 13 review-needed cases caught, no false alarm, 9 could not assess. The earlier
+  five-question classifier caught the same 13 with 42 alerts.
+- The release gate is a **fresh, frozen test**: no missed drift and at least 80% of
+  review-needed answers right. Until it passes, treat results as a preview.
+
+### Lower-level commands
+
+`touchstone monitor --pilot` runs the deterministic rules and exports the records
+`check` assesses; `touchstone assess run` assesses exported records on their own.
+
+## Experimental (parked)
+
+Everything below is kept and tested but off the main path; its commands live under
+`touchstone experimental <command>`: the estate scan and reconciliation, the bitemporal
+store, signed receipts and the MCP server, relationship mining, the execution oracle,
+publish, propose and the CI diff.
+
+### Status of the experimental equality
 
 > **Positive verdicts are suspended.** Nine successive review rounds found new false
 > certifications, the last ones in how SQL is *parsed*: the parser binds `%` and `IS`
@@ -74,9 +116,9 @@ engineered so one scan produces every verdict type:
 >   usable now, however authentic the receipt and however unchanged the estate.
 >
 > Stores and receipts written earlier are read under the same policy; tables
-> published earlier are brought under it with `touchstone publish --refresh-policy`.
+> published earlier are brought under it with `touchstone experimental publish --refresh-policy`.
 
-## Supported scope
+### Supported scope
 
 **What it reads.** SQL in four dialects: DuckDB, Databricks, Snowflake and BigQuery.
 Computed definitions come from dbt manifests, directories of `.sql` files, or
@@ -117,10 +159,10 @@ warehouse, and definitions the scan did not read.
 | Check | What it does |
 | --- | --- |
 | `pytest` | The suite, including one regression file per external review round |
-| `touchstone bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal; pairs outside the proof grammar are listed as refused, with reasons |
-| `touchstone oracle` | Executes every pair the engine would certify equal, and every proof-grade query against its own proof form, on adversarial DuckDB data, compared exactly. It then executes every query the monitor's rules call conforming against its definition plus the identified variation |
+| `touchstone experimental bench` | 32 canonicalization pairs in four dialects; near-misses must never hash-equal; pairs outside the proof grammar are listed as refused, with reasons |
+| `touchstone experimental oracle` | Executes every pair the engine would certify equal, and every proof-grade query against its own proof form, on adversarial DuckDB data, compared exactly. It then executes every query the monitor's rules call conforming against its definition plus the identified variation |
 
-## What is implemented
+### What is implemented
 
 This repository implements **Phase 0** of the architecture spec (§7): adapters (dbt,
 raw SQL directories, view-DDL dumps) → extraction & canonicalization → bitemporal
@@ -136,9 +178,9 @@ the receipt before quoting a number, and an **open equivalence benchmark** (`ben
 
 ```bash
 # change a model's SQL, rescan into the same db, then:
-.venv/bin/touchstone history net_revenue --db out/touchstone.db   # valid-time intervals per site
-.venv/bin/touchstone asof net_revenue --at <timestamp after your first scan> --db out/touchstone.db
-.venv/bin/touchstone attest net_revenue --db out/touchstone.db    # semantic receipt (JSON)
+.venv/bin/touchstone experimental history net_revenue --db out/touchstone.db   # valid-time intervals per site
+.venv/bin/touchstone experimental asof net_revenue --at <timestamp after your first scan> --db out/touchstone.db
+.venv/bin/touchstone experimental attest net_revenue --db out/touchstone.db    # semantic receipt (JSON)
 ```
 
 `history` flags definition changes as restatement boundaries; `asof` answers "what did
@@ -147,10 +189,10 @@ definition versions, physical lineage, known divergences — **Ed25519-signed ov
 canonical payload**, so it verifies offline:
 
 ```bash
-.venv/bin/touchstone attest net_revenue --db out/touchstone.db > receipt.json
-.venv/bin/touchstone verify-receipt receipt.json          # tamper-evidence
-.venv/bin/touchstone pubkey --db out/touchstone.db          # publish; verifiers pin it
-.venv/bin/touchstone verify-receipt receipt.json --public-key <that key>
+.venv/bin/touchstone experimental attest net_revenue --db out/touchstone.db > receipt.json
+.venv/bin/touchstone experimental verify-receipt receipt.json          # tamper-evidence
+.venv/bin/touchstone experimental pubkey --db out/touchstone.db          # publish; verifiers pin it
+.venv/bin/touchstone experimental verify-receipt receipt.json --public-key <that key>
 ```
 
 **Verification decays honestly.** A verdict describes the estate *at scan time*, so
@@ -160,7 +202,7 @@ sources to `attest` (`--dbt` / `--sql-dir` / `--views` / `--metrics` /
 answering:
 
 ```bash
-.venv/bin/touchstone attest gmv --db out/touchstone.db \
+.venv/bin/touchstone experimental attest gmv --db out/touchstone.db \
   --dbt examples/acme/dbt_project --metrics examples/acme/metrics.yml
 # freshness: fresh — estate matches the scanned snapshot
 #   ...or, after someone edits a model without rescanning:
@@ -183,7 +225,7 @@ SQLite; production custody is a KMS behind the same two functions.
 ### Agents check the receipt (MCP)
 
 ```bash
-.venv/bin/touchstone mcp --db out/touchstone.db \
+.venv/bin/touchstone experimental mcp --db out/touchstone.db \
   --dbt examples/acme/dbt_project --metrics examples/acme/metrics.yml
 ```
 
@@ -201,13 +243,13 @@ go undeclared or unenforced, so the only honest record of how tables connect is 
 SQL the BI tool actually ran. touchstone mines that history, then refuses to trust it:
 
 ```bash
-.venv/bin/touchstone mine-relationships \
+.venv/bin/touchstone experimental mine-relationships \
   --history-file examples/acme/query_history.sql \
   --catalog examples/acme/catalog.yml --db out/touchstone.db
 # or pull history from the warehouse itself:
 #   --warehouse wh.duckdb --history-query "SELECT query_text FROM ..."
 
-.venv/bin/touchstone verify-relationships \
+.venv/bin/touchstone experimental verify-relationships \
   --seed examples/acme/seed.sql --dbt examples/acme/dbt_project --db out/touchstone.db
 ```
 
@@ -272,8 +314,8 @@ seam, and unsupported schemes say so instead of silently degrading.
 ### CI: only newly introduced problems
 
 ```bash
-.venv/bin/touchstone scan ... --db ci.db        # on main, then again on the PR branch
-.venv/bin/touchstone diff --db ci.db --markdown pr-comment.md --fail-on-new contradiction
+.venv/bin/touchstone experimental scan ... --db ci.db        # on main, then again on the PR branch
+.venv/bin/touchstone experimental diff --db ci.db --markdown pr-comment.md --fail-on-new contradiction
 ```
 
 `diff` compares the latest scan to the previous one and reports only *newly
@@ -393,7 +435,7 @@ claims, which makes it both a touchstone input and a touchstone output:
 
 ```bash
 # In: OSI metrics + LookML measures become claims alongside the metrics YAML.
-.venv/bin/touchstone scan --dbt examples/acme/dbt_project \
+.venv/bin/touchstone experimental scan --dbt examples/acme/dbt_project \
   --metrics examples/acme/metrics.yml \
   --agents-schema examples/acme/agents_schema.json \
   --catalog examples/acme/catalog.yml --db out/touchstone.db
@@ -403,8 +445,8 @@ claims, which makes it both a touchstone input and a touchstone output:
 # positive verdicts are suspended), a policy/conclusions row, a skill/verify-metric
 # row teaching agents the check — and a structured touchstone.verdicts projection
 # (policy_status, usable_for_reliance) beside it. Rows published before the
-# suspension: `touchstone publish --refresh-policy --warehouse …`.
-.venv/bin/touchstone publish --db out/touchstone.db --warehouse out/agents.duckdb
+# suspension: `touchstone experimental publish --refresh-policy --warehouse …`.
+.venv/bin/touchstone experimental publish --db out/touchstone.db --warehouse out/agents.duckdb
 ```
 
 ### Act on findings — inside rails you already triage
@@ -424,7 +466,7 @@ scheduler — copy-paste templates in
 shares: touchstone routes, proposes, and gates; it never auto-decides which
 side of a suspected divergence is the truth.
 
-The *propose* half is `touchstone propose --out proposals/`: for every
+The *propose* half is `touchstone experimental propose --out proposals/`: for every
 suspected divergence it emits the definition the code actually computes as a
 declaration in the ontology's own format (`--format metrics|ossie|uc-metrics`)
 — Option A, the ontology drifted — and describes the code change that would
@@ -456,7 +498,7 @@ models, and dbt Core v1.12+ both reads `osi/` documents and emits
 Ossie documents are a first-class claims source:
 
 ```bash
-.venv/bin/touchstone scan --dbt my_project \
+.venv/bin/touchstone experimental scan --dbt my_project \
   --osi my_project/osi \        # or my_project/target/osi_document.json
   --catalog catalog.yml --db out/touchstone.db
 ```
@@ -486,7 +528,7 @@ materializes) are governed measure declarations — a claims source:
 
 ```bash
 .venv/bin/touchstone catalog --warehouse duckdb://wh.db --out catalog.yml
-.venv/bin/touchstone scan --sql-dir models/ \
+.venv/bin/touchstone experimental scan --sql-dir models/ \
   --uc-metrics metric_views/ --catalog catalog.yml --db out/touchstone.db
 ```
 
@@ -505,7 +547,7 @@ maintaining YAML that drifts.
 ### Prove the prover — across dialects
 
 ```bash
-.venv/bin/touchstone bench
+.venv/bin/touchstone experimental bench
 # equivalence corpus: 32 pairs · dialects: duckdb, databricks, snowflake, bigquery · proof-grade coverage 78.1%
 #     duckdb      10/10 detected · near-misses 11/20 · coverage 78.1% · false certs 0
 #     ...
@@ -557,8 +599,8 @@ canonicalizer's own output tests the same imagination that wrote the canonicaliz
 ### The execution oracle
 
 ```bash
-.venv/bin/touchstone oracle            # ~740 queries, ~2,500 pairs + ~5,100 proof-form executions, ~8s
-.venv/bin/touchstone oracle --full     # ~24,500 queries, ~111,500 pairs + ~139,000 proof-form executions
+.venv/bin/touchstone experimental oracle            # ~740 queries, ~2,500 pairs + ~5,100 proof-form executions, ~8s
+.venv/bin/touchstone experimental oracle --full     # ~24,500 queries, ~111,500 pairs + ~139,000 proof-form executions
 ```
 
 The oracle does not ask the canonicalizer whether it is right. It generates queries
@@ -684,7 +726,7 @@ and bounds as tagged filters, grouping constructs in grain, join side and ON-les
 in the join graph, CTE bodies as a recursive content digest keyed on the body rather
 than the name). A gate that never lifts is just a refusal to verify.
 
-## Formerly semantix
+### Formerly semantix
 
 The project was called semantix. What was written under that name keeps meaning
 what it meant:
@@ -702,7 +744,7 @@ what it meant:
   fingerprint ids: rescanning an existing store records no restatement.
 - **SQL annotations.** `-- semantix: relation=` directives and `semantix: metric=` tags
   are still read.
-- **Published tables.** `touchstone publish` replaces the rows published under the
+- **Published tables.** `touchstone experimental publish` replaces the rows published under the
   `semantix` provider in `agents.root`. Agent queries that filter
   `provider = 'semantix'` must now filter `provider = 'touchstone'`; the republished
   `skill/verify-metric` row says so. While a `semantix.verdicts` table exists, publish
@@ -718,7 +760,7 @@ what it meant:
   - Environment variables are `TOUCHSTONE_*` (`TOUCHSTONE_DATABRICKS_*`,
     `TOUCHSTONE_QUALIFY_SQLGLOT`).
 
-## Layout (maps 1:1 to the spec's five layers)
+### Layout (maps 1:1 to the spec's five layers)
 
 ```
 src/touchstone/
@@ -742,7 +784,7 @@ src/touchstone/
   engine.py             scan orchestrator
 ```
 
-## Design invariants (from the spec, enforced in code)
+### Design invariants (from the spec, enforced in code)
 
 **Append-only store, derived valid time.** Every write is an INSERT; fingerprints are
 content-addressed and immutable. A definition's valid interval is *never stored* — it is
@@ -781,7 +823,7 @@ little of it.
 **Names live outside the semantic core.** Two definitions are compared by name-free
 canonical content, which is what makes aliasing detectable and renames non-events.
 
-## Phase 0 deviations from the spec
+### Phase 0 deviations from the spec
 
 - **SQLite instead of Postgres** for the store engine. The schema is portable SQL (TEXT
   ids, ISO-8601 timestamps, JSON-as-TEXT) and every query is standard; the spec's v0
@@ -793,14 +835,14 @@ canonical content, which is what makes aliasing detectable and renames non-event
 - **Severity** is scored from verdict type, declared presence, and variant count. Usage
   telemetry (query counts, dashboards) arrives with the warehouse query-history adapter.
 
-## Phase 1 backlog (spec §7) — updated
+### Phase 1 backlog (spec §7) — updated
 
 **Landed early** (Phase-0-honest cuts of Phase 1/2 items): execution against locally
 reproducible data (`scan --execute`; the full harness with warehouse creds, sampling
-windows, and cost controls is still Phase 1) · the CI bot's core (`touchstone diff`
+windows, and cost controls is still Phase 1) · the CI bot's core (`touchstone experimental diff`
 + `--fail-on-new`; the GitHub App wrapper that posts the comment remains) · the
 attestation MCP server (was Phase 2; receipt schema unchanged) · signed receipts ·
-receipt write-back into Agents Schema (`touchstone publish`; DuckDB target now,
+receipt write-back into Agents Schema (`touchstone experimental publish`; DuckDB target now,
 Snowflake connector remains) · an Agents Schema claims adapter (second-platform
 declared source: OSI + LookML) · an Apache Ossie document adapter (`scan --osi`;
 per-dialect variants as sibling claims, cross-dialect drift as contradictions).

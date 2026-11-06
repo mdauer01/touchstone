@@ -48,6 +48,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sqlglot import exp
 
@@ -97,13 +98,15 @@ from touchstone.services.history import (
     from_sql_text,
     qualify_tables,
 )
-from touchstone.services.relationships import statement_chunks  # same package: one
+# One statement splitter for every history consumer, not two drifting ones.
+from touchstone.extraction.sqlutil import statement_chunks
+from touchstone.models import utcnow
 from touchstone.services.resolution import normalize_name
-
-# statement-splitting behavior for every history consumer, not two drifting ones.
 from touchstone.services.session import classify, resolve, written_relations
-from touchstone.store import Store, utcnow
 from touchstone.toolchain import toolchain_status
+
+if TYPE_CHECKING:   # a scan's store is optional: `check` runs without one
+    from touchstone.store import Store
 
 # Aliases the analyst did not write: sqlglot's positional names and the
 # extractor's synthesized `<agg>_<column>` names. Attributing them to a
@@ -291,7 +294,7 @@ def monitor_history(
     if scan is None and pilot is None:
         raise ValueError("no scans recorded — monitor needs a scan's "
                          "reference set to compare against; run `touchstone "
-                         "scan` first")
+                         "experimental scan` first")
     intake = history if isinstance(history, HistoryIntake) else from_sql_text(history)
     if pilot is not None:
         if scan is not None:
@@ -1162,7 +1165,7 @@ def _authority_set(store: Store | None, scan_id: str | None, registry: SchemaReg
     unreadable: dict[str, list[dict]] = {}
     now = _NOW.get()
     if pilot is not None:
-        from touchstone.engine import build_claim
+        from touchstone.claims import build_claim
 
         for view in pilot.views:
             for spec in view.specs:

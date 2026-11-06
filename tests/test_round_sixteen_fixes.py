@@ -276,7 +276,7 @@ def test_a_receipt_this_store_did_not_issue_is_never_current(certified, tmp_path
     path = tmp_path / "forged.json"
     path.write_text(json.dumps(forged))
     capsys.readouterr()
-    assert main(["verify-receipt", str(path), "--require-current", "--db", certified["db"],
+    assert main(["experimental", "verify-receipt", str(path), "--require-current", "--db", certified["db"],
                  "--sql-dir", certified["estate"]["sql_dir"],
                  "--metrics", certified["estate"]["metrics_path"],
                  "--catalog", certified["estate"]["catalog_path"]]) == 1
@@ -514,7 +514,7 @@ def test_monitor_json_creates_its_directory_and_prints_session_counts(tmp_path, 
                f"WHERE status = 'completed'"]
     root, models = make_pilot(tmp_path, _rows(*queries, **CTX))
     db = str(tmp_path / "cli.db")
-    assert main(["scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
+    assert main(["experimental", "scan", "--sql-dir", str(models), "--uc-metrics", str(root / "views"),
                  "--catalog", str(root / "catalog.yml"), "--dialect", D, "--db", db]) == 0
     capsys.readouterr()
     out_json = tmp_path / "new" / "dir" / "m.json"
