@@ -397,10 +397,11 @@ def main(argv: list[str] | None = None) -> int:
                             "Ollama (or OPENAI_BASE_URL; default: OpenAI's API)")
         p.add_argument("--service-tier", dest="service_tier", choices=["auto", "default", "flex"],
                        help="openai: processing tier; flex is half price and slower")
-        p.add_argument("--criteria", type=int, choices=[1, 2, 3, 4],
+        p.add_argument("--criteria", type=int, choices=[1, 2, 3, 4, 5],
                        help="criteria version (default: the latest released, 3); 4 records "
                             "facts and owner-rule citations and decides by treatment "
-                            "(alert, informational, unresolved, none)")
+                            "(alert, informational, unresolved, none); 5 adds the metric "
+                            "view's join semantics and decides prohibited variations first")
         p.add_argument("--votes", type=int, default=1,
                        help="ask every statement flagged as drift this many times in all, "
                             "and keep the flag when at least half the answers agree "

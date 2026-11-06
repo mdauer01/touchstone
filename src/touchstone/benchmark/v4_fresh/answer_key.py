@@ -1,6 +1,7 @@
-"""Build the v4 fresh test's answer key by execution - no person labels anything.
+"""Build a fresh test's answer key by execution - no person labels anything.
 
     python answer_key.py            # writes answer_key.jsonl next to this file
+    python answer_key.py TEST_DIR   # another fresh test of revenue_mv (v5_fresh)
 
 Three questions per statement, each answered by code:
 
@@ -41,7 +42,9 @@ import yaml
 from sqlglot import exp
 
 HERE = Path(__file__).parent
-VIEW = yaml.safe_load((HERE / "pilot/views/revenue_mv.yaml").read_text())
+# The test: this directory, or another fresh test of the same metric view.
+TEST = Path(sys.argv[1]) if __name__ == "__main__" and len(sys.argv) > 1 else HERE
+VIEW = yaml.safe_load((TEST / "pilot/views/revenue_mv.yaml").read_text())
 METRIC = "revenue"
 MEASURE = next(m["expr"] for m in VIEW["measures"] if m["name"] == METRIC)
 # Words that make a "revenue" name state another quantity.
@@ -79,6 +82,9 @@ _NATIONS = ["ALGERIA", "ARGENTINA", "BRAZIL", "CANADA", "EGYPT", "ETHIOPIA", "FR
             "MOROCCO", "MOZAMBIQUE", "PERU", "CHINA", "ROMANIA", "SAUDI ARABIA", "VIETNAM",
             "RUSSIA", "UNITED KINGDOM", "UNITED STATES"]
 _NATION_REGION = [0, 1, 1, 1, 4, 0, 3, 3, 2, 2, 4, 4, 2, 4, 0, 0, 0, 1, 2, 3, 4, 2, 3, 3, 1]
+_COLORS = ["almond", "antique", "aquamarine", "azure", "beige", "blue", "chartreuse",
+           "chocolate", "coral", "cyan", "forest", "green", "ivory", "khaki", "lavender",
+           "lime", "navy", "orchid", "red", "white"]
 
 
 def _pick(values: list[str], key: str) -> str:
@@ -92,9 +98,11 @@ CLEAN = [
     "CREATE TABLE samples.tpch.region AS SELECT * FROM (VALUES " + ", ".join(
         f"({i}, '{r}')" for i, r in enumerate(
             ["AFRICA", "AMERICA", "ASIA", "EUROPE", "MIDDLE EAST"])) + ") t(r_regionkey, r_name)",
+    "ALTER TABLE samples.tpch.region ADD COLUMN r_comment VARCHAR DEFAULT 'comment'",
     "CREATE TABLE samples.tpch.nation AS SELECT * FROM (VALUES " + ", ".join(
         f"({i}, '{n}', {r})" for i, (n, r) in enumerate(zip(_NATIONS, _NATION_REGION))
     ) + ") t(n_nationkey, n_name, n_regionkey)",
+    "ALTER TABLE samples.tpch.nation ADD COLUMN n_comment VARCHAR DEFAULT 'comment'",
     f"""CREATE TABLE samples.tpch.customer AS SELECT i AS c_custkey,
         'Customer#' || lpad(i::VARCHAR, 9, '0') AS c_name, 'Address ' || i AS c_address,
         u(i, 1, 25) AS c_nationkey, '10-' || lpad(i::VARCHAR, 7, '0') AS c_phone,
@@ -111,19 +119,25 @@ CLEAN = [
         {_pick(['SM', 'LG', 'MED', 'JUMBO', 'WRAP'], 'u(i, 7, 5)')} || ' ' ||
         {_pick(['CASE', 'BOX', 'BAG', 'JAR', 'PKG', 'PACK', 'CAN', 'DRUM'], 'u(i, 8, 8)')}
           AS p_container,
-        ((90000 + ((i // 10) % 20001) + 100 * (i % 1000)) / 100.0)::DECIMAL(15, 2) AS p_retailprice
+        ((90000 + ((i // 10) % 20001) + 100 * (i % 1000)) / 100.0)::DECIMAL(15, 2) AS p_retailprice,
+        {_pick(_COLORS, 'u(i, 9, 20)')} || ' ' || {_pick(_COLORS, 'u(i, 10, 20)')} AS p_name,
+        'Manufacturer#' || (u(i, 1, 5) + 1) AS p_mfgr, 'comment ' || i AS p_comment
         FROM range(1, 20001) t(i)""",
     """CREATE TABLE samples.tpch.supplier AS SELECT i AS s_suppkey,
-        u(i, 1, 25) AS s_nationkey FROM range(1, 1001) t(i)""",
+        u(i, 1, 25) AS s_nationkey, 'Supplier#' || lpad(i::VARCHAR, 9, '0') AS s_name,
+        'Address ' || i AS s_address, '20-' || lpad(i::VARCHAR, 7, '0') AS s_phone,
+        ((u(i, 2, 1099999) - 99999) / 100.0)::DECIMAL(15, 2) AS s_acctbal,
+        'comment ' || i AS s_comment FROM range(1, 1001) t(i)""",
     f"""CREATE TABLE orders_base AS SELECT i AS o_orderkey, u(i, 1, 30000) + 1 AS o_custkey,
         DATE '1992-01-01' + u(i, 2, 2406) AS o_orderdate,
         {_pick(['1-URGENT', '2-HIGH', '3-MEDIUM', '4-NOT SPECIFIED', '5-LOW'], 'u(i, 3, 5)')}
-          AS o_orderpriority, 0 AS o_shippriority
+          AS o_orderpriority, 0 AS o_shippriority,
+        'Clerk#' || lpad((u(i, 5, 1000) + 1)::VARCHAR, 9, '0') AS o_clerk, 'comment ' || i AS o_comment
         FROM range(1, 300001) t(i)""",
     f"""CREATE TABLE samples.tpch.lineitem AS
         WITH l AS (
           SELECT o_orderkey AS l_orderkey, n AS l_linenumber, o_orderkey * 8 + n AS k,
-                 o_orderdate + u(o_orderkey * 8 + n, 6, 121) + 1 AS l_shipdate
+                 o_orderdate + u(o_orderkey * 8 + n, 6, 121) + 1 AS l_shipdate, o_orderdate
           FROM orders_base, range(1, 8) t(n) WHERE n <= u(o_orderkey, 4, 7) + 1)
         SELECT l_orderkey, l_linenumber, u(k, 1, 20000) + 1 AS l_partkey,
           u(k, 2, 1000) + 1 AS l_suppkey, (u(k, 3, 50) + 1)::DECIMAL(15, 2) AS l_quantity,
@@ -137,12 +151,25 @@ CLEAN = [
           {_pick(['DELIVER IN PERSON', 'COLLECT COD', 'NONE', 'TAKE BACK RETURN'], 'u(k, 9, 4)')}
             AS l_shipinstruct,
           {_pick(['REG AIR', 'AIR', 'RAIL', 'SHIP', 'TRUCK', 'MAIL', 'FOB'], 'u(k, 10, 7)')}
-            AS l_shipmode
+            AS l_shipmode,
+          o_orderdate + u(k, 11, 61) + 30 AS l_commitdate, l_shipdate + u(k, 12, 30) + 1 AS l_receiptdate,
+          'comment ' || k AS l_comment
         FROM l JOIN samples.tpch.part p ON p.p_partkey = u(k, 1, 20000) + 1""",
     """CREATE TABLE samples.tpch.orders AS
-        SELECT o.*, t.total::DECIMAL(15, 2) AS o_totalprice FROM orders_base o
-        LEFT JOIN (SELECT l_orderkey, SUM(l_extendedprice * (1 + l_tax) * (1 - l_discount)) AS total
+        SELECT o.*, t.total::DECIMAL(15, 2) AS o_totalprice,
+          CASE WHEN t.open = 0 THEN 'F' WHEN t.open = t.n THEN 'O' ELSE 'P' END AS o_orderstatus
+        FROM orders_base o
+        LEFT JOIN (SELECT l_orderkey, SUM(l_extendedprice * (1 + l_tax) * (1 - l_discount)) AS total,
+                          COUNT(*) AS n, COUNT(*) FILTER (WHERE l_linestatus = 'O') AS open
                    FROM samples.tpch.lineitem GROUP BY l_orderkey) t ON t.l_orderkey = o.o_orderkey""",
+    # Each (part, supplier) pair a line item uses, once: a partsupp join on both keys
+    # cannot repeat line items; on the part key alone it can.
+    """CREATE TABLE samples.tpch.partsupp AS
+        SELECT l_partkey AS ps_partkey, l_suppkey AS ps_suppkey,
+          u(l_partkey * 1000 + l_suppkey, 1, 9999) + 1 AS ps_availqty,
+          ((u(l_partkey * 1000 + l_suppkey, 2, 99901) + 100) / 100.0)::DECIMAL(15, 2) AS ps_supplycost,
+          'comment' AS ps_comment
+        FROM (SELECT DISTINCT l_partkey, l_suppkey FROM samples.tpch.lineitem)""",
 ]
 
 # What the definition and the owner's rules do not rule out. Not orphaned line items:
@@ -155,11 +182,14 @@ DIRTY = [
           ("l_returnflag", "'X'", 23, 103), ("l_shipdate", "NULL", 24, 89),
           ("l_shipmode", "NULL", 25, 83), ("l_quantity", "NULL", 26, 79),
           ("l_extendedprice", "NULL", 27, 73), ("l_discount", "NULL", 28, 71),
-          ("l_linestatus", "NULL", 29, 67), ("l_tax", "NULL", 30, 61)]),
+          ("l_linestatus", "NULL", 29, 67), ("l_tax", "NULL", 30, 61),
+          ("l_commitdate", "NULL", 32, 59), ("l_receiptdate", "NULL", 33, 53),
+          ("l_shipinstruct", "NULL", 34, 47)]),
     f"INSERT INTO samples.tpch.lineitem SELECT * FROM samples.tpch.lineitem WHERE u({_K}, 31, 211) = 0",
     *(f"UPDATE samples.tpch.orders SET {col} = NULL WHERE u(o_orderkey, {salt}, {n}) = 0"
       for col, salt, n in [("o_totalprice", 41, 53), ("o_orderpriority", 42, 59),
-                           ("o_orderdate", 43, 47)]),
+                           ("o_orderdate", 43, 47), ("o_orderstatus", 44, 43),
+                           ("o_clerk", 45, 41)]),
     *(f"UPDATE samples.tpch.customer SET {col} = NULL WHERE u(c_custkey, {salt}, {n}) = 0"
       for col, salt, n in [("c_acctbal", 51, 43), ("c_mktsegment", 52, 41), ("c_name", 53, 37)]),
 ]
@@ -223,7 +253,8 @@ def kind(part: str, grouping: bool) -> str:
             and tree.this.this.name in MEASURE_INPUTS):
         return "A1"
     if (not grouping and isinstance(tree, exp.EQ) and isinstance(tree.this, exp.Column)
-            and tree.this.name in ("c_custkey", "c_name") and isinstance(tree.expression, exp.Literal)):
+            and tree.this.name in ("c_custkey", "c_name", "o_custkey")
+            and isinstance(tree.expression, exp.Literal)):
         return "P2"
     if grouping and _norm(expr) in DIMENSIONS:
         return "declared"
@@ -258,8 +289,8 @@ def run_statement(con, statement: str, keys: list[str], metric: str) -> list[tup
 
 
 def build() -> list[dict]:
-    uses = {r["record_id"]: r for r in map(json.loads, open(HERE / "pilot/uses.jsonl"))}
-    specs = yaml.safe_load((HERE / "answer_key.yaml").read_text())
+    uses = {r["record_id"]: r for r in map(json.loads, open(TEST / "pilot/uses.jsonl"))}
+    specs = yaml.safe_load((TEST / "answer_key.yaml").read_text())
     con = duckdb.connect()
     for sql in CLEAN:
         con.execute(sql)
@@ -319,7 +350,7 @@ if __name__ == "__main__":
                   and not k["execution"]["required_filter_testable"]]
     if untestable:
         sys.exit(f"the data cannot show a dropped required filter for: {untestable}")
-    with open(HERE / "answer_key.jsonl", "w") as f:
+    with open(TEST / "answer_key.jsonl", "w") as f:
         for k in key:
             f.write(json.dumps(k, sort_keys=True) + "\n")
     from collections import Counter

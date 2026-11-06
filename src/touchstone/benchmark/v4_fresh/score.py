@@ -1,9 +1,10 @@
 """Score the sealed v4 verdicts against the execution-built answer key.
 
-    python score.py VERDICTS.jsonl   # e.g. out/v4_fresh/verdicts.SEALED.jsonl
+    python score.py VERDICTS.jsonl            # e.g. out/v4_fresh/verdicts.SEALED.jsonl
+    python score.py VERDICTS.jsonl TEST_DIR   # another fresh test (v5_fresh)
 
-The verdicts must match the sha256 in SEALED.md; the answer key is answer_key.jsonl
-(answer_key.py), committed before the verdicts were opened.
+The verdicts must match a sha256 sealed in the test's SEALED.md; the answer key is its
+answer_key.jsonl (answer_key.py), committed before the verdicts were opened.
 
 Primary measures: alert precision (of the model's alerts, how many the answer key
 alerts on) and missed alerts (the key alerts - a changed definition or a prohibited
@@ -23,11 +24,11 @@ from pathlib import Path
 HERE = Path(__file__).parent
 
 
-def score(verdicts_path: str) -> dict:
-    sealed = re.search(r"\b[0-9a-f]{64}\b", (HERE / "SEALED.md").read_text()).group()
-    if hashlib.sha256(Path(verdicts_path).read_bytes()).hexdigest() != sealed:
-        raise SystemExit("the verdicts file does not match the sealed hash")
-    key = {k["record_id"]: k for k in map(json.loads, open(HERE / "answer_key.jsonl"))}
+def score(verdicts_path: str, test: Path = HERE) -> dict:
+    sealed = set(re.findall(r"\b[0-9a-f]{64}\b", (test / "SEALED.md").read_text()))
+    if hashlib.sha256(Path(verdicts_path).read_bytes()).hexdigest() not in sealed:
+        raise SystemExit("the verdicts file does not match a sealed hash")
+    key = {k["record_id"]: k for k in map(json.loads, open(test / "answer_key.jsonl"))}
     verdicts = {v["record_id"]: v for v in map(json.loads, open(verdicts_path))}
     if set(key) != set(verdicts):
         raise SystemExit("the verdicts and the answer key cover different statements")
@@ -65,6 +66,6 @@ def score(verdicts_path: str) -> dict:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         sys.exit(__doc__)
-    print(json.dumps(score(sys.argv[1]), indent=1))
+    print(json.dumps(score(sys.argv[1], *map(Path, sys.argv[2:])), indent=1))

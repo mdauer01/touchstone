@@ -154,6 +154,10 @@ def decide(answers: dict, criteria: Criteria, record: dict | None = None) -> tup
         return "separate_measure", {}
     if identity != "governed":
         return "insufficient_evidence", {}
+    # From v5 a prohibited variation is decided first: it is the more serious
+    # finding, whatever the core facts are. v4 decides it after them.
+    if prohibited and criteria.version >= 5:
+        return "prohibited_variation", {i: cited[i] for i in prohibited}
     core = {name: answer(name) for name in CORE}
     if any(core[name] == changed for name, (_, changed) in CORE.items()):
         return "suspected_definition_change", {}
@@ -163,7 +167,10 @@ def decide(answers: dict, criteria: Criteria, record: dict | None = None) -> tup
         return "prohibited_variation", {i: cited[i] for i in prohibited}
     variation = answer("variation")
     if variation in ("none", "declared"):
-        return "likely_permitted", {}
+        # From v5 an owner rule can settle a core fact (an INNER JOIN it makes
+        # lossless), so the outcome carries the approvals cited.
+        return "likely_permitted", ({i: cited[i] for i in approved}
+                                    if criteria.version >= 5 else {})
     if variation == "approved":
         if approved:
             return "likely_permitted", {i: cited[i] for i in approved}
