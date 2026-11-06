@@ -1,0 +1,140 @@
+# Reference-query ingredients for the statements that present their result under the
+# metric's name (answer_key.py decides which ones from the output names).
+#
+# As in ../v4_fresh/answer_key.yaml: only what the STATEMENT adds on top of the
+# definition - its extra filters, groupings ("expr AS output_name"), joins to tables
+# outside the definition, ordering and limit. answer_key.py builds the reference from
+# them, always with the governed measure over the governed rows, and refuses an
+# ingredient on the required filter's column, so a departure cannot be copied into the
+# reference. Joins along the declared keys are the governed rows' own and are not
+# listed.
+#
+# Column names are the definition's; joined tables use the aliases p (part), s
+# (supplier) and sn (the supplier's nation). Written from the SQL alone, before any
+# model judged these statements.
+
+cmp_52efb3eabc31fa5d:   # G01: DELIVER IN PERSON, 1996
+  filters: ["l_shipinstruct ILIKE '%DELIVER IN PERSON%'", "l_shipdate >= DATE '1996-01-01'",
+            "l_shipdate < DATE '1997-01-01'", "l_shipinstruct IS NOT NULL",
+            "l_shipdate IS NOT NULL", "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL"]
+
+cmp_e64201c9cc7b00e9:   # G02: top 5 clerks, 1995
+  filters: ["o_orderdate >= DATE '1995-01-01'", "o_orderdate < DATE '1996-01-01'",
+            "o_clerk IS NOT NULL", "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL"]
+  group_by: ["o_clerk AS o_clerk"]
+  top: 5
+
+cmp_db201969f6c324dd:   # G03: 10% discount, 1994
+  filters: ["l_discount = 0.10", "l_shipdate IS NOT NULL", "l_shipdate >= DATE '1994-01-01'",
+            "l_shipdate < DATE '1995-01-01'"]
+
+cmp_d7683be51460c9fa:   # G04: by order year
+  filters: ["o_orderdate IS NOT NULL"]
+  group_by: ["DATE_TRUNC('YEAR', o_orderdate) AS order_year"]
+
+cmp_90baaa6c03473a58:   # G05: more than 20 days from shipping to receipt
+  filters: ["l_receiptdate IS NOT NULL", "l_shipdate IS NOT NULL",
+            "l_receiptdate - l_shipdate > 20"]
+
+cmp_87e96df5056815ea:   # G06: by market segment, account balance above 9,000
+  filters: ["c_acctbal > 9000", "c_mktsegment IS NOT NULL"]
+  group_by: ["c_mktsegment AS c_mktsegment"]
+
+cmp_5858cc94e3192a70:   # G07: FOB shipments, MACHINERY segment (joins part, uses none of it)
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["l_shipmode LIKE '%FOB%'", "c_mktsegment = 'MACHINERY'"]
+
+cmp_ec264c7bd66765d9:   # G08: by nation, AFRICA, 1994
+  filters: ["r_name ILIKE '%AFRICA%'", "l_shipdate >= DATE '1994-01-01'",
+            "l_shipdate < DATE '1995-01-01'", "n_name IS NOT NULL", "l_shipdate IS NOT NULL"]
+  group_by: ["n_name AS nation"]
+
+cmp_3b6c6907603257f6:   # G09: 5-LOW priority, RAIL (Genie grouped by ship day)
+  filters: ["o_orderpriority ILIKE '%5-LOW%'", "l_shipmode ILIKE '%RAIL%'",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["DATE_TRUNC('DAY', l_shipdate) AS ship_date"]
+
+cmp_99339730fc493ae5:   # G10: by part type, ECONOMY parts
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["p.p_type ILIKE '%ECONOMY%'", "p.p_type IS NOT NULL"]
+  group_by: ["p.p_type AS p_type"]
+
+cmp_e47d9008f84f14d7:   # G11: top part brand, 1996
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["l_shipdate >= DATE '1996-01-01'", "l_shipdate < DATE '1997-01-01'",
+            "p.p_brand IS NOT NULL", "l_shipdate IS NOT NULL"]
+  group_by: ["p.p_brand AS p_brand"]
+  top: 1
+
+cmp_71ba5be74dcfa68c:   # G12: suppliers in JAPAN
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+    - {table: nation, alias: sn, "on": "s.s_nationkey = sn.n_nationkey"}
+  filters: ["sn.n_name ILIKE '%JAPAN%'"]
+
+cmp_b59fd140bb625734:   # G13: customer 4242, 1996
+  filters: ["c_custkey = 4242", "l_shipdate >= DATE '1996-01-01'",
+            "l_shipdate < DATE '1997-01-01'"]
+
+cmp_c510f9e8fcffd2c3:   # G14: returned line items, 1994 (its l_returnflag filter is refused)
+  filters: ["l_shipdate IS NOT NULL", "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL",
+            "l_shipdate >= DATE '1994-01-01'", "l_shipdate < DATE '1995-01-01'"]
+
+cmp_4bac8cb66d8042f8:   # G15: by order priority, from the orders' total price
+  filters: ["o_orderpriority IS NOT NULL", "o_totalprice IS NOT NULL"]
+  group_by: ["o_orderpriority AS o_orderpriority"]
+
+cmp_4275851e00f6b904:   # G16: top 10 suppliers, 1996
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+  filters: ["l_shipdate >= DATE '1996-01-01'", "l_shipdate < DATE '1997-01-01'",
+            "l_suppkey IS NOT NULL"]
+  group_by: ["s.s_suppkey AS s_suppkey", "s.s_name AS s_name"]
+  top: 10
+
+cmp_fcbe328ba8604573:   # G22: by region, 1993
+  filters: ["l_shipdate >= DATE '1993-01-01'", "l_shipdate < DATE '1994-01-01'",
+            "r_name IS NOT NULL", "l_shipdate IS NOT NULL"]
+  group_by: ["r_name AS region"]
+
+cmp_9a8a4239e0cd674e:   # G23: by region, 1993, 1-URGENT orders
+  filters: ["l_shipdate >= DATE '1993-01-01'", "l_shipdate < DATE '1994-01-01'",
+            "o_orderpriority ILIKE '%1-URGENT%'", "r_name IS NOT NULL", "l_shipdate IS NOT NULL"]
+  group_by: ["r_name AS region"]
+
+cmp_c87723997965beba:   # G24: by ship mode, 1994
+  filters: ["l_shipdate >= DATE '1994-01-01'", "l_shipdate < DATE '1995-01-01'",
+            "l_shipmode IS NOT NULL"]
+  group_by: ["l_shipmode AS l_shipmode"]
+
+cmp_dd178bc412d624ea:   # G25: by ship mode, 1994, returned items included
+  filters: ["l_shipdate >= DATE '1994-01-01'", "l_shipdate < DATE '1995-01-01'",
+            "l_shipmode IS NOT NULL"]
+  group_by: ["l_shipmode AS l_shipmode"]
+
+cmp_7e75d6a4694075b9:   # G26: by part brand, 1995
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["l_shipdate IS NOT NULL", "p.p_brand IS NOT NULL", "l_shipdate >= DATE '1995-01-01'",
+            "l_shipdate < DATE '1996-01-01'"]
+  group_by: ["p.p_brand AS p_brand"]
+
+cmp_4497028c29dbee4b:   # G27: by part brand and supplier nation, 1995
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+    - {table: nation, alias: sn, "on": "s.s_nationkey = sn.n_nationkey"}
+  filters: ["l_shipdate IS NOT NULL", "p.p_brand IS NOT NULL", "sn.n_name IS NOT NULL",
+            "l_shipdate >= DATE '1995-01-01'", "l_shipdate < DATE '1996-01-01'"]
+  group_by: ["p.p_brand AS p_brand", "sn.n_name AS supplier_nation"]
+
+cmp_b895b496949b1587:   # TPC-H Q15 (output named total_revenue)
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+  filters: ["l_shipdate >= DATE '1996-01-01'", "l_shipdate < DATE '1996-04-01'"]
+  group_by: ["s.s_suppkey AS s_suppkey", "s.s_name AS s_name", "s.s_address AS s_address",
+             "s.s_phone AS s_phone"]
+  top: 1

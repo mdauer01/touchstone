@@ -70,6 +70,8 @@ def _columns(sql: str) -> set[str]:
 
 
 DIMENSIONS = {_norm(_leaf(d["expr"])) for d in VIEW["dimensions"]}
+DATES = {c for cols in yaml.safe_load((TEST / "pilot/catalog.yml").read_text())["samples"]["tpch"].values()
+         for c, t in cols.items() if t == "DATE"}
 DIMENSION_COLUMNS = set().union(*(_columns(_leaf(d["expr"])) for d in VIEW["dimensions"]))
 REQUIRED = _columns(VIEW["filter"])
 MEASURE_INPUTS = _columns(MEASURE)
@@ -241,6 +243,17 @@ def reference(spec: dict, metric: str, rows: str = "governed") -> str:
     return sql
 
 
+def _undated(expr: str) -> str:
+    """A DATE column truncated to the day, or cast to DATE, is the column itself."""
+    def strip(node):
+        if (isinstance(node, exp.Cast) and node.to.is_type("date")
+                or isinstance(node, exp.TimestampTrunc) and node.unit.name.upper() == "DAY") \
+                and isinstance(node.this, exp.Column) and node.this.name in DATES:
+            return node.this.copy()
+        return node
+    return sqlglot.parse_one(expr, read="duckdb").transform(strip).sql(dialect="duckdb")
+
+
 def kind(part: str, grouping: bool) -> str:
     """Which rule, if any, covers an extra filter or grouping - from the columns it reads."""
     expr = part.rsplit(" AS ", 1)[0] if grouping else part
@@ -256,7 +269,7 @@ def kind(part: str, grouping: bool) -> str:
             and tree.this.name in ("c_custkey", "c_name", "o_custkey")
             and isinstance(tree.expression, exp.Literal)):
         return "P2"
-    if grouping and _norm(expr) in DIMENSIONS:
+    if grouping and _norm(_undated(expr)) in DIMENSIONS:
         return "declared"
     if not grouping and all(not t and n in DIMENSION_COLUMNS for t, n in cols):
         return "declared"
