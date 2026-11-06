@@ -44,3 +44,33 @@ python src/touchstone/benchmark/v4_fresh/score.py out/v5_fresh/verdicts.v5.SEALE
 
 Primary measures, as in v4's test: alert precision, and missed alerts (changed
 definitions and prohibited variations).
+
+## Result (scored once, 2026-11-06)
+
+Both runs on the same 30 statements; the answer key alerts on 8 (5 changed
+definitions, 3 prohibited variations), is informational on 7 investigations, and
+raises no alert on 15.
+
+| Measure | v5 | v4 (baseline) |
+|---|---|---|
+| Alert precision | 8 of 14 | 8 of 22 |
+| Missed alerts | 0 of 8 | 0 of 8 |
+| Investigations alerted (key: informational) | 2 of 7 | 7 of 7 |
+| Permitted uses alerted (key: no alert) | 2 of 8 | 5 of 8 |
+| Separately named measures alerted | 2 of 3 | 2 of 3 |
+| Unresolved | 0 | 0 |
+| Outcome agreement | 24 of 30 | 13 of 30 |
+
+v5 removes most of v4's false alarms with no missed alert, but 6 remain, so it
+stays opt-in:
+
+- **4 still answer `source_rows: changed`.** Three of them cite the very rule that
+  settles it: A2 for an INNER JOIN along the declared keys (order year; FOB in the
+  MACHINERY segment) and A4 for the part join it names (revenue by brand). The fourth
+  joins supplier to group by supplier, a join no rule names. The FOB statement also
+  joins part without using it, which the key does not count as a change (the
+  reference repeats added joins).
+- **2 derived measures were read as the metric:** `median_revenue_per_order_1995` and
+  `avg_revenue_per_customer`, each citing A3 (qualified names present the metric).
+  v5's naming answers say a name that states another quantity is a separate measure;
+  the model followed the owner's rule instead.
