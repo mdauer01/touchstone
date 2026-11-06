@@ -10,3 +10,6 @@ git-ignored) and were not opened before this hash was committed:
     8e4fa05136b1178d8848528e58e3aed4e6916c70a03b625599607c34c64152fe
 
 `../harness.py score` refuses findings that do not match it.
+
+After the result was scored and reported, the same file was published here as
+[findings.jsonl](findings.jsonl), byte for byte: it carries this hash.

@@ -1,0 +1,12 @@
+version: 1.1
+comment: Net revenue of shipped line items. Returned items never count.
+source: main.sales.lineitem
+filter: l_returnflag <> 'R'
+dimensions:
+  - name: ship_date
+    expr: l_shipdate
+  - name: ship_mode
+    expr: l_shipmode
+measures:
+  - name: revenue
+    expr: SUM(l_extendedprice * (1 - l_discount))

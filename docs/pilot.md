@@ -9,6 +9,17 @@ definitions were authoritative, what they were when each query ran, or which ses
 defaults a short table name resolved under. The pilot package supplies those explicitly,
 and `touchstone monitor --pilot` refuses a package that leaves one out.
 
+`touchstone check` reads the same package (the smallest complete one is
+[examples/minimal](../examples/minimal)). It takes every named measure of every listed
+view as a definition and decides in code which one a statement is compared with:
+`MEASURE(m)` on a view is that view's `m`; a statement reading a definition's source is
+compared with the definitions over it; a name several views declare, with nothing to
+choose between them, is not compared. Under `as_of_execution` a definition is used only
+for runs inside its `applies` window; under `current`, only definitions with no
+`applies.to`. A use that cannot be compared is listed in the report as not assessed,
+with the reason. The approved and prohibited variation lists below are read by
+`touchstone assess` with criteria v4 and v5; `check` does not use them.
+
 ## Package layout
 
 ```

@@ -1,0 +1,278 @@
+<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Touchstone check</title><style>:root{--bg:#f7f7f5;--card:#fff;--ink:#1d1f23;--muted:#6b7075;--line:#e3e4e6;--code:#f2f3f5;--alert:#b3261e;--alert-bg:#fde7e5;--warn:#8a5a00;--warn-bg:#fdf2dc;--ok:#1e6b34;--ok-bg:#e6f4ea;}@media (prefers-color-scheme: dark){:root:not([data-theme=light]){--bg:#16181d;--card:#1f2228;--ink:#e8eaed;--muted:#9aa0a6;--line:#33373e;--code:#272b33;--alert:#f2b8b5;--alert-bg:#3d2422;--warn:#f6d38a;--warn-bg:#3a2f17;--ok:#7cc78f;--ok-bg:#1d3324;}}:root[data-theme=dark]{--bg:#16181d;--card:#1f2228;--ink:#e8eaed;--muted:#9aa0a6;--line:#33373e;--code:#272b33;--alert:#f2b8b5;--alert-bg:#3d2422;--warn:#f6d38a;--warn-bg:#3a2f17;--ok:#7cc78f;--ok-bg:#1d3324;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:24px;margin:0 0 4px}
+h2{font-size:18px;margin:32px 0 10px}
+.sub,.note{color:var(--muted);font-size:13px}
+.tiles{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;
+  min-width:130px}
+.tile b{display:block;font-size:22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;
+  margin:10px 0}
+.badge{display:inline-block;font-size:12px;font-weight:600;border-radius:4px;padding:1px 7px;
+  margin-right:6px}
+.review_needed{color:var(--alert);background:var(--alert-bg)}
+.could_not_assess,.not_assessed{color:var(--warn);background:var(--warn-bg)}
+.no_issue_flagged{color:var(--ok);background:var(--ok-bg)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+@media (max-width:640px){.pair{grid-template-columns:1fr}}
+.pair div{background:var(--code);border-radius:6px;padding:8px 10px;overflow-x:auto}
+.pair span{display:block;font-size:12px;color:var(--muted);margin-bottom:2px}
+.pair code{white-space:pre-wrap}
+.tile{flex:1 1 120px}
+code,pre{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:var(--code);border-radius:6px;padding:10px;overflow-x:auto;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;border-bottom:1px solid var(--line);padding:6px 4px;vertical-align:top}
+details summary{cursor:pointer;color:var(--muted);font-size:13px}
+</style></head><body><div class='wrap'>
+<h1>Touchstone check</h1>
+<div class='sub'>src/touchstone/benchmark/v6_fresh/pilot &middot; compared against the definition that applied at execution time &middot; openai gpt-6-luna &middot; criteria v6</div>
+<p class='note'>Advisory: a model's reading of each statement against the approved definition, with the clauses it relies on. It orders review; it is not a verdict that any number is right or wrong. No issue flagged does not certify a statement correct, and a quoted clause found in the text shows it exists, not that the model interpreted it correctly.</p>
+<div class='tiles'><div class='tile'><b>26</b>Statements in history</div><div class='tile'><b>26</b>Metric uses assessed</div><div class='tile'><b>7</b>Review needed</div><div class='tile'><b>4</b>Could not assess</div><div class='tile'><b>15</b>No issue flagged</div><div class='tile'><b>0</b>Not assessed</div></div>
+<p class='note'>Read 26 statement(s) from 26 history row(s): 26 queries, 26 of them computing or naming a governed metric, against 2 definition(s).</p>
+<h2>Review needed (7)</h2>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>nation</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The output groups revenue by the supplier&#x27;s nation, but the defined `nation` dimension is the customer&#x27;s nation.</p><div class='pair'><div><span>Definition</span><code>- name: nation
+  expr: orders.customer.nation.n_name
+  comment: The customer&#x27;s nation. In all reporting, nation means the customer&#x27;s.</code></div><div><span>Statement</span><code>JOIN `samples`.`tpch`.`supplier` ON `lineitem`.`l_suppkey` = `supplier`.`s_suppkey`
+JOIN `samples`.`tpch`.`nation` ON `supplier`.`s_nationkey` = `nation`.`n_nationkey`</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:05:23.391Z &ndash; 2026-11-06T17:05:23.391Z</td></tr></table><details><summary>SQL</summary><pre>SELECT `nation`.`n_name` AS nation, SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+JOIN `samples`.`tpch`.`supplier` ON `lineitem`.`l_suppkey` = `supplier`.`s_suppkey`
+JOIN `samples`.`tpch`.`nation` ON `supplier`.`s_nationkey` = `nation`.`n_nationkey`
+WHERE `lineitem`.`l_shipdate` &gt;= DATE(&#x27;1996-01-01&#x27;)
+  AND `lineitem`.`l_shipdate` &lt; DATE(&#x27;1997-01-01&#x27;)
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;
+  AND `nation`.`n_name` IS NOT NULL
+  AND `lineitem`.`l_shipdate` IS NOT NULL
+GROUP BY `nation`.`n_name`
+ORDER BY revenue DESC</pre></details></div>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The statement selects returned line items (including flags that normalize to &#x27;R&#x27;) instead of excluding rows whose return flag is &#x27;R&#x27; as the definition requires.</p><div class='pair'><div><span>Definition</span><code>filter: l_returnflag &lt;&gt; &#x27;R&#x27;</code></div><div><span>Statement</span><code>LOWER(TRIM(`l_returnflag`)) = &#x27;r&#x27;</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:03:42.951Z &ndash; 2026-11-06T17:03:42.951Z</td></tr></table><details><summary>SQL</summary><pre>SELECT `l_shipmode`, SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue FROM `samples`.`tpch`.`lineitem` WHERE LOWER(TRIM(`l_returnflag`)) = &#x27;r&#x27; AND `l_shipdate` &gt;= &#x27;1996-01-01&#x27; AND `l_shipdate` &lt;= &#x27;1996-12-31&#x27; AND `l_shipmode` IS NOT NULL GROUP BY `l_shipmode` ORDER BY revenue DESC</pre></details></div>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The query omits the required return-flag filter, so returned line items can be included in revenue.</p><div class='pair'><div><span>Definition</span><code>filter: l_returnflag &lt;&gt; &#x27;R&#x27;</code></div><div><span>Statement</span><em>missing from the statement</em></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:06:17.336Z &ndash; 2026-11-06T17:06:17.336Z</td></tr></table><details><summary>SQL</summary><pre>SELECT r_name AS region, SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM `samples`.`tpch`.`lineitem` l
+JOIN `samples`.`tpch`.`orders` o ON l.l_orderkey = o.o_orderkey
+JOIN `samples`.`tpch`.`customer` c ON o.o_custkey = c.c_custkey
+JOIN `samples`.`tpch`.`nation` n ON c.c_nationkey = n.n_nationkey
+JOIN `samples`.`tpch`.`region` r ON n.n_regionkey = r.r_regionkey
+WHERE l.l_shipdate &gt;= DATE(&#x27;1994-01-01&#x27;)
+  AND l.l_shipdate &lt; DATE(&#x27;1995-01-01&#x27;)
+  AND r.r_name IS NOT NULL
+  AND l.l_shipdate IS NOT NULL
+GROUP BY r.r_name
+ORDER BY revenue DESC</pre></details></div>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The output uses gross sales instead of discounted revenue and omits the required return-flag filter, changing both the amount per line item and which rows are counted.</p><div class='pair'><div><span>Definition</span><code>SUM(l_extendedprice * (1 - l_discount)); filter: l_returnflag &lt;&gt; &#x27;R&#x27;</code> <em>(not found verbatim in the text)</em></div><div><span>Statement</span><code>SUM(`l_extendedprice`)</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:03:42.950Z &ndash; 2026-11-06T17:03:42.950Z</td></tr></table><details><summary>SQL</summary><pre>SELECT DATE_TRUNC(&#x27;YEAR&#x27;, `l_shipdate`) AS ship_year, SUM(`l_extendedprice`) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_shipdate` IS NOT NULL
+GROUP BY ship_year
+ORDER BY ship_year ASC</pre></details></div>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>revenue_1996; revenue_1995</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>Both revenue outputs omit the required return-flag filter, so returned line items can be included in the totals.</p><div class='pair'><div><span>Definition</span><code>l_returnflag &lt;&gt; &#x27;R&#x27;</code></div><div><span>Statement</span><em>missing from the statement</em></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:05:41.588Z &ndash; 2026-11-06T17:05:41.588Z</td></tr></table><details><summary>SQL</summary><pre>WITH monthly_revenue AS (
+  SELECT
+    DATE_TRUNC(&#x27;MONTH&#x27;, `l_shipdate`) AS month,
+    YEAR(`l_shipdate`) AS year,
+    SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+  FROM `samples`.`tpch`.`lineitem`
+  WHERE `l_shipdate` IS NOT NULL AND (YEAR(`l_shipdate`) = 1995 OR YEAR(`l_shipdate`) = 1996)
+  GROUP BY DATE_TRUNC(&#x27;MONTH&#x27;, `l_shipdate`), YEAR(`l_shipdate`)
+)
+SELECT
+  r1996.month,
+  r1996.revenue AS revenue_1996,
+  r1995.revenue AS revenue_1995,
+  100 * TRY_DIVIDE(r1996.revenue - r1995.revenue, r1995.revenue) AS pct_change
+FROM monthly_revenue r1996
+LEFT JOIN monthly_revenue r1995
+  ON MONTH(r1996.month) = MONTH(r1995.month) AND r1995.year = 1995 AND r1996.year = 1996
+WHERE r1996.month IS NOT NULL AND r1995.month IS NOT NULL
+ORDER BY r1996.month</pre></details></div>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The query omits the required return-flag filter, so returned line items within the selected dates can be included in revenue.</p><div class='pair'><div><span>Definition</span><code>filter: l_returnflag &lt;&gt; &#x27;R&#x27;</code></div><div><span>Statement</span><em>missing from the statement</em></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:03:42.950Z &ndash; 2026-11-06T17:03:42.950Z</td></tr></table><details><summary>SQL</summary><pre>SELECT DATE_TRUNC(&#x27;QUARTER&#x27;, `l_shipdate`) AS quarter, SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_shipdate` &gt;= DATE(&#x27;1993-01-01&#x27;) AND `l_shipdate` &lt; DATE(&#x27;1994-01-01&#x27;) AND `l_shipdate` IS NOT NULL
+GROUP BY DATE_TRUNC(&#x27;QUARTER&#x27;, `l_shipdate`)
+ORDER BY quarter</pre></details></div>
+<div class='card'><span class='badge review_needed'>Review needed</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The statement presents a sum of order total prices as revenue, rather than summing discounted extended prices for line items that meet the required return-flag filter.</p><div class='pair'><div><span>Definition</span><code>source: samples.tpch.lineitem; filter: l_returnflag &lt;&gt; &#x27;R&#x27;; expr: SUM(l_extendedprice * (1 - l_discount))</code></div><div><span>Statement</span><code>SUM(`o_totalprice`) AS revenue</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:04:07.334Z &ndash; 2026-11-06T17:04:07.334Z</td></tr></table><details><summary>SQL</summary><pre>SELECT SUM(`o_totalprice`) AS revenue
+FROM `samples`.`tpch`.`orders`
+WHERE `o_orderstatus` = &#x27;F&#x27; AND `o_totalprice` IS NOT NULL</pre></details></div>
+<h2>Could not assess (4)</h2>
+<div class='card'><span class='badge could_not_assess'>Could not assess</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The join may drop or repeat line items, and the definition does not state that each line item matches exactly one part on this key.</p><div class='pair'><div><span>Definition</span><code>source: samples.tpch.lineitem</code></div><div><span>Statement</span><code>JOIN `samples`.`tpch`.`part` p ON l.`l_partkey` = p.`p_partkey`</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:06:18.557Z &ndash; 2026-11-06T17:06:18.557Z</td></tr></table><details><summary>SQL</summary><pre>SELECT `p_brand`, SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem` l
+JOIN `samples`.`tpch`.`part` p ON l.`l_partkey` = p.`p_partkey`
+WHERE l.`l_shipdate` &gt;= DATE(&#x27;1995-01-01&#x27;)
+  AND l.`l_shipdate` &lt; DATE(&#x27;1996-01-01&#x27;)
+  AND l.`l_returnflag` != &#x27;R&#x27;
+  AND p.`p_brand` IS NOT NULL
+  AND l.`l_shipdate` IS NOT NULL
+GROUP BY p.`p_brand`
+ORDER BY revenue DESC</pre></details></div>
+<div class='card'><span class='badge could_not_assess'>Could not assess</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The supplier join may drop or repeat line items, and the definition gives no facts about whether each line item matches exactly one supplier.</p><div class='pair'><div><span>Definition</span><code>source: samples.tpch.lineitem</code></div><div><span>Statement</span><code>JOIN `samples`.`tpch`.`lineitem` l ON s.s_suppkey = l.l_suppkey</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:05:15.375Z &ndash; 2026-11-06T17:05:15.375Z</td></tr></table><details><summary>SQL</summary><pre>SELECT s_name, SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM `samples`.`tpch`.`supplier` s
+JOIN `samples`.`tpch`.`lineitem` l ON s.s_suppkey = l.l_suppkey
+WHERE s.s_acctbal &lt; 0 AND l.l_returnflag != &#x27;R&#x27; AND s.s_name IS NOT NULL AND s.s_acctbal IS NOT NULL
+GROUP BY s_name
+ORDER BY revenue DESC</pre></details></div>
+<div class='card'><span class='badge could_not_assess'>Could not assess</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The undeclared part join may drop or repeat counted line items, and the definition does not state whether each line item matches exactly one part.</p><div class='pair'><div><span>Definition</span><code>source: samples.tpch.lineitem</code></div><div><span>Statement</span><code>JOIN `samples`.`tpch`.`part` ON `lineitem`.`l_partkey` = `part`.`p_partkey`</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:05:05.717Z &ndash; 2026-11-06T17:05:05.717Z</td></tr></table><details><summary>SQL</summary><pre>SELECT `part`.`p_mfgr`, SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+JOIN `samples`.`tpch`.`part` ON `lineitem`.`l_partkey` = `part`.`p_partkey`
+WHERE `lineitem`.`l_shipdate` &gt;= DATE(&#x27;1996-01-01&#x27;)
+  AND `lineitem`.`l_shipdate` &lt; DATE(&#x27;1997-01-01&#x27;)
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;
+  AND `part`.`p_mfgr` IS NOT NULL
+  AND `lineitem`.`l_shipdate` IS NOT NULL
+GROUP BY `part`.`p_mfgr`
+ORDER BY revenue DESC</pre></details></div>
+<div class='card'><span class='badge could_not_assess'>Could not assess</span><b>revenue</b> as <code>revenue</code> <span class='note'>workspace.touchstone_tpch.revenue_mv &middot; 1 execution(s)</span><p>The join may drop or repeat line items, and the definition does not state whether each line item matches exactly one part, so its effect on revenue cannot be determined.</p><div class='pair'><div><span>Definition</span><code>source: samples.tpch.lineitem</code></div><div><span>Statement</span><code>JOIN `samples`.`tpch`.`part` ON `lineitem`.`l_partkey` = `part`.`p_partkey`</code></div></div><table><tr><th>Where it ran</th><th>Assets</th><th>Runs</th><th>When</th></tr><tr><td>Databricks SQL Genie Space</td><td>genie:01f1d8baf6f81a34a395ef75e178a59a</td><td>1</td><td>2026-11-06T17:05:13.801Z &ndash; 2026-11-06T17:05:13.801Z</td></tr></table><details><summary>SQL</summary><pre>SELECT SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+JOIN `samples`.`tpch`.`part` ON `lineitem`.`l_partkey` = `part`.`p_partkey`
+WHERE `part`.`p_size` = 50
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;</pre></details></div>
+<h2>No issue flagged (15)</h2><table><tr><th>Metric</th><th>Presented as</th><th>Reading</th><th>Runs</th><th></th></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue expression and required return-flag filter; its date and non-NULL filters and grouping by ship instruction only restrict or segment the results.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT `l_shipinstruct`, SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_shipdate` &gt;= DATE(&#x27;1997-01-01&#x27;)
+  AND `l_shipdate` &lt; DATE(&#x27;1998-01-01&#x27;)
+  AND `l_returnflag` != &#x27;R&#x27;
+  AND `l_shipinstruct` IS NOT NULL
+GROUP BY `l_shipinstruct`
+ORDER BY revenue DESC</pre></details></td></tr><tr><td>revenue</td><td><em>not presented as the metric</em></td><td>No output presents revenue: fraction_urgent_revenue is a separately named ratio, so this statement does not present the defined metric for comparison.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT
+  r.r_name AS region,
+  try_divide(SUM(CASE WHEN o.o_orderpriority = &#x27;1-URGENT&#x27; THEN l.l_extendedprice * (1 - l.l_discount) ELSE 0 END),SUM(l.l_extendedprice * (1 - l.l_discount))) AS fraction_urgent_revenue
+FROM `samples`.`tpch`.`lineitem` l
+JOIN `samples`.`tpch`.`orders` o ON l.l_orderkey = o.o_orderkey
+JOIN `samples`.`tpch`.`customer` c ON o.o_custkey = c.c_custkey
+JOIN `samples`.`tpch`.`nation` n ON c.c_nationkey = n.n_nationkey
+JOIN `samples`.`tpch`.`region` r ON n.n_regionkey = r.r_regionkey
+WHERE l.l_shipdate &gt;= DATE(&#x27;1996-01-01&#x27;) AND l.l_shipdate &lt; DATE(&#x27;1997-01-01&#x27;)
+  AND r.r_name IS NOT NULL
+  AND l.l_shipdate IS NOT NULL
+GROUP BY r.r_name</pre></details></td></tr><tr><td>revenue</td><td><em>not presented as the metric</em></td><td>The output is an average of order-level revenue sums, explicitly named avg_revenue_per_order, so it is a separate measure and does not present itself as revenue.</td><td>1</td><td><details><summary>SQL</summary><pre>WITH order_revenue AS (
+  SELECT 
+    o.o_orderkey,
+    o.o_orderpriority,
+    SUM(l.l_extendedprice * (1 - l.l_discount)) AS net_revenue
+  FROM `samples`.`tpch`.`orders` o
+  JOIN `samples`.`tpch`.`lineitem` l ON o.o_orderkey = l.l_orderkey
+  WHERE o.o_orderdate &gt;= DATE(&#x27;1997-01-01&#x27;)
+    AND o.o_orderdate &lt; DATE(&#x27;1998-01-01&#x27;)
+    AND l.l_returnflag != &#x27;R&#x27;
+    AND o.o_orderpriority IS NOT NULL
+    AND l.l_extendedprice IS NOT NULL
+    AND l.l_discount IS NOT NULL
+  GROUP BY o.o_orderkey, o.o_orderpriority
+)
+SELECT 
+  o_orderpriority,
+  AVG(net_revenue) AS avg_revenue_per_order
+FROM order_revenue
+WHERE net_revenue IS NOT NULL
+GROUP BY o_orderpriority
+ORDER BY avg_revenue_per_order DESC</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The query uses the defined revenue measure and required return-flag filter, and its additional clerk and non-NULL ship-date filters only slice the results; the definition states each line item matches exactly one order on the join key.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT `lineitem`.`l_shipdate`, SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`orders`
+JOIN `samples`.`tpch`.`lineitem` ON `orders`.`o_orderkey` = `lineitem`.`l_orderkey`
+WHERE `orders`.`o_clerk` ILIKE &#x27;%Clerk#000000088%&#x27;
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;
+  AND `lineitem`.`l_shipdate` IS NOT NULL
+GROUP BY `lineitem`.`l_shipdate`
+ORDER BY `lineitem`.`l_shipdate`</pre></details></td></tr><tr><td>revenue</td><td><code>monthly_revenue</code></td><td>monthly_revenue uses the defined revenue measure and required return-flag filter, grouped by month and restricted to a 1994, non-NULL ship-date slice; the separately named running total is a different quantity and does not change it.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT
+  DATE_TRUNC(&#x27;MONTH&#x27;, `l_shipdate`) AS month,
+  SUM(`l_extendedprice` * (1 - `l_discount`)) AS monthly_revenue,
+  SUM(SUM(`l_extendedprice` * (1 - `l_discount`))) OVER (ORDER BY DATE_TRUNC(&#x27;MONTH&#x27;, `l_shipdate`)) AS running_total_revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_shipdate` IS NOT NULL
+  AND YEAR(`l_shipdate`) = 1994
+  AND `l_returnflag` != &#x27;R&#x27;
+GROUP BY DATE_TRUNC(&#x27;MONTH&#x27;, `l_shipdate`)
+ORDER BY month</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>It uses the defined revenue measure and required return-flag filter; the date range and non-NULL ship-mode condition only slice the results, while the ship-date NULL check excludes no additional rows beyond the date predicates.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT `l_shipmode`, SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_shipdate` &gt;= DATE(&#x27;1995-01-01&#x27;)
+  AND `l_shipdate` &lt; DATE(&#x27;1996-01-01&#x27;)
+  AND `l_returnflag` != &#x27;R&#x27;
+  AND `l_shipmode` IS NOT NULL
+  AND `l_shipdate` IS NOT NULL
+GROUP BY `l_shipmode`
+ORDER BY revenue DESC</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue expression and required return-flag filter; the order filters and non-NULL ship-date check only slice the rows, and the join preserves each line item because the definition states that each matches exactly one order.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT DATE_TRUNC(&#x27;DAY&#x27;, `lineitem`.`l_shipdate`) AS ship_date, SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`orders`
+JOIN `samples`.`tpch`.`lineitem` ON `orders`.`o_orderkey` = `lineitem`.`l_orderkey`
+WHERE `orders`.`o_totalprice` &lt; 50000
+  AND `orders`.`o_orderdate` &gt;= DATE(&#x27;1998-01-01&#x27;)
+  AND `orders`.`o_orderdate` &lt; DATE(&#x27;1999-01-01&#x27;)
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;
+  AND `lineitem`.`l_shipdate` IS NOT NULL
+GROUP BY DATE_TRUNC(&#x27;DAY&#x27;, `lineitem`.`l_shipdate`)
+ORDER BY ship_date ASC</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement keeps the required return-flag filter and computes the defined sum; the commit-date conditions are a legitimate slice, and the NULL checks do not change the sum because NULL inputs are ignored.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_commitdate` &gt;= DATE(&#x27;1995-03-01&#x27;)
+  AND `l_commitdate` &lt; DATE(&#x27;1995-04-01&#x27;)
+  AND `l_returnflag` != &#x27;R&#x27;
+  AND `l_commitdate` IS NOT NULL
+  AND `l_extendedprice` IS NOT NULL
+  AND `l_discount` IS NOT NULL</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue measure and required return-flag filter; its date range and non-NULL filters only restrict the reported groups.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT DATE_TRUNC(&#x27;MONTH&#x27;, `l_shipdate`) AS month, `l_shipmode`, SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_shipdate` &gt;= &#x27;1993-01-01&#x27; AND `l_shipdate` &lt; &#x27;1994-01-01&#x27;
+  AND `l_returnflag` != &#x27;R&#x27;
+  AND `l_shipmode` IS NOT NULL
+  AND `l_shipdate` IS NOT NULL
+GROUP BY month, `l_shipmode`
+ORDER BY month, `l_shipmode`</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue measure and required return-flag filter, and its date and non-NULL filters only slice the results; the declared joins match exactly one row at each step and its grouping uses the customer&#x27;s region.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT r_name AS region, SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM `samples`.`tpch`.`lineitem` l
+JOIN `samples`.`tpch`.`orders` o ON l.l_orderkey = o.o_orderkey
+JOIN `samples`.`tpch`.`customer` c ON o.o_custkey = c.c_custkey
+JOIN `samples`.`tpch`.`nation` n ON c.c_nationkey = n.n_nationkey
+JOIN `samples`.`tpch`.`region` r ON n.n_regionkey = r.r_regionkey
+WHERE l.l_shipdate &gt;= DATE(&#x27;1994-01-01&#x27;)
+  AND l.l_shipdate &lt; DATE(&#x27;1995-01-01&#x27;)
+  AND l.l_returnflag != &#x27;R&#x27;
+  AND r.r_name IS NOT NULL
+  AND l.l_shipdate IS NOT NULL
+GROUP BY r.r_name
+ORDER BY revenue DESC</pre></details></td></tr><tr><td>revenue</td><td><em>not presented as the metric</em></td><td>The output is labeled revenue_incl_tax, a separate tax-adjusted measure, and its formula multiplies the defined net revenue by (1 + l_tax), so it does not compute the defined revenue.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT region.r_name AS region, SUM(lineitem.l_extendedprice * (1 - lineitem.l_discount) * (1 + lineitem.l_tax)) AS revenue_incl_tax
+FROM samples.tpch.lineitem
+JOIN samples.tpch.orders ON lineitem.l_orderkey = orders.o_orderkey
+JOIN samples.tpch.customer ON orders.o_custkey = customer.c_custkey
+JOIN samples.tpch.nation ON customer.c_nationkey = nation.n_nationkey
+JOIN samples.tpch.region ON nation.n_regionkey = region.r_regionkey
+WHERE lineitem.l_shipdate &gt;= DATE(&#x27;1995-01-01&#x27;)
+  AND lineitem.l_shipdate &lt; DATE(&#x27;1996-01-01&#x27;)
+  AND region.r_name IS NOT NULL
+  AND lineitem.l_shipdate IS NOT NULL
+  AND lineitem.l_returnflag != &#x27;R&#x27;
+GROUP BY region.r_name
+ORDER BY revenue_incl_tax DESC</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue measure and required return-flag filter; the tax predicate only selects a slice, and the NULL checks do not change which rows that predicate and required filter count.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_tax` = 0.08
+  AND `l_returnflag` != &#x27;R&#x27;
+  AND `l_tax` IS NOT NULL
+  AND `l_returnflag` IS NOT NULL</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue measure and required return-flag filter; its date and non-NULL filters only slice the results, and the declared join facts ensure the joins keep each counted line item once.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT
+  `customer`.`c_mktsegment` AS market_segment,
+  `region`.`r_name` AS region,
+  SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+JOIN `samples`.`tpch`.`orders` ON `lineitem`.`l_orderkey` = `orders`.`o_orderkey`
+JOIN `samples`.`tpch`.`customer` ON `orders`.`o_custkey` = `customer`.`c_custkey`
+JOIN `samples`.`tpch`.`nation` ON `customer`.`c_nationkey` = `nation`.`n_nationkey`
+JOIN `samples`.`tpch`.`region` ON `nation`.`n_regionkey` = `region`.`r_regionkey`
+WHERE `lineitem`.`l_shipdate` &gt;= DATE(&#x27;1992-01-01&#x27;)
+  AND `lineitem`.`l_shipdate` &lt; DATE(&#x27;1993-01-01&#x27;)
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;
+  AND `customer`.`c_mktsegment` IS NOT NULL
+  AND `region`.`r_name` IS NOT NULL
+GROUP BY `customer`.`c_mktsegment`, `region`.`r_name`
+ORDER BY revenue DESC</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue measure and retains the required return-flag filter; its additional quantity and date filters only restrict the rows included.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT SUM(`l_extendedprice` * (1 - `l_discount`)) AS revenue
+FROM `samples`.`tpch`.`lineitem`
+WHERE `l_quantity` = 1
+  AND `l_shipdate` &gt;= DATE(&#x27;1996-01-01&#x27;)
+  AND `l_shipdate` &lt; DATE(&#x27;1997-01-01&#x27;)
+  AND `l_returnflag` IS NOT NULL
+  AND `l_returnflag` != &#x27;R&#x27;
+  AND `l_quantity` IS NOT NULL
+  AND `l_shipdate` IS NOT NULL</pre></details></td></tr><tr><td>revenue</td><td><code>revenue</code></td><td>The statement uses the defined revenue measure and required return-flag filter; its joins keep each counted line item once under the stated match facts, while the other filters only slice the results.</td><td>1</td><td><details><summary>SQL</summary><pre>SELECT SUM(`lineitem`.`l_extendedprice` * (1 - `lineitem`.`l_discount`)) AS revenue
+FROM `samples`.`tpch`.`customer`
+JOIN `samples`.`tpch`.`orders` ON `customer`.`c_custkey` = `orders`.`o_custkey`
+JOIN `samples`.`tpch`.`lineitem` ON `orders`.`o_orderkey` = `lineitem`.`l_orderkey`
+JOIN `samples`.`tpch`.`nation` ON `customer`.`c_nationkey` = `nation`.`n_nationkey`
+JOIN `samples`.`tpch`.`region` ON `nation`.`n_regionkey` = `region`.`r_regionkey`
+WHERE `customer`.`c_mktsegment` ILIKE &#x27;%AUTOMOBILE%&#x27;
+  AND `region`.`r_name` ILIKE &#x27;%ASIA%&#x27;
+  AND `lineitem`.`l_shipdate` &gt;= DATE(&#x27;1995-01-01&#x27;)
+  AND `lineitem`.`l_shipdate` &lt; DATE(&#x27;1996-01-01&#x27;)
+  AND `lineitem`.`l_returnflag` != &#x27;R&#x27;</pre></details></td></tr></table>
+</div></body></html>

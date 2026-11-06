@@ -51,6 +51,11 @@ right). What this does and does not show:
 - The expectations were written by the developer from the SQL, challenged by execution
   (one fixture limit, examined) and agreed by a blind second model, 26 of 26. They are
   not independent human labels.
+- The sealed findings are published: [findings.jsonl](findings.jsonl) (the same bytes as
+  the hash in [SEALED.md](SEALED.md); `python ../harness.py score findings.jsonl .`
+  rescores them) and [report.html](report.html), the report the check code renders from
+  those answers. Replaying the answers through the check code of 0.1.1 gives the same 26
+  records, states and evidence.
 - No issue flagged does not certify a statement correct, and a quoted clause found in
   the text shows it exists, not that the model interpreted it correctly.
 - Genie wrote every statement; the questions were chosen to cover drift, ordinary

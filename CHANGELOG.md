@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.1 — unreleased
+
+Input integrity and coverage for `touchstone check`, from an outside review of 0.1.0.
+No change to the classifier: the 26 prompts of the 0.1.0 fresh test are byte for byte
+the same, and replaying its sealed answers gives the same states and evidence.
+
+- **The right definition.** `check` builds its own comparison records from the
+  snapshots: every named measure of every listed view, including ones the parked SQL
+  rules cannot represent (an `APPROX_COUNT_DISTINCT` metric produced no records).
+  `MEASURE(revenue)` on a view is compared with that view's `revenue`, not the first
+  view that declares one; a name two views declare, with nothing to choose between
+  them, is not compared.
+- **The definition that applied.** Under `as_of_execution` a run with no start time,
+  or one before the definition applied, is no longer compared with it (it was, with the
+  first definition listed); under `current`, past versions are left out.
+- **Coverage.** Each use that cannot be compared, and each unparseable statement that
+  mentions a governed view, source or metric, is listed as not assessed with the reason,
+  in the report and in `findings.jsonl`. The report says what was read and left out.
+- The session a statement ran in (context, earlier statements) reaches the prompt when
+  one was recorded.
+- `check` refuses criteria other than v6 (with `--criteria 4` it rendered zero in every
+  state).
+- CI runs the parked benchmark and oracle as `touchstone experimental bench|oracle`.
+- The fresh test's sealed findings and a sample report are published in
+  `src/touchstone/benchmark/v6_fresh`; [examples/minimal](examples/minimal) is a complete
+  minimal input. The parked product's documentation moved to `docs/experimental.md`.
+
 ## 0.1.0 — 2026-11-06
 
 The first release of the narrow product, advisory metric drift detection: check the SQL

@@ -1,0 +1,12 @@
+# A complete check package: the approved definitions, the history, and when each
+# definition applied. `touchstone check --pilot examples/minimal --out out/minimal`
+history: history.jsonl
+window: {from: 2026-11-01T00:00:00Z, to: 2026-12-01T00:00:00Z}
+compare_against: as_of_execution
+authority:
+  system: uc_metrics
+  metric_views:
+    - name: main.sales.revenue_mv         # fully qualified, as deployed
+      snapshot: views/revenue_mv.yaml     # the definition text
+      sha256: 02dfa6747b4eafea46df8547cddb0e7fe346e644158432777a0b2bd89b858455
+      applies: {from: 2026-11-01T00:00:00Z, to: null}
