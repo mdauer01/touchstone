@@ -1,0 +1,84 @@
+# Each case's own extra filters, groupings and joins, read from its SQL (as in
+# ../v4_fresh/answer_key.yaml), for the reference query that challenges expected.yaml.
+# Unqualified columns are the governed rows'; p = part, s = supplier. An ingredient on the
+# required filter's column is refused by the reference builder.
+
+cmp_ebf052f73a87e7a3:
+  filters: ["l_shipdate >= DATE '1993-01-01'", "l_shipdate < DATE '1994-01-01'", "l_shipdate IS NOT NULL"]
+  group_by: ["DATE_TRUNC('QUARTER', l_shipdate) AS quarter"]
+cmp_a1d97ee5db7474c7:
+  filters: ["l_shipdate >= DATE '1996-01-01'", "l_shipdate <= DATE '1996-12-31'", "l_shipmode IS NOT NULL"]
+  group_by: ["l_shipmode AS l_shipmode"]
+cmp_a9daf86c56b1dcf3:
+  filters: ["l_shipdate IS NOT NULL"]
+  group_by: ["DATE_TRUNC('YEAR', l_shipdate) AS ship_year"]
+cmp_ec58e0d7eb9581f5:
+  filters: ["o_orderstatus = 'F'", "o_totalprice IS NOT NULL"]
+cmp_f951696ca301d121:
+  filters: ["l_quantity = 1", "l_shipdate >= DATE '1996-01-01'", "l_shipdate < DATE '1997-01-01'",
+            "l_quantity IS NOT NULL", "l_shipdate IS NOT NULL"]
+cmp_01881b3f89319a94:
+  filters: ["l_shipdate >= DATE '1997-01-01'", "l_shipdate < DATE '1998-01-01'", "l_shipinstruct IS NOT NULL"]
+  group_by: ["l_shipinstruct AS l_shipinstruct"]
+cmp_2bf25ce927dd8827:
+  filters: ["o_clerk ILIKE '%Clerk#000000088%'", "l_shipdate IS NOT NULL"]
+  group_by: ["l_shipdate AS l_shipdate"]
+cmp_6fd910a83ed079b5:
+  filters: ["l_commitdate >= DATE '1995-03-01'", "l_commitdate < DATE '1995-04-01'", "l_commitdate IS NOT NULL",
+            "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL"]
+cmp_6488873f48385e47:
+  filters: ["o_totalprice < 50000", "o_orderdate >= DATE '1998-01-01'", "o_orderdate < DATE '1999-01-01'",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["DATE_TRUNC('DAY', l_shipdate) AS ship_date"]
+cmp_e43a45f529823c5a:
+  filters: ["l_tax = 0.08", "l_tax IS NOT NULL"]
+cmp_ec22d2b0814a8fc3:
+  filters: ["l_shipdate >= DATE '1992-01-01'", "l_shipdate < DATE '1993-01-01'", "c_mktsegment IS NOT NULL",
+            "r_name IS NOT NULL"]
+  group_by: ["c_mktsegment AS market_segment", "r_name AS region"]
+cmp_ffd9cecd189b6100:
+  filters: ["c_mktsegment ILIKE '%AUTOMOBILE%'", "r_name ILIKE '%ASIA%'", "l_shipdate >= DATE '1995-01-01'",
+            "l_shipdate < DATE '1996-01-01'"]
+cmp_8d004693254502dc:
+  filters: ["l_shipdate >= DATE '1993-01-01'", "l_shipdate < DATE '1994-01-01'", "l_shipmode IS NOT NULL",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["DATE_TRUNC('MONTH', l_shipdate) AS month", "l_shipmode AS l_shipmode"]
+cmp_d786e4417f5d5ed7:
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["l_shipdate >= DATE '1996-01-01'", "l_shipdate < DATE '1997-01-01'", "p.p_mfgr IS NOT NULL",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["p.p_mfgr AS p_mfgr"]
+cmp_e286f19b53c85a60:
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["p.p_size = 50"]
+cmp_a57d1d17eb976e6c:
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+  filters: ["s.s_acctbal < 0", "s.s_name IS NOT NULL", "s.s_acctbal IS NOT NULL"]
+  group_by: ["s.s_name AS s_name"]
+cmp_e61d3cfa15acae8b:
+  filters: ["l_shipdate IS NOT NULL", "YEAR(l_shipdate) = 1996"]
+  group_by: ["DATE_TRUNC('MONTH', l_shipdate) AS month"]
+cmp_5fc4f09b36dd75b1:
+  filters: ["l_shipdate IS NOT NULL", "YEAR(l_shipdate) = 1994"]
+  group_by: ["DATE_TRUNC('MONTH', l_shipdate) AS month"]
+cmp_b151d4381a07a74e:
+  filters: ["l_shipdate >= DATE '1994-01-01'", "l_shipdate < DATE '1995-01-01'", "r_name IS NOT NULL",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["r_name AS region"]
+cmp_a839fa7eea9b3952:
+  filters: ["l_shipdate >= DATE '1994-01-01'", "l_shipdate < DATE '1995-01-01'", "r_name IS NOT NULL",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["r_name AS region"]
+cmp_6139f3dde23597a8:
+  filters: ["l_shipdate >= DATE '1995-01-01'", "l_shipdate < DATE '1996-01-01'", "l_shipmode IS NOT NULL",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["l_shipmode AS l_shipmode"]
+cmp_66acdc7954f80028:
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["l_shipdate >= DATE '1995-01-01'", "l_shipdate < DATE '1996-01-01'", "p.p_brand IS NOT NULL",
+            "l_shipdate IS NOT NULL"]
+  group_by: ["p.p_brand AS p_brand"]

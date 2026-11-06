@@ -1,0 +1,31 @@
+# Expected review state for each case, written from the statement and the definition
+# (pilot/views/revenue_mv.yaml and the facts in its comments) after Genie answered and
+# before any v6 verdict existed. ../harness.py challenges them by execution; the blind
+# model review is in REVIEW.md. States as in ../v6_dev/expected.yaml.
+
+cmp_ebf052f73a87e7a3: {expected: review_needed, reason: "quarterly revenue, 1993, returned items included: the required filter is dropped"}
+cmp_a1d97ee5db7474c7: {expected: review_needed, reason: "revenue of returned items only (LOWER(TRIM(l_returnflag)) = 'r', which also matches case and space variants): the required filter is replaced by its opposite"}
+cmp_a9daf86c56b1dcf3: {expected: review_needed, reason: "SUM(l_extendedprice) presented as revenue: discounts ignored, and no return filter"}
+cmp_ec58e0d7eb9581f5: {expected: review_needed, reason: "SUM(o_totalprice) presented as revenue: another measure over orders, no return filter"}
+cmp_da9cb0a35203b946: {expected: no_issue_flagged, reason: "revenue_incl_tax states another quantity (the metric after an adjustment)"}
+cmp_f951696ca301d121: {expected: no_issue_flagged, reason: "quantity of exactly 1, 1996: a slice; the NULL checks change nothing"}
+cmp_01881b3f89319a94: {expected: no_issue_flagged, reason: "by ship instruction, 1997: a slice on another attribute"}
+cmp_2bf25ce927dd8827: {expected: no_issue_flagged, reason: "one clerk's orders by ship date: a slice; orders joined along the declared key, exactly one match stated"}
+cmp_6fd910a83ed079b5: {expected: no_issue_flagged, reason: "committed in March 1995: a slice on another date"}
+cmp_6488873f48385e47: {expected: no_issue_flagged, reason: "orders under 50,000 placed in 1998, by ship day: a slice; orders joined along the declared key"}
+cmp_e43a45f529823c5a: {expected: no_issue_flagged, reason: "tax rate of 8%: a slice; the return-flag NULL check is implied by the required filter"}
+cmp_ec22d2b0814a8fc3: {expected: no_issue_flagged, reason: "market segment and region, 1992: declared dimensions along the declared joins"}
+cmp_ffd9cecd189b6100: {expected: no_issue_flagged, reason: "AUTOMOBILE customers in ASIA, 1995: declared dimensions"}
+cmp_8d004693254502dc: {expected: no_issue_flagged, reason: "monthly by ship mode, 1993: declared dimensions"}
+cmp_d786e4417f5d5ed7: {expected: could_not_assess, violates: [part], reason: "by part manufacturer through an undeclared part join; nothing says each line item matches exactly one part"}
+cmp_e286f19b53c85a60: {expected: could_not_assess, violates: [part], reason: "parts of size 50 through an undeclared part join"}
+cmp_a57d1d17eb976e6c: {expected: could_not_assess, violates: [supplier], reason: "by supplier through an undeclared supplier join; nothing says each line item matches exactly one supplier"}
+cmp_99f3d733df36e2fc: {expected: review_needed, reason: "the supplier's nation presented as `nation`, which the definition says means the customer's nation"}
+cmp_232be1d39f3acf72: {expected: no_issue_flagged, reason: "avg_revenue_per_order states another quantity"}
+cmp_1546cdf8e59e83d6: {expected: no_issue_flagged, reason: "fraction_urgent_revenue states another quantity (a share); not judged as the metric"}
+cmp_e61d3cfa15acae8b: {expected: review_needed, reason: "revenue_1996 and revenue_1995 present the metric by period, with no return filter"}
+cmp_5fc4f09b36dd75b1: {expected: no_issue_flagged, reason: "monthly_revenue for 1994 is computed as defined; running_total_revenue states another quantity"}
+cmp_b151d4381a07a74e: {expected: no_issue_flagged, reason: "by region, 1994: declared dimension along the declared joins"}
+cmp_a839fa7eea9b3952: {expected: review_needed, reason: "by region, 1994, with no return filter"}
+cmp_6139f3dde23597a8: {expected: no_issue_flagged, reason: "by ship mode, 1995: declared dimensions"}
+cmp_66acdc7954f80028: {expected: could_not_assess, violates: [part], reason: "per part brand through an undeclared part join"}
