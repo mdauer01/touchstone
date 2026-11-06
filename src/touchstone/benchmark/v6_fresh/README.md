@@ -32,3 +32,25 @@ Genie answered any of these questions:
 4. `touchstone check` judges every case once with gpt-6-luna; the findings stay outside
    the repository and `SEALED.md` records their hash.
 5. `python ../harness.py score <findings> .` scores them once.
+
+## Result (scored once, 2026-11-06)
+
+| Measure | Result |
+|---|---|
+| Drift caught (recall over expected review_needed) | 7 of 7 |
+| Review-needed answers right (precision) | 7 of 7 |
+| Could not assess | 4 of 26 (15%), exactly the 4 expected: joins to part or supplier, which the definition says nothing about |
+| Agreement on all three states | 26 of 26 |
+
+**The release bar is met** (no missed drift, at least 80% of review-needed answers
+right). What this does and does not show:
+
+- One frozen test: 26 cases, one metric (TPC-H revenue), one model (gpt-6-luna), one
+  run. With 7 drift cases, 7 of 7 is consistent with a true recall well below 100%;
+  it is evidence on this test, not a production rate.
+- The expectations were written by the developer from the SQL, challenged by execution
+  (one fixture limit, examined) and agreed by a blind second model, 26 of 26. They are
+  not independent human labels.
+- Genie wrote every statement; the questions were chosen to cover drift, ordinary
+  investigations, declared slices, undeclared joins, a dimension with another meaning
+  and separately named measures.

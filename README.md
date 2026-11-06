@@ -19,7 +19,7 @@ answer is one of three review states:
   slices; a separately named quantity (an average, a share) is not judged as the metric.
 
 The assessment is advisory: a model's reading that orders review, never a verdict that a
-number is right. Status: a research preview; see [How well it works](#how-well-it-works).
+number is right. Status: 0.1.0, an early release; see [How well it works](#how-well-it-works).
 
 - License: [Apache-2.0](LICENSE)
 
@@ -84,8 +84,12 @@ one counts as a miss), precision of review-needed answers, and abstention.
 - On the **dev set** (57 cases from two earlier tests, already seen, used to tune):
   13 of 13 review-needed cases caught, no false alarm, 9 could not assess. The earlier
   five-question classifier caught the same 13 with 42 alerts.
-- The release gate is a **fresh, frozen test**: no missed drift and at least 80% of
-  review-needed answers right. Until it passes, treat results as a preview.
+- On a **fresh, frozen test** (26 new Genie statements, judged once, sealed, then scored:
+  [src/touchstone/benchmark/v6_fresh](src/touchstone/benchmark/v6_fresh/README.md)):
+  7 of 7 drift cases caught, 7 of 7 review-needed answers right, 4 could not assess
+  (all four the expected undeclared joins), 26 of 26 states as expected. That met the
+  0.1.0 release bar (no missed drift, at least 80% of review-needed answers right). It is
+  one small test with one model and one metric, not a production rate.
 
 ### Lower-level commands
 
