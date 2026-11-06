@@ -1,0 +1,125 @@
+# Reference-query ingredients for the statements that present their result under the
+# metric's name (answer_key.py decides which ones from the output names).
+#
+# Each entry lists only what the STATEMENT adds on top of the definition: its extra
+# filters, groupings ("expr AS output_name"), joins to tables outside the definition,
+# ordering and limit. answer_key.py builds the reference from them, always with the
+# governed measure over the governed rows (revenue_mv's source, declared joins and
+# required filter), and refuses an ingredient on the required filter's column, so a
+# departure cannot be copied into the reference.
+#
+# Column names are the definition's; joined tables use the aliases p (part), s
+# (supplier) and sn (the supplier's nation). Written from the SQL alone, before the
+# sealed verdicts were opened.
+
+cmp_154161d40f0ef5dd:   # 01 Genie: revenue from orders above 300,000
+  filters: ["o_totalprice > 300000", "o_totalprice IS NOT NULL"]
+
+cmp_23bf8a59c150237d:   # 02 Genie: daily revenue for line items over 40 units
+  filters: ["l_quantity > 40", "l_shipdate IS NOT NULL"]
+  group_by: ["l_shipdate AS l_shipdate"]
+
+cmp_2dcd721ba3b99ad1:   # 06 TPC-H Q6
+  filters: ["l_shipdate >= DATE '1994-01-01'", "l_shipdate < DATE '1995-01-01'",
+            "l_discount BETWEEN 0.05 AND 0.07", "l_quantity < 24"]
+
+cmp_2fccfaa5482edeb4:   # 07 Genie: revenue from customers with a negative balance
+  filters: ["c_acctbal < 0", "c_acctbal IS NOT NULL"]
+
+cmp_34d41d893a29f07d:   # 08 Genie: revenue of one customer
+  filters: ["c_name = 'Customer#000000001'", "l_extendedprice IS NOT NULL",
+            "l_discount IS NOT NULL"]
+
+cmp_47df521f9b223f06:   # 09 Genie: 1997 revenue by supplier nation
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+    - {table: nation, alias: sn, "on": "s.s_nationkey = sn.n_nationkey"}
+  filters: ["l_shipdate >= DATE '1997-01-01'", "l_shipdate < DATE '1998-01-01'",
+            "sn.n_name IS NOT NULL", "l_shipdate IS NOT NULL"]
+  group_by: ["sn.n_name AS supplier_nation"]
+
+cmp_583c4dd8516711e8:   # 10 TPC-H Q14 (output named promo_revenue)
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["p.p_type LIKE 'PROMO%'", "l_shipdate >= DATE '1995-09-01'",
+            "l_shipdate < DATE '1995-10-01'"]
+
+cmp_79a1b6029b45aaf4:   # 11 TPC-H Q3
+  filters: ["c_mktsegment = 'BUILDING'", "o_orderdate < DATE '1995-03-15'",
+            "l_shipdate > DATE '1995-03-15'"]
+  group_by: ["l_orderkey AS l_orderkey", "o_orderdate AS o_orderdate",
+             "o_shippriority AS o_shippriority"]
+  order_by: "revenue DESC, o_orderdate"
+  limit: 10
+
+cmp_9bf48800b12dc4e9:   # 15 Genie: 1995 revenue
+  filters: ["l_shipdate >= DATE '1995-01-01'", "l_shipdate < DATE '1996-01-01'",
+            "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL", "l_shipdate IS NOT NULL"]
+
+cmp_ae3230e76424c087:   # 16 TPC-H Q5
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+  filters: ["c_nationkey = s.s_nationkey", "r_name = 'ASIA'",
+            "o_orderdate >= DATE '1994-01-01'", "o_orderdate < DATE '1995-01-01'"]
+  group_by: ["n_name AS n_name"]
+
+cmp_b8dc57bc04e319bd:   # 17 Genie: Q2 1997 revenue for mail and regular-air shipments
+  filters: ["l_shipdate >= DATE '1997-04-01'", "l_shipdate <= DATE '1997-06-30'",
+            "(l_shipmode ILIKE '%MAIL%' OR l_shipmode ILIKE '%REG AIR%')",
+            "l_shipdate IS NOT NULL", "l_shipmode IS NOT NULL",
+            "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL"]
+
+cmp_b9e092f084463004:   # 18 Genie: revenue by order priority and ship mode
+  filters: ["o_orderpriority IS NOT NULL", "l_shipmode IS NOT NULL"]
+  group_by: ["o_orderpriority AS o_orderpriority", "l_shipmode AS l_shipmode"]
+
+cmp_c09b8eb076c7d6d9:   # 19 TPC-H Q7
+  joins:
+    - {table: supplier, alias: s, "on": "l_suppkey = s.s_suppkey"}
+    - {table: nation, alias: sn, "on": "s.s_nationkey = sn.n_nationkey"}
+  filters: ["((sn.n_name = 'FRANCE' AND n_name = 'GERMANY') OR (sn.n_name = 'GERMANY' AND n_name = 'FRANCE'))",
+            "l_shipdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'"]
+  group_by: ["sn.n_name AS supp_nation", "n_name AS cust_nation", "YEAR(l_shipdate) AS l_year"]
+
+cmp_cea9a5497126cd6a:   # 20 Genie: revenue by line status
+  filters: ["l_linestatus IS NOT NULL"]
+  group_by: ["l_linestatus AS l_linestatus"]
+
+cmp_dee28fafb8e93db2:   # 21 TPC-H Q19
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters:
+    - >-
+      (p.p_brand = 'Brand#12' AND p.p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+       AND l_quantity >= 1 AND l_quantity <= 11 AND p.p_size BETWEEN 1 AND 5
+       AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON')
+      OR (p.p_brand = 'Brand#23' AND p.p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+       AND l_quantity >= 10 AND l_quantity <= 20 AND p.p_size BETWEEN 1 AND 10
+       AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON')
+      OR (p.p_brand = 'Brand#34' AND p.p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+       AND l_quantity >= 20 AND l_quantity <= 30 AND p.p_size BETWEEN 1 AND 15
+       AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON')
+
+cmp_e46ec4e97e6ce0d7:   # 23 Genie: 1997 revenue in Europe
+  filters: ["r_name ILIKE '%Europe%'", "l_shipdate >= DATE '1997-01-01'",
+            "l_shipdate < DATE '1998-01-01'"]
+
+cmp_ec7ce424e58806cc:   # 24 Genie: weekly revenue, Q1 1996
+  filters: ["l_shipdate IS NOT NULL", "l_extendedprice IS NOT NULL", "l_discount IS NOT NULL",
+            "l_shipdate >= DATE '1996-01-01'", "l_shipdate <= DATE '1996-03-31'"]
+  group_by: ["DATE_TRUNC('WEEK', l_shipdate) AS week_start"]
+
+cmp_efe62969f66ae9cf:   # 25 TPC-H Q10
+  filters: ["o_orderdate >= DATE '1993-10-01'", "o_orderdate < DATE '1994-01-01'"]
+  group_by: ["c_custkey AS c_custkey", "c_name AS c_name", "c_acctbal AS c_acctbal",
+             "c_phone AS c_phone", "n_name AS n_name", "c_address AS c_address",
+             "c_comment AS c_comment"]
+  order_by: "revenue DESC"
+  limit: 20
+
+cmp_f3625f991846ca1b:   # 27 Genie: top five brands by revenue
+  joins:
+    - {table: part, alias: p, "on": "l_partkey = p.p_partkey"}
+  filters: ["p.p_brand IS NOT NULL"]
+  group_by: ["p.p_brand AS p_brand"]
+  top: 5
