@@ -47,3 +47,30 @@ python src/touchstone/benchmark/v4_fresh/score.py out/v4_fresh/verdicts.SEALED.j
 Primary measures: alert precision, and missed alerts (changed definitions and
 prohibited variations). Also reported: alerts on statements the key does not alert on,
 and how much stays unresolved.
+
+## Result (scored once, 2026-11-05)
+
+| Measure | Result |
+|---|---|
+| Alert precision | 10 of the model's 20 alerts are alerts in the key |
+| Missed alerts | 0 of 10 (7 changed definitions, 3 prohibited variations) |
+| Investigations alerted (key: informational) | 5 of 5 |
+| Permitted uses alerted (key: no alert) | 3 of 4 |
+| Separate measures alerted | 2 of 8 (contested, below) |
+| Unresolved | 0 (key: 0) |
+
+v4 as frozen does not meet its goal: it alerts on every investigation. It stays opt-in.
+
+- **8 of the 10 false alarms come from one fact.** The model answered `source_rows:
+  changed` for statements whose results equal the reference on clean and dirty data:
+  four read `lineitem` alone, four join along the declared keys with INNER JOIN (rule
+  A2, which the model cited in three of them). Databricks metric views join only the
+  tables a query needs and treat every join as many-to-one
+  ([joins in metric views](https://docs.databricks.com/aws/en/uc-semantics/metric-views/joins)),
+  so neither changes the rows. `decide()` checks a changed core fact before owner rules,
+  so the A2 citations could not count.
+- **2 are contested naming:** `avg_daily_revenue` and `revenue_before_discount`. The
+  model read rule A3 (qualified names present the metric) as covering them; the key
+  reads a name that states another quantity as a separately named measure.
+- **The 3 prohibited variations were alerted for the wrong reason:** the model cited P1
+  or P2 correctly each time, but `source_rows: changed` made them definition changes.
