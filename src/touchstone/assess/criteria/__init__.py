@@ -245,6 +245,10 @@ def decide_single(answers: dict, criteria: Criteria, record: dict | None = None)
         comparison = "undetermined"
     if not _text(answers, "presented_as") or comparison == "preserved":
         return "no_issue_flagged"
+    if record is not None and not presented_by_name(answers, record):
+        # The model reads an output as this metric that nothing names as it:
+        # not dismissed, not accused — a reviewer decides.
+        return "could_not_assess"
     if comparison == "departs" and _text(answers, "explanation"):
         found = excerpts_found(answers, record) if record is not None else {
             k: bool(_text(answers, k)) for k in ("statement_clause", "definition_clause")}
@@ -261,6 +265,9 @@ def excerpts_found(answers: dict, record: dict) -> dict[str, bool | None]:
     import re
 
     def norm(text: str) -> str:
+        # The prompt shows the statement JSON-encoded: a quote may carry its
+        # escapes (\n, \") literally.
+        text = re.sub(r"\\[nrt]", " ", text).replace('\\"', '"')
         return re.sub(r"[\s`\"]+", "", text.lower()).rstrip(";")
 
     definition = record.get("definition") or {}
@@ -275,7 +282,8 @@ def excerpts_found(answers: dict, record: dict) -> dict[str, bool | None]:
             out[key] = None
             continue
         haystack, at = norm(source), 0
-        for part in filter(None, (norm(p) for p in re.split(r"\.\.\.|…", quoted))):
+        # Parts quoted together ("…" or "; " between them) must occur in order.
+        for part in filter(None, (norm(p) for p in re.split(r"\.\.\.|…|;\s", quoted))):
             at = haystack.find(part, at)
             if at < 0:
                 break
@@ -284,11 +292,30 @@ def excerpts_found(answers: dict, record: dict) -> dict[str, bool | None]:
     return out
 
 
+def presented_by_name(answers: dict, record: dict) -> bool:
+    """Whether the output the model reads as this metric is named as it: the
+    metric's name occurs in the output's name (revenue, eu_revenue,
+    revenue_1996), or a query tag or asset names the metric."""
+    import re
+
+    def norm(text) -> str:
+        return "_" + re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_") + "_"
+
+    metric = norm(record["definition"]["name"])
+    names = [_text(answers, "presented_as")] + [
+        e.get("value") for e in (record.get("claimed_metric") or {}).get("identity_evidence") or []
+        if e.get("source") not in (None, "none")]
+    return metric != "__" and any(metric in norm(n) for n in names if n)
+
+
 def evidence(answers: dict, record: dict) -> dict:
     """Criteria v6: the evidence a verdict shows a reviewer — what the model
-    wrote, and whether each excerpt was found in the text it quotes."""
+    wrote, whether each excerpt was found in the text it quotes, and whether
+    the output it reads as the metric is named as it."""
     return {**{k: _text(answers, k) for k in EVIDENCE},
-            "excerpts_found": excerpts_found(answers, record)}
+            "excerpts_found": excerpts_found(answers, record),
+            "presented_by_name": presented_by_name(answers, record)
+            if _text(answers, "presented_as") else None}
 
 
 def _text(answers: dict, key: str) -> str:

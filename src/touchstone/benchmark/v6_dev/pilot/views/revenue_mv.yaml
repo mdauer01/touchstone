@@ -1,0 +1,45 @@
+version: 1.1
+comment: >-
+  Net revenue of shipped line items (finance-approved). Along the declared join keys,
+  each line item matches exactly one order; each order matches exactly one customer;
+  each customer matches exactly one nation; and each nation matches exactly one region.
+source: samples.tpch.lineitem
+filter: l_returnflag <> 'R'
+joins:
+  - name: orders
+    source: samples.tpch.orders
+    on: source.l_orderkey = orders.o_orderkey
+    joins:
+      - name: customer
+        source: samples.tpch.customer
+        on: orders.o_custkey = customer.c_custkey
+        joins:
+          - name: nation
+            source: samples.tpch.nation
+            on: customer.c_nationkey = nation.n_nationkey
+            joins:
+              - name: region
+                source: samples.tpch.region
+                on: nation.n_regionkey = region.r_regionkey
+dimensions:
+  - name: ship_date
+    expr: l_shipdate
+  - name: ship_month
+    expr: DATE_TRUNC('MONTH', l_shipdate)
+  - name: ship_mode
+    expr: l_shipmode
+  - name: order_priority
+    expr: orders.o_orderpriority
+  - name: market_segment
+    expr: orders.customer.c_mktsegment
+  - name: nation
+    expr: orders.customer.nation.n_name
+    comment: The customer's nation. In all reporting, nation means the customer's.
+  - name: region
+    expr: orders.customer.nation.region.r_name
+    comment: The customer's region. In all reporting, region means the customer's.
+measures:
+  - name: revenue
+    expr: SUM(l_extendedprice * (1 - l_discount))
+  - name: gross_sales
+    expr: SUM(l_extendedprice)

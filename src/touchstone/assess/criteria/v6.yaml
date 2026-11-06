@@ -56,12 +56,15 @@ policy: |-
     to a table the definition does not declare, or a join on other keys can drop or repeat
     rows: if the result depends on facts the definition does not state, the comparison is
     undetermined, not a departure.
-  - A NULL check preserves the calculation only if the rows it removes cannot change this
-    measure (a SUM ignores rows whose input is NULL; a COUNT(*) does not), or if a required
-    filter already excludes them (a comparison is never true for NULL).
+  - A NULL check (IS NOT NULL) is a filter like any other: either it removes nothing that
+    counts (a SUM ignores rows whose input is NULL, a COUNT(*) does not; a comparison in a
+    required filter is never true for NULL), or it restricts which rows are counted - a
+    slice, such as leaving out the group whose key is NULL. Neither is a departure unless
+    it changes a required filter.
   - A rewrite equal by logic alone preserves the calculation: CTEs and subqueries, aliases,
     a cast that cannot change a value, rearranged arithmetic, a predicate that is always
-    true, a date truncated to its own precision.
+    true, a date truncated to its own precision. So does showing an empty result as zero
+    (COALESCE(SUM(...), 0)).
   - The output that presents the metric carries the metric's name, alone or qualified
     only by which rows it covers (a place, a period, a segment). A name that states
     another quantity - an average, a share or ratio, a growth, a count, a running total,

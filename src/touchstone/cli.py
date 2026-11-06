@@ -468,6 +468,23 @@ def main(argv: list[str] | None = None) -> int:
     p_cl.add_argument("sheet", help="the filled CSV")
     p_cl.add_argument("--dataset", help="dataset directory (default: the shipped one)")
 
+    p_check = sub.add_parser(
+        "check",
+        help="check executed SQL against approved metric definitions: one advisory "
+             "assessment per distinct statement, a readable report (review needed, could "
+             "not assess, no issue flagged); no scan needed")
+    p_check.add_argument("--pilot", dest="pilot_dir", required=True,
+                         help="package directory (pilot.yml): the approved metric-view "
+                              "snapshots, the query-history export and the window")
+    provider_args(p_check)
+    p_check.add_argument("--out", required=True,
+                         help="directory for report.html, findings.jsonl and comparisons.jsonl (the "
+             "records as assessed)")
+    p_check.add_argument("--cache", help="verdict cache (JSON lines): answered statements are "
+                                         "reused, new ones appended")
+    p_check.add_argument("--dialect", default="databricks",
+                         help="SQL dialect of the history (default: databricks)")
+
     args = parser.parse_args(argv)
     handler = {
         "scan": _cmd_scan,
@@ -489,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         "oracle": _cmd_oracle,
         "propose": _cmd_propose,
         "assess": _cmd_assess,
+        "check": _cmd_check,
     }[args.command]
     try:
         import duckdb
@@ -1258,8 +1276,86 @@ def _assess_run(args: argparse.Namespace, provider) -> int:
     return 1 if records and not stats["labels"] and not stats["held"] else 0
 
 
-def _cmd_assess(args: argparse.Namespace) -> int:
+def _provider_from(args: argparse.Namespace):
     from touchstone.assess.providers import ProviderConfig, get_provider
+
+    options = {"seed": args.seed, "batch_size": args.batch_size,
+               "decisions": args.decisions, "votes": args.votes}
+    for name in ("host", "profile", "base_url", "max_tokens", "temperature", "effort",
+                 "concurrency", "service_tier"):
+        if getattr(args, name) is not None:
+            options[name] = getattr(args, name)
+    return get_provider(ProviderConfig(args.provider, model=args.model,
+                                       endpoint=args.endpoint, options=options))
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Exit 0 when the assessment completed, whatever it found; 1 when some
+    statements could not be assessed (a failed model request: the report
+    lists them); 2 when the check could not run (invalid input, a provider
+    that cannot be set up, a report that cannot be written)."""
+    from collections import Counter
+
+    from touchstone.assess.criteria import load as load_criteria
+    from touchstone.assess.providers import ProviderError
+    from touchstone.report.check import render_check
+    from touchstone.services.check import run_check
+
+    try:
+        provider = _provider_from(args)
+        criteria = load_criteria(args.criteria or 6)
+    except (NotImplementedError, ValueError) as e:
+        print(f"touchstone check: {e}", file=sys.stderr)
+        return 2
+    cache: dict = {}
+    if args.cache and Path(args.cache).exists():
+        with open(args.cache, encoding="utf-8") as f:
+            cache = {e["key"]: e["assessment"] for e in map(json.loads, filter(str.strip, f))}
+    known = set(cache)
+    try:
+        result = run_check(args.pilot_dir, provider, criteria, dialect=args.dialect, cache=cache)
+    except ProviderError as e:
+        print(f"touchstone check: {e}", file=sys.stderr)
+        return 2
+    out = Path(args.out)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text(render_check(result), encoding="utf-8")
+        with open(out / "findings.jsonl", "w", encoding="utf-8") as f:
+            for v in result["verdicts"]:
+                f.write(json.dumps(v) + "\n")
+        # The evidence records exactly as assessed: what each judgment saw.
+        with open(out / "comparisons.jsonl", "w", encoding="utf-8") as f:
+            for r in result.pop("records"):
+                f.write(json.dumps(r) + "\n")
+        if args.cache:
+            with open(args.cache, "a", encoding="utf-8") as f:
+                for key in cache.keys() - known:
+                    f.write(json.dumps({"key": key, "assessment": cache[key]}) + "\n")
+    except OSError as e:
+        print(f"touchstone check: cannot write the report: {e}", file=sys.stderr)
+        return 2
+    labels = Counter(v.get("label") for v in result["verdicts"])
+    print(f"check · {result['uses']} metric use(s) in {result['statements']} distinct "
+          f"statement(s) · provider {provider.name}"
+          + (f" ({provider.model})" if provider.model else "") + f" · criteria v{criteria.version}")
+    if not provider.measures_performance:
+        print("  NOTE: this provider measures nothing — its answers are not readings")
+    print(f"  review needed {labels['review_needed']} · could not assess "
+          f"{labels['could_not_assess']} · no issue flagged {labels['no_issue_flagged']}")
+    stats = result["stats"]
+    print(f"  model calls {stats['calls']} · from cache {stats['from_cache']}")
+    if result["held"]:
+        print(f"  NOT ASSESSED, held for a person (steering text in the statement): "
+              f"{len(result['held'])}")
+    if result["failed"]:
+        print(f"  NOT ASSESSED, the model request failed: {len(result['failed'])} — "
+              + ", ".join(f"{k} {n}" for k, n in sorted(stats["failed"].items())))
+    print(f"  report → {out / 'report.html'}")
+    return 1 if result["failed"] else 0
+
+
+def _cmd_assess(args: argparse.Namespace) -> int:
     from touchstone.assess.runner import load_dataset, observations_from_monitor, run_benchmark
 
     if args.assess_command == "review-sheet":
@@ -1268,14 +1364,7 @@ def _cmd_assess(args: argparse.Namespace) -> int:
         return _assess_compare_labels(args)
 
     try:
-        options = {"seed": args.seed, "batch_size": args.batch_size,
-                   "decisions": args.decisions, "votes": args.votes}
-        for name in ("host", "profile", "base_url", "max_tokens", "temperature", "effort",
-                     "concurrency", "service_tier"):
-            if getattr(args, name) is not None:
-                options[name] = getattr(args, name)
-        provider = get_provider(ProviderConfig(args.provider, model=args.model,
-                                               endpoint=args.endpoint, options=options))
+        provider = _provider_from(args)
     except (NotImplementedError, ValueError) as e:
         print(f"touchstone assess: {e}", file=sys.stderr)
         return 2

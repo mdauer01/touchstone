@@ -249,7 +249,7 @@ def build_registry(catalog: dict, artifacts: list, dialect: str,
 
 
 def monitor_history(
-    store: Store,
+    store: Store | None,
     history: str | HistoryIntake,
     registry: SchemaRegistry,
     dialect: str,
@@ -283,19 +283,25 @@ def monitor_history(
     from touchstone.services.pilot import precise_ts
 
     _NOW.set(precise_ts(utcnow()))
-    scan = store.latest_scan()
-    if scan is None:
+    # A pilot package names its own approved definitions, so it needs no scan
+    # (`store` None: `touchstone check`); with a scan, the pilot must match it
+    # and the scan's other definitions are evidence. Without a pilot the
+    # scan's reference set IS the authority.
+    scan = store.latest_scan() if store is not None else None
+    if scan is None and pilot is None:
         raise ValueError("no scans recorded — monitor needs a scan's "
                          "reference set to compare against; run `touchstone "
                          "scan` first")
     intake = history if isinstance(history, HistoryIntake) else from_sql_text(history)
     if pilot is not None:
-        from touchstone.services.pilot import verify_against_scan
+        if scan is not None:
+            from touchstone.services.pilot import verify_against_scan
 
-        verify_against_scan(pilot, store, scan["scan_id"])
+            verify_against_scan(pilot, store, scan["scan_id"])
         asset_map = {**(asset_map or {}), **pilot.asset_map}
     authorities, computed, excluded, unreadable, ref_meta = _authority_set(
-        store, scan["scan_id"], registry, dialect, pilot, authority_systems)
+        store if scan is not None else None, scan["scan_id"] if scan else None,
+        registry, dialect, pilot, authority_systems)
 
     by_hash: dict[str, list[Authority]] = {}
     by_name: dict[str, set[str]] = {}
@@ -432,12 +438,13 @@ def monitor_history(
     # under the same condition; monitoring kept calling the same equality
     # "conforming".
     run_toolchain = toolchain_status()
-    scan_toolchain = (json.loads(scan.get("stats_json") or "{}") or {}).get("toolchain") or {}
+    scan_toolchain = (json.loads((scan or {}).get("stats_json") or "{}") or {}).get(
+        "toolchain") or {}
     unqualified = []
     if not run_toolchain.get("qualified"):
         unqualified.append(f"this run's parser, sqlglot {run_toolchain.get('sqlglot')}, "
                            f"is not a qualified version")
-    if not scan_toolchain.get("qualified"):
+    if scan is not None and not scan_toolchain.get("qualified"):
         unqualified.append(
             f"the reference scan's parser, sqlglot {scan_toolchain.get('sqlglot', 'unrecorded')}, "
             f"is not a qualified version" if scan_toolchain else
@@ -475,7 +482,7 @@ def monitor_history(
     bases = {o.base_key for o in observed.values()}
     recurring_bases = {b for b in bases if recurrence[b] >= min_runs}
     return {
-        "scan_id": scan["scan_id"],
+        "scan_id": scan["scan_id"] if scan else None,
         "reference": ref_meta,
         "rule_set": RULE_SET,
         "excluded_semantics": list(EXCLUDED),
@@ -1142,10 +1149,12 @@ def _row_identity(ex: Execution, asset_map: dict[str, str]) -> tuple[str, str] |
 
 # --------------------------------------------------------------- authority
 
-def _authority_set(store: Store, scan_id: str, registry: SchemaRegistry,
+def _authority_set(store: Store | None, scan_id: str | None, registry: SchemaRegistry,
                    dialect: str, pilot, systems: set[str] | None):
-    """(authorities, non-authoritative computed refs, excluded, meta)."""
-    refs, excluded, contradicted = _reference(store, scan_id)
+    """(authorities, non-authoritative computed refs, excluded, meta). With no
+    scan (a pilot package alone) there are no other definitions to compare."""
+    refs, excluded, contradicted = (_reference(store, scan_id) if store is not None
+                                    else ([], {}, set()))
     authorities: list[Authority] = []
     # normalized metric name -> approved definitions that could not be read,
     # with their windows: an unreadable definition can still be the one that

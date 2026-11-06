@@ -102,3 +102,29 @@ def test_the_v6_prompt_routes_no_owner_rules():
     assert "criteria v6" in prompt and "statement_clause (text)" in prompt
     assert "trip-length bands" not in prompt and "airport carve-outs" not in prompt
     assert "trip-length bands" in render_prompt(rec, load(4))
+
+
+def test_quotes_may_carry_the_prompts_json_escapes_and_join_parts():
+    # The statement is shown JSON-encoded: a model may quote "\n" literally,
+    # and join two definition clauses with "; ".
+    answers = reply("departs", statement_clause="SELECT SUM(`l_extendedprice` * (1 - `l_discount`))"
+                    " AS revenue\\nFROM `samples`.`tpch`.`lineitem`",
+                    definition_clause="filter: l_returnflag <> 'R'; expr: SUM(l_extendedprice * "
+                                      "(1 - l_discount))", explanation="x")
+    assert evidence(answers, record())["excerpts_found"] == {"statement_clause": True,
+                                                            "definition_clause": True}
+
+
+def test_an_output_read_as_the_metric_must_be_named_as_it():
+    unnamed = {**record(), "claimed_metric": {"identity_evidence": [{"source": "none",
+                                                                     "value": None}]}}
+    departs = reply("departs", presented_as="sum_disc_price",
+                    definition_clause="l_returnflag <> 'R'", explanation="returns counted")
+    assert finalize("review_needed", departs, unnamed, V6)[0] == "could_not_assess"
+    assert evidence(departs, unnamed)["presented_by_name"] is False
+    # A qualified name carries it; so does a tag or asset naming the metric.
+    assert finalize("x", {**departs, "presented_as": "eu_revenue"}, unnamed, V6)[0] \
+        == "review_needed"
+    tagged = {**unnamed, "claimed_metric": {"identity_evidence": [{"source": "tag",
+                                                                   "value": "revenue"}]}}
+    assert finalize("x", departs, tagged, V6)[0] == "review_needed"

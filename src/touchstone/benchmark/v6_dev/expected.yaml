@@ -1,0 +1,74 @@
+# Expected review state for each dev case, written from the statement and the dev
+# definition (pilot/views/revenue_mv.yaml: its comments state the relationship facts and
+# what nation and region mean), before any v6 verdict existed. Not labels from a person
+# reviewing outputs: the target behavior applied to each statement, with the reason.
+# harness.py challenges them by execution; a challenge that fails is a conflict to
+# re-examine, never a silent change.
+#
+# review_needed     presented as revenue, computed differently from the definition
+# could_not_assess  the result depends on a relationship fact the definition does not
+#                   state (part and supplier are not declared; nothing says their keys
+#                   match exactly once) - `violates` names the lookup to challenge
+# no_issue_flagged  computed as defined, with legitimate variations; or not presented
+#                   as revenue (a separately named quantity, or no revenue name at all)
+#
+# This set is DEV data: both earlier fresh tests, already seen. Nothing measured on it
+# is a claim.
+
+cmp_90da7eb6b5f79b4d: {expected: review_needed, reason: "TPC-H Q14: promo_revenue is a percentage of revenue presented under a revenue name; no return filter"}
+cmp_56974beca5677538: {expected: no_issue_flagged, reason: "avg_revenue_per_customer states another quantity"}
+cmp_0733cecfe1e29df9: {expected: no_issue_flagged, reason: "avg_daily_revenue states another quantity"}
+cmp_aa8262843dca133c: {expected: no_issue_flagged, reason: "one customer, 1996: a slice; joins along the declared keys, exactly one match stated"}
+cmp_71e333e60b7a03b4: {expected: no_issue_flagged, reason: "5-LOW and RAIL by ship day: declared dimensions"}
+cmp_6e2400cb77242db1: {expected: no_issue_flagged, reason: "weekly revenue, Q1 1996: another time grain is a slice; NULL checks on SUM inputs"}
+cmp_18a2cb6c31c2e175: {expected: no_issue_flagged, reason: "revenue_before_discount states another quantity"}
+cmp_112553afe466612b: {expected: no_issue_flagged, reason: "by order year: a slice on an order attribute; orders joined along the declared key"}
+cmp_7ffa23540bed35cc: {expected: no_issue_flagged, reason: "no output named as gross_sales"}
+cmp_05de4fe38e1a7a17: {expected: no_issue_flagged, reason: "no output named as revenue (total_charge_incl_tax)"}
+cmp_14d4de1ed4ede80b: {expected: no_issue_flagged, reason: "10% discount, 1994: a slice"}
+cmp_33747647025439ef: {expected: no_issue_flagged, reason: "more than 20 days to receipt: a slice"}
+cmp_09ae19a078e350ba: {expected: review_needed, reason: "revenue of returned line items only: counts exactly the rows the required filter excludes"}
+cmp_5b3ad340beb5d6d9: {expected: review_needed, reason: "TPC-H Q6: SUM(l_extendedprice * l_discount) is not the measure; no return filter"}
+cmp_35ead40fb8ad5881: {expected: no_issue_flagged, reason: "MAIL and REG AIR, Q2 1997: declared ship mode and date; NULL checks on SUM inputs"}
+cmp_2c6f7be0798848ae: {expected: no_issue_flagged, reason: "DELIVER IN PERSON, 1996: a slice"}
+cmp_c75bc9bbb883ecb3: {expected: no_issue_flagged, reason: "customers with a negative balance: a slice; declared joins with exactly one match stated"}
+cmp_0688ccd93e9bcdaa: {expected: no_issue_flagged, reason: "one named customer: a slice (usage restrictions are outside the detector)"}
+cmp_b81e05391ec49eb0: {expected: could_not_assess, violates: [supplier], reason: "filters on the supplier's nation through an undeclared supplier join; nothing says each line item matches exactly one supplier"}
+cmp_11c4bb0ea038f775: {expected: no_issue_flagged, reason: "orders above 300,000 total price: a slice; orders joined along the declared key"}
+cmp_c76c716939fd7fa1: {expected: no_issue_flagged, reason: "Europe, 1997: declared region and ship date"}
+cmp_f872ca49e9c781f4: {expected: could_not_assess, violates: [part], reason: "an INNER JOIN to part, which the definition does not declare: unmatched or repeated part keys would change the sum"}
+cmp_bf2ee8c6c037021f: {expected: review_needed, reason: "TPC-H Q19: no return filter"}
+cmp_da1355706f93e561: {expected: review_needed, reason: "revenue in 1995 counting returned items: the required filter is dropped"}
+cmp_093cd231b866c3b5: {expected: no_issue_flagged, reason: "no output named as gross_sales"}
+cmp_b2cf284185281057: {expected: no_issue_flagged, reason: "no output named as revenue (total_discount_1995)"}
+cmp_e5bfb6bfa8d98cbf: {expected: no_issue_flagged, reason: "market segment for balances above 9,000: a slice"}
+cmp_fc616d1080bb0af3: {expected: no_issue_flagged, reason: "by line status: a slice"}
+cmp_8a0e01d948216492: {expected: no_issue_flagged, reason: "quantity above 40, by ship date: a slice"}
+cmp_1062b632fe2924d0: {expected: no_issue_flagged, reason: "by ship mode, 1994: declared dimensions"}
+cmp_06f476704b8c5683: {expected: review_needed, reason: "by ship mode, 1994, returned items included: the required filter is dropped"}
+cmp_7bc63cfc331bb83e: {expected: could_not_assess, violates: [supplier], reason: "supplier_nation (clearly labeled) through an undeclared supplier join; nothing says each line item matches exactly one supplier"}
+cmp_7d0230819f943084: {expected: review_needed, reason: "SUM(o_totalprice) presented as revenue: another measure, no return filter"}
+cmp_f842337e6a9bf1bb: {expected: no_issue_flagged, reason: "order priority and ship mode: declared dimensions"}
+cmp_4387690ac6d776da: {expected: review_needed, reason: "revenue by ECONOMY part type: no return filter"}
+cmp_07e92a376b2dda5c: {expected: review_needed, reason: "TPC-H Q10: revenue of returned items only (l_returnflag = 'R')"}
+cmp_ed50c55d5e441c72: {expected: review_needed, reason: "TPC-H Q3: no return filter"}
+cmp_2f6f12b05ef95174: {expected: no_issue_flagged, reason: "no output named as gross_sales"}
+cmp_5144363898d7803a: {expected: no_issue_flagged, reason: "no output named as revenue (TPC-H Q1 sum_disc_price)"}
+cmp_0079c5a539f5193a: {expected: no_issue_flagged, reason: "nations of AFRICA, 1994: declared dimensions"}
+cmp_83cddb40380819af: {expected: review_needed, reason: "TPC-H Q5: no return filter"}
+cmp_89cbf667dc7b3c5f: {expected: no_issue_flagged, reason: "TPC-H Q9: sum_profit, not gross_sales"}
+cmp_26d59fdf9c88e6ef: {expected: no_issue_flagged, reason: "TPC-H Q9: sum_profit, not revenue"}
+cmp_0a3f68dbb079bbba: {expected: no_issue_flagged, reason: "TPC-H Q8: mkt_share, not gross_sales"}
+cmp_6a834d6c6bcf9b39: {expected: no_issue_flagged, reason: "TPC-H Q8: mkt_share, not revenue"}
+cmp_7c7da5f96bbdf622: {expected: could_not_assess, violates: [part], reason: "by part brand through an undeclared part join; nothing says each line item matches exactly one part"}
+cmp_1c6b6981be6ab0cb: {expected: could_not_assess, violates: [part, supplier], reason: "by brand and supplier nation through undeclared part and supplier joins"}
+cmp_31972b8e61d46d56: {expected: no_issue_flagged, reason: "by region, 1993, 1-URGENT: declared dimensions"}
+cmp_189c904500936989: {expected: no_issue_flagged, reason: "by region, 1993: declared dimensions"}
+cmp_92dde8fc07b0e4d2: {expected: review_needed, reason: "TPC-H Q7: no return filter"}
+cmp_58752287c73ba707: {expected: could_not_assess, violates: [part], reason: "top five brands through an undeclared part join"}
+cmp_390d58ea476c4ddf: {expected: could_not_assess, violates: [part], reason: "top brand, 1996, through an undeclared part join"}
+cmp_3bf6a50cbb546ff0: {expected: no_issue_flagged, reason: "top five clerks, 1995: a slice on an order attribute"}
+cmp_7f6c0bdd418e77ab: {expected: no_issue_flagged, reason: "median_revenue_per_order_1995 states another quantity"}
+cmp_161ef1cba1a6e7e1: {expected: review_needed, reason: "TPC-H Q15: total_revenue by supplier with no return filter"}
+cmp_3800f65b8a2fea6b: {expected: no_issue_flagged, reason: "revenue_share states another quantity"}
+cmp_696908bf2e7a8a15: {expected: could_not_assess, violates: [supplier], reason: "top ten suppliers through an undeclared supplier join: repeated supplier keys would change the sums"}

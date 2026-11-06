@@ -1,0 +1,11 @@
+history: history.jsonl
+window: {from: 2026-11-05T00:00:00Z, to: 2026-11-09T00:00:00Z}
+catalog: catalog.yml
+compare_against: as_of_execution
+authority:
+  system: uc_metrics
+  metric_views:
+  - name: workspace.touchstone_tpch.revenue_mv
+    snapshot: views/revenue_mv.yaml
+    sha256: 7d73b4a0c6dd52331e1d2830050bfcb5f5918c6e46031021f4243c758276d274
+    applies: {from: '2026-11-01T00:00:00Z', to: null}

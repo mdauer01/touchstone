@@ -1,0 +1,418 @@
+# Execution ingredients for the dev set, keyed by its record ids: the earlier fresh
+# tests' answer_key.yaml entries (written from the SQL alone), mapped by statement.
+# They challenge expected.yaml; they decide nothing.
+cmp_0079c5a539f5193a:
+  filters:
+  - r_name ILIKE '%AFRICA%'
+  - l_shipdate >= DATE '1994-01-01'
+  - l_shipdate < DATE '1995-01-01'
+  - n_name IS NOT NULL
+  - l_shipdate IS NOT NULL
+  from: v5_fresh/cmp_ec264c7bd66765d9
+  group_by:
+  - n_name AS nation
+cmp_0688ccd93e9bcdaa:
+  filters:
+  - c_name = 'Customer#000000001'
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  from: v4_fresh/cmp_34d41d893a29f07d
+cmp_06f476704b8c5683:
+  filters:
+  - l_shipdate >= DATE '1994-01-01'
+  - l_shipdate < DATE '1995-01-01'
+  - l_shipmode IS NOT NULL
+  from: v5_fresh/cmp_dd178bc412d624ea
+  group_by:
+  - l_shipmode AS l_shipmode
+cmp_07e92a376b2dda5c:
+  filters:
+  - o_orderdate >= DATE '1993-10-01'
+  - o_orderdate < DATE '1994-01-01'
+  from: v4_fresh/cmp_efe62969f66ae9cf
+  group_by:
+  - c_custkey AS c_custkey
+  - c_name AS c_name
+  - c_acctbal AS c_acctbal
+  - c_phone AS c_phone
+  - n_name AS n_name
+  - c_address AS c_address
+  - c_comment AS c_comment
+  limit: 20
+  order_by: revenue DESC
+cmp_09ae19a078e350ba:
+  filters:
+  - l_shipdate IS NOT NULL
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  - l_shipdate >= DATE '1994-01-01'
+  - l_shipdate < DATE '1995-01-01'
+  from: v5_fresh/cmp_c510f9e8fcffd2c3
+cmp_1062b632fe2924d0:
+  filters:
+  - l_shipdate >= DATE '1994-01-01'
+  - l_shipdate < DATE '1995-01-01'
+  - l_shipmode IS NOT NULL
+  from: v5_fresh/cmp_c87723997965beba
+  group_by:
+  - l_shipmode AS l_shipmode
+cmp_112553afe466612b:
+  filters:
+  - o_orderdate IS NOT NULL
+  from: v5_fresh/cmp_d7683be51460c9fa
+  group_by:
+  - DATE_TRUNC('YEAR', o_orderdate) AS order_year
+cmp_11c4bb0ea038f775:
+  filters:
+  - o_totalprice > 300000
+  - o_totalprice IS NOT NULL
+  from: v4_fresh/cmp_154161d40f0ef5dd
+cmp_14d4de1ed4ede80b:
+  filters:
+  - l_discount = 0.10
+  - l_shipdate IS NOT NULL
+  - l_shipdate >= DATE '1994-01-01'
+  - l_shipdate < DATE '1995-01-01'
+  from: v5_fresh/cmp_db201969f6c324dd
+cmp_161ef1cba1a6e7e1:
+  filters:
+  - l_shipdate >= DATE '1996-01-01'
+  - l_shipdate < DATE '1996-04-01'
+  from: v5_fresh/cmp_b895b496949b1587
+  group_by:
+  - s.s_suppkey AS s_suppkey
+  - s.s_name AS s_name
+  - s.s_address AS s_address
+  - s.s_phone AS s_phone
+  joins:
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+  top: 1
+cmp_189c904500936989:
+  filters:
+  - l_shipdate >= DATE '1993-01-01'
+  - l_shipdate < DATE '1994-01-01'
+  - r_name IS NOT NULL
+  - l_shipdate IS NOT NULL
+  from: v5_fresh/cmp_fcbe328ba8604573
+  group_by:
+  - r_name AS region
+cmp_1c6b6981be6ab0cb:
+  filters:
+  - l_shipdate IS NOT NULL
+  - p.p_brand IS NOT NULL
+  - sn.n_name IS NOT NULL
+  - l_shipdate >= DATE '1995-01-01'
+  - l_shipdate < DATE '1996-01-01'
+  from: v5_fresh/cmp_4497028c29dbee4b
+  group_by:
+  - p.p_brand AS p_brand
+  - sn.n_name AS supplier_nation
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+  - alias: sn
+    'on': s.s_nationkey = sn.n_nationkey
+    table: nation
+cmp_2c6f7be0798848ae:
+  filters:
+  - l_shipinstruct ILIKE '%DELIVER IN PERSON%'
+  - l_shipdate >= DATE '1996-01-01'
+  - l_shipdate < DATE '1997-01-01'
+  - l_shipinstruct IS NOT NULL
+  - l_shipdate IS NOT NULL
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  from: v5_fresh/cmp_52efb3eabc31fa5d
+cmp_31972b8e61d46d56:
+  filters:
+  - l_shipdate >= DATE '1993-01-01'
+  - l_shipdate < DATE '1994-01-01'
+  - o_orderpriority ILIKE '%1-URGENT%'
+  - r_name IS NOT NULL
+  - l_shipdate IS NOT NULL
+  from: v5_fresh/cmp_9a8a4239e0cd674e
+  group_by:
+  - r_name AS region
+cmp_33747647025439ef:
+  filters:
+  - l_receiptdate IS NOT NULL
+  - l_shipdate IS NOT NULL
+  - l_receiptdate - l_shipdate > 20
+  from: v5_fresh/cmp_90baaa6c03473a58
+cmp_35ead40fb8ad5881:
+  filters:
+  - l_shipdate >= DATE '1997-04-01'
+  - l_shipdate <= DATE '1997-06-30'
+  - (l_shipmode ILIKE '%MAIL%' OR l_shipmode ILIKE '%REG AIR%')
+  - l_shipdate IS NOT NULL
+  - l_shipmode IS NOT NULL
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  from: v4_fresh/cmp_b8dc57bc04e319bd
+cmp_390d58ea476c4ddf:
+  filters:
+  - l_shipdate >= DATE '1996-01-01'
+  - l_shipdate < DATE '1997-01-01'
+  - p.p_brand IS NOT NULL
+  - l_shipdate IS NOT NULL
+  from: v5_fresh/cmp_e47d9008f84f14d7
+  group_by:
+  - p.p_brand AS p_brand
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+  top: 1
+cmp_3bf6a50cbb546ff0:
+  filters:
+  - o_orderdate >= DATE '1995-01-01'
+  - o_orderdate < DATE '1996-01-01'
+  - o_clerk IS NOT NULL
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  from: v5_fresh/cmp_e64201c9cc7b00e9
+  group_by:
+  - o_clerk AS o_clerk
+  top: 5
+cmp_4387690ac6d776da:
+  filters:
+  - p.p_type ILIKE '%ECONOMY%'
+  - p.p_type IS NOT NULL
+  from: v5_fresh/cmp_99339730fc493ae5
+  group_by:
+  - p.p_type AS p_type
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+cmp_58752287c73ba707:
+  filters:
+  - p.p_brand IS NOT NULL
+  from: v4_fresh/cmp_f3625f991846ca1b
+  group_by:
+  - p.p_brand AS p_brand
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+  top: 5
+cmp_5b3ad340beb5d6d9:
+  filters:
+  - l_shipdate >= DATE '1995-01-01'
+  - l_shipdate < DATE '1996-01-01'
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  - l_shipdate IS NOT NULL
+  from: v4_fresh/cmp_9bf48800b12dc4e9
+cmp_696908bf2e7a8a15:
+  filters:
+  - l_shipdate >= DATE '1996-01-01'
+  - l_shipdate < DATE '1997-01-01'
+  - l_suppkey IS NOT NULL
+  from: v5_fresh/cmp_4275851e00f6b904
+  group_by:
+  - s.s_suppkey AS s_suppkey
+  - s.s_name AS s_name
+  joins:
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+  top: 10
+cmp_6e2400cb77242db1:
+  filters:
+  - l_shipdate IS NOT NULL
+  - l_extendedprice IS NOT NULL
+  - l_discount IS NOT NULL
+  - l_shipdate >= DATE '1996-01-01'
+  - l_shipdate <= DATE '1996-03-31'
+  from: v4_fresh/cmp_ec7ce424e58806cc
+  group_by:
+  - DATE_TRUNC('WEEK', l_shipdate) AS week_start
+cmp_71e333e60b7a03b4:
+  filters:
+  - o_orderpriority ILIKE '%5-LOW%'
+  - l_shipmode ILIKE '%RAIL%'
+  - l_shipdate IS NOT NULL
+  from: v5_fresh/cmp_3b6c6907603257f6
+  group_by:
+  - DATE_TRUNC('DAY', l_shipdate) AS ship_date
+cmp_7bc63cfc331bb83e:
+  filters:
+  - l_shipdate >= DATE '1997-01-01'
+  - l_shipdate < DATE '1998-01-01'
+  - sn.n_name IS NOT NULL
+  - l_shipdate IS NOT NULL
+  from: v4_fresh/cmp_47df521f9b223f06
+  group_by:
+  - sn.n_name AS supplier_nation
+  joins:
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+  - alias: sn
+    'on': s.s_nationkey = sn.n_nationkey
+    table: nation
+cmp_7c7da5f96bbdf622:
+  filters:
+  - l_shipdate IS NOT NULL
+  - p.p_brand IS NOT NULL
+  - l_shipdate >= DATE '1995-01-01'
+  - l_shipdate < DATE '1996-01-01'
+  from: v5_fresh/cmp_7e75d6a4694075b9
+  group_by:
+  - p.p_brand AS p_brand
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+cmp_7d0230819f943084:
+  filters:
+  - o_orderpriority IS NOT NULL
+  - o_totalprice IS NOT NULL
+  from: v5_fresh/cmp_4bac8cb66d8042f8
+  group_by:
+  - o_orderpriority AS o_orderpriority
+cmp_83cddb40380819af:
+  filters:
+  - c_nationkey = s.s_nationkey
+  - r_name = 'ASIA'
+  - o_orderdate >= DATE '1994-01-01'
+  - o_orderdate < DATE '1995-01-01'
+  from: v4_fresh/cmp_ae3230e76424c087
+  group_by:
+  - n_name AS n_name
+  joins:
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+cmp_8a0e01d948216492:
+  filters:
+  - l_quantity > 40
+  - l_shipdate IS NOT NULL
+  from: v4_fresh/cmp_23bf8a59c150237d
+  group_by:
+  - l_shipdate AS l_shipdate
+cmp_90da7eb6b5f79b4d:
+  filters:
+  - p.p_type LIKE 'PROMO%'
+  - l_shipdate >= DATE '1995-09-01'
+  - l_shipdate < DATE '1995-10-01'
+  from: v4_fresh/cmp_583c4dd8516711e8
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+cmp_92dde8fc07b0e4d2:
+  filters:
+  - ((sn.n_name = 'FRANCE' AND n_name = 'GERMANY') OR (sn.n_name = 'GERMANY' AND n_name = 'FRANCE'))
+  - l_shipdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
+  from: v4_fresh/cmp_c09b8eb076c7d6d9
+  group_by:
+  - sn.n_name AS supp_nation
+  - n_name AS cust_nation
+  - YEAR(l_shipdate) AS l_year
+  joins:
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+  - alias: sn
+    'on': s.s_nationkey = sn.n_nationkey
+    table: nation
+cmp_aa8262843dca133c:
+  filters:
+  - c_custkey = 4242
+  - l_shipdate >= DATE '1996-01-01'
+  - l_shipdate < DATE '1997-01-01'
+  from: v5_fresh/cmp_b59fd140bb625734
+cmp_b81e05391ec49eb0:
+  filters:
+  - sn.n_name ILIKE '%JAPAN%'
+  from: v5_fresh/cmp_71ba5be74dcfa68c
+  joins:
+  - alias: s
+    'on': l_suppkey = s.s_suppkey
+    table: supplier
+  - alias: sn
+    'on': s.s_nationkey = sn.n_nationkey
+    table: nation
+cmp_bf2ee8c6c037021f:
+  filters:
+  - "(p.p_brand = 'Brand#12' AND p.p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')\n AND l_quantity\
+    \ >= 1 AND l_quantity <= 11 AND p.p_size BETWEEN 1 AND 5\n AND l_shipmode IN ('AIR', 'AIR REG') AND\
+    \ l_shipinstruct = 'DELIVER IN PERSON')\nOR (p.p_brand = 'Brand#23' AND p.p_container IN ('MED BAG',\
+    \ 'MED BOX', 'MED PKG', 'MED PACK')\n AND l_quantity >= 10 AND l_quantity <= 20 AND p.p_size BETWEEN\
+    \ 1 AND 10\n AND l_shipmode IN ('AIR', 'AIR REG') AND l_shipinstruct = 'DELIVER IN PERSON')\nOR (p.p_brand\
+    \ = 'Brand#34' AND p.p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')\n AND l_quantity >=\
+    \ 20 AND l_quantity <= 30 AND p.p_size BETWEEN 1 AND 15\n AND l_shipmode IN ('AIR', 'AIR REG') AND\
+    \ l_shipinstruct = 'DELIVER IN PERSON')"
+  from: v4_fresh/cmp_dee28fafb8e93db2
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+cmp_c75bc9bbb883ecb3:
+  filters:
+  - c_acctbal < 0
+  - c_acctbal IS NOT NULL
+  from: v4_fresh/cmp_2fccfaa5482edeb4
+cmp_c76c716939fd7fa1:
+  filters:
+  - r_name ILIKE '%Europe%'
+  - l_shipdate >= DATE '1997-01-01'
+  - l_shipdate < DATE '1998-01-01'
+  from: v4_fresh/cmp_e46ec4e97e6ce0d7
+cmp_da1355706f93e561:
+  filters:
+  - l_shipdate >= DATE '1994-01-01'
+  - l_shipdate < DATE '1995-01-01'
+  - l_discount BETWEEN 0.05 AND 0.07
+  - l_quantity < 24
+  from: v4_fresh/cmp_2dcd721ba3b99ad1
+cmp_e5bfb6bfa8d98cbf:
+  filters:
+  - c_acctbal > 9000
+  - c_mktsegment IS NOT NULL
+  from: v5_fresh/cmp_87e96df5056815ea
+  group_by:
+  - c_mktsegment AS c_mktsegment
+cmp_ed50c55d5e441c72:
+  filters:
+  - c_mktsegment = 'BUILDING'
+  - o_orderdate < DATE '1995-03-15'
+  - l_shipdate > DATE '1995-03-15'
+  from: v4_fresh/cmp_79a1b6029b45aaf4
+  group_by:
+  - l_orderkey AS l_orderkey
+  - o_orderdate AS o_orderdate
+  - o_shippriority AS o_shippriority
+  limit: 10
+  order_by: revenue DESC, o_orderdate
+cmp_f842337e6a9bf1bb:
+  filters:
+  - o_orderpriority IS NOT NULL
+  - l_shipmode IS NOT NULL
+  from: v4_fresh/cmp_b9e092f084463004
+  group_by:
+  - o_orderpriority AS o_orderpriority
+  - l_shipmode AS l_shipmode
+cmp_f872ca49e9c781f4:
+  filters:
+  - l_shipmode LIKE '%FOB%'
+  - c_mktsegment = 'MACHINERY'
+  from: v5_fresh/cmp_5858cc94e3192a70
+  joins:
+  - alias: p
+    'on': l_partkey = p.p_partkey
+    table: part
+cmp_fc616d1080bb0af3:
+  filters:
+  - l_linestatus IS NOT NULL
+  from: v4_fresh/cmp_cea9a5497126cd6a
+  group_by:
+  - l_linestatus AS l_linestatus
