@@ -21,7 +21,7 @@ answer is one of three review states:
 The assessment is advisory: a model's reading that orders review, never a verdict that a
 number is right. **No issue flagged** does not certify a statement correct. Each quoted
 clause is checked against the statement or the definition; a clause found there shows the
-text exists, not that the model interpreted it correctly. Status: 0.1.0, an early release;
+text exists, not that the model interpreted it correctly. Status: 0.1.1, an early release;
 see [How well it works](#how-well-it-works).
 
 - License: [Apache-2.0](LICENSE)
@@ -135,10 +135,11 @@ reflects the inputs and the policy as well as the classifier.
 
 ### Lower-level commands
 
-`touchstone monitor --pilot` runs the older deterministic SQL rules (experimental) and
-can export comparison records, chosen by those rules rather than by `check`'s definition
-selection; `touchstone assess run` assesses exported records on their own, under any
-criteria version.
+`touchstone assess run --comparisons out/check/comparisons.jsonl` re-assesses the records
+`check` wrote, under another model or criteria version. `touchstone monitor` is legacy:
+the older deterministic SQL rules, which need a scan; its `--export-comparisons` chooses
+definitions by those rules, not by `check`'s selection above, so it is not part of the
+supported path.
 
 ## Experimental (parked)
 

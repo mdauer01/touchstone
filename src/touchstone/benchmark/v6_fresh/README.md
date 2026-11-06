@@ -55,7 +55,9 @@ right). What this does and does not show:
   the hash in [SEALED.md](SEALED.md); `python ../harness.py score findings.jsonl .`
   rescores them) and [report.html](report.html), the report the check code renders from
   those answers. Replaying the answers through the check code of 0.1.1 gives the same 26
-  records, states and evidence.
+  records, states and evidence, so the result holds for these 26 cases under 0.1.1. They
+  do not exercise what 0.1.1 added (session context in the prompt, coverage gaps), and
+  this test does not measure it.
 - No issue flagged does not certify a statement correct, and a quoted clause found in
   the text shows it exists, not that the model interpreted it correctly.
 - Genie wrote every statement; the questions were chosen to cover drift, ordinary

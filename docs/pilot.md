@@ -1,4 +1,4 @@
-# Running a monitoring pilot
+# The package: definitions and history
 
 A pilot answers one question for one estate: **of the metric computations the warehouse
 executed in a window, which used an approved definition correctly, which changed it,
@@ -7,7 +7,7 @@ and which could not be judged — and why.**
 A query-history export alone cannot answer that. It says what ran. It does not say which
 definitions were authoritative, what they were when each query ran, or which session
 defaults a short table name resolved under. The pilot package supplies those explicitly,
-and `touchstone monitor --pilot` refuses a package that leaves one out.
+and touchstone refuses a package that leaves one out.
 
 `touchstone check` reads the same package (the smallest complete one is
 [examples/minimal](../examples/minimal)). It takes every named measure of every listed
@@ -45,9 +45,9 @@ authority:
       snapshot: views/revenue_mv.yaml
       sha256: 3f1c…                        # of the snapshot file — refused on mismatch
       applies: {from: 2026-09-01T00:00:00Z, to: null}
-      approved_variations:                # optional — kinds of variation the owner approves
+      approved_variations:                # optional; criteria v4/v5 only (below)
         - "IS NOT NULL guards on the measure's own columns"
-      approved_time_groupings:            # optional — see "Time groupings" below
+      approved_time_groupings:            # optional; the legacy monitor only (below)
         net_revenue: {order_date: [WEEK]} # a measure (or "*"): {date dimension: [units]}
 compare_against: as_of_execution          # or: current
 snapshots_taken_at: 2026-10-16T09:00:00Z  # optional; shown in `current` mode
@@ -62,7 +62,8 @@ Unknown keys are refused, and so is a window whose `from` is not before its `to`
   definitions whose window covers the execution; an expired definition is never
   matched, and versions that never apply at the same time are not "contested". An
   execution no window covers, one with no start time, or one whose start time cannot
-  be read is unverifiable, and the report says which. Windows compare at nanosecond
+  be read is not compared, and the report says which (`check` lists it as not assessed;
+  the legacy monitor calls it unverifiable). Windows compare at nanosecond
   precision (`applies.to` is exclusive). An approved definition that applies but could
   not be read makes a claim on it unverifiable ("could not be read"), never "missing".
 - **`current`**: no windows are needed. Findings are judged against the definitions
@@ -73,7 +74,106 @@ The `window` is applied: executions outside it are not judged, and are counted i
 report (`executions_outside_window`), so an export that does not match its package
 shows itself.
 
-## Approved variations
+## Steps
+
+1. **Export history.** Run [scripts/export_databricks_history.sql](../scripts/export_databricks_history.sql)
+   for the window, download the result as CSV, and save it as `history.csv`. Confirm the
+   column names first with `DESCRIBE TABLE system.query.history`. Columns touchstone does
+   not read are left out. Timestamps are compared as UTC.
+2. **Snapshot the approved views.** For each view, take the YAML body of its definition
+   (for example, from `SHOW CREATE TABLE main.finance.revenue_mv`, the text between the
+   `$$` markers) and save it under `views/`. Record its hash with
+   `shasum -a 256 views/revenue_mv.yaml`, or leave `sha256` empty once and the loader
+   prints it.
+3. **Catalog** (optional). Write `catalog.yml` for the tables the views read, or generate it with
+   `touchstone catalog --warehouse …`.
+4. **Check:**
+   ```bash
+   touchstone check --pilot pilot/ --provider openai --model <model> --out out/check
+   ```
+
+## Session context
+
+`check` reconstructs the session as below and gives the model what it found: an
+asserted context, the earlier statements that can change what a name reads, and the
+names left unresolved. The outcomes named below (unverifiable, the counts) are the
+legacy monitor's.
+
+The published Databricks history schema has no per-query default catalog or schema.
+
+- A query that names its tables in full resolves on its own.
+- A query using short names resolves only from its own row's `catalog`/`schema`
+  columns, or from an `execution_context` the package **asserts** for every execution.
+- Otherwise it is **unverifiable**, never "conforming with a warning".
+
+Assert a context only when it holds for the whole export, for example when every
+dashboard in the window runs against one catalog and schema. The report states whether
+a context was asserted.
+
+**Session state is reconstructed only from evidence.** What a short name reads can be
+changed by statements the session ran earlier ([session.py](../src/touchstone/services/session.py)).
+The rules:
+
+- **What each statement can change.**
+  - `USE`, `SET`, and an unparseable or unrecognized statement can change every
+    *short* name.
+  - `CREATE`, `DROP`, `ALTER` and `CACHE` can change the names they touch: a temp view
+    `orders` shadows the short reference `orders`.
+  - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SHOW`, `DESCRIBE`, `EXPLAIN` and `COMMENT`
+    change nothing a name resolves to.
+  - Fully qualified names do not depend on `USE` or `SET`.
+- **When context is reconstructed.** Only for a `USE` earlier in the *same execution*,
+  where the order is certain: `USE SCHEMA staging; SELECT … FROM orders` reads
+  `<catalog>.staging.orders`.
+- **When identity is uncertain.** Any other event that may precede a statement makes
+  its relation identity depend on the session, and the statement is unverifiable. That
+  covers an event in another execution of the same session (`session_id`), and one in
+  an execution whose session the export does not record and that is not provably later
+  by `start_time`. The same applies to a bare `.sql` log, where order is known but
+  sessions are not.
+- **Counts.** The report shows `session_events`, `statements_after_session_change` and
+  `statements_with_reconstructed_context`.
+
+Export every statement type with `session_id`, as
+[export_databricks_history.sql](../scripts/export_databricks_history.sql) does. A
+SELECT-only export hides exactly the statements that change a session. An asserted
+`execution_context` is your statement that nothing outside the export changed these
+names either.
+
+**Identity.** A query is judged as the metric it claims. A `-- touchstone: metric=<name>`
+comment names only the statement it is written on; a tag on the same line after a
+statement's semicolon belongs to that statement. Query tags may be `metric=<name>`,
+`metric: <name>` or JSON (`{"metric": "<name>"}`). A query tag or an `asset_map` entry
+belongs to the execution and names a metric only when the execution holds one query.
+Otherwise the projection's own alias is the claim, including aliases that look
+generated (`sum_revenue`) when the analyst wrote them.
+
+## Legacy: `touchstone monitor`
+
+`touchstone monitor --pilot` reads the same package with the older deterministic SQL
+rules. It needs a scan first and chooses definitions by those rules, not by `check`'s
+selection above, and the records its `--export-comparisons` writes inherit that
+choice. It is kept to reproduce earlier results, not as the supported path; the rest
+of this page describes it.
+
+### Running it
+
+After steps 1 to 3 above:
+
+1. **Scan** the snapshots together with the estate's models, so the authority the
+   monitor cites is the one the scan verified:
+   ```bash
+   touchstone experimental scan --dbt my_project --uc-metrics pilot/views --catalog pilot/catalog.yml \
+     --dialect databricks --db pilot.db
+   ```
+   The monitor refuses if the latest scan did not read each snapshot measure
+   byte-for-byte.
+2. **Monitor:**
+   ```bash
+   touchstone monitor --pilot pilot/ --dbt my_project --db pilot.db --json findings.json
+   ```
+
+### Approved variations
 
 `approved_variations` lists, in the owner's own words, kinds of difference from the
 definition that the owner accepts for this metric: for example "IS NOT NULL guards on the
@@ -85,7 +185,7 @@ permitted. They are the owner's decision, not touchstone's: the default stays st
 300 characters. On Databricks Genie's SQL, three such lines removed four of five false
 alarms ([assess.md](assess.md), "A live test").
 
-## Time groupings
+### Time groupings
 
 A declared date dimension authorizes grouping by that dimension **as declared**, not by
 every transformation of it. In the snapshot above, `order_date` and `month` (=
@@ -141,84 +241,7 @@ approved_time_groupings:
   (`definition.variation_policy`), so a reviewer sees the policy the use was judged
   under.
 
-## Steps
-
-1. **Export history.** Run [scripts/export_databricks_history.sql](../scripts/export_databricks_history.sql)
-   for the window, download the result as CSV, and save it as `history.csv`. Confirm the
-   column names first with `DESCRIBE TABLE system.query.history`. Columns touchstone does
-   not read are listed in the report, not silently used. Timestamps are compared as UTC.
-2. **Snapshot the approved views.** For each view, take the YAML body of its definition
-   (for example, from `SHOW CREATE TABLE main.finance.revenue_mv`, the text between the
-   `$$` markers) and save it under `views/`. Record its hash with
-   `shasum -a 256 views/revenue_mv.yaml`, or leave `sha256` empty once and the loader
-   prints it.
-3. **Catalog.** Write `catalog.yml` for the tables the views read, or generate it with
-   `touchstone catalog --warehouse …`.
-4. **Scan** the snapshots together with the estate's models, so the authority the
-   monitor cites is the one the scan verified:
-   ```bash
-   touchstone scan --dbt my_project --uc-metrics pilot/views --catalog pilot/catalog.yml \
-     --dialect databricks --db pilot.db
-   ```
-   The monitor refuses if the latest scan did not read each snapshot measure
-   byte-for-byte.
-5. **Monitor:**
-   ```bash
-   touchstone monitor --pilot pilot/ --dbt my_project --db pilot.db --json findings.json
-   ```
-
-## Session context
-
-The published Databricks history schema has no per-query default catalog or schema.
-
-- A query that names its tables in full resolves on its own.
-- A query using short names resolves only from its own row's `catalog`/`schema`
-  columns, or from an `execution_context` the package **asserts** for every execution.
-- Otherwise it is **unverifiable**, never "conforming with a warning".
-
-Assert a context only when it holds for the whole export, for example when every
-dashboard in the window runs against one catalog and schema. The report states whether
-a context was asserted.
-
-**Session state is reconstructed only from evidence.** What a short name reads can be
-changed by statements the session ran earlier ([session.py](../src/touchstone/services/session.py)).
-The rules:
-
-- **What each statement can change.**
-  - `USE`, `SET`, and an unparseable or unrecognized statement can change every
-    *short* name.
-  - `CREATE`, `DROP`, `ALTER` and `CACHE` can change the names they touch: a temp view
-    `orders` shadows the short reference `orders`.
-  - `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SHOW`, `DESCRIBE`, `EXPLAIN` and `COMMENT`
-    change nothing a name resolves to.
-  - Fully qualified names do not depend on `USE` or `SET`.
-- **When context is reconstructed.** Only for a `USE` earlier in the *same execution*,
-  where the order is certain: `USE SCHEMA staging; SELECT … FROM orders` reads
-  `<catalog>.staging.orders`.
-- **When identity is uncertain.** Any other event that may precede a statement makes
-  its relation identity depend on the session, and the statement is unverifiable. That
-  covers an event in another execution of the same session (`session_id`), and one in
-  an execution whose session the export does not record and that is not provably later
-  by `start_time`. The same applies to a bare `.sql` log, where order is known but
-  sessions are not.
-- **Counts.** The report shows `session_events`, `statements_after_session_change` and
-  `statements_with_reconstructed_context`.
-
-Export every statement type with `session_id`, as
-[export_databricks_history.sql](../scripts/export_databricks_history.sql) does. A
-SELECT-only export hides exactly the statements that change a session. An asserted
-`execution_context` is your statement that nothing outside the export changed these
-names either.
-
-**Identity.** A query is judged as the metric it claims. A `-- touchstone: metric=<name>`
-comment names only the statement it is written on; a tag on the same line after a
-statement's semicolon belongs to that statement. Query tags may be `metric=<name>`,
-`metric: <name>` or JSON (`{"metric": "<name>"}`). A query tag or an `asset_map` entry
-belongs to the execution and names a metric only when the execution holds one query.
-Otherwise the projection's own alias is the claim, including aliases that look
-generated (`sum_revenue`) when the analyst wrote them.
-
-## Reading the report
+### Reading the report
 
 **Positive verdicts are suspended** ([proof-policy.md](proof-policy.md)): what the rules
 would call conforming or contested is reported as an *experimental match* (one reason a
@@ -249,7 +272,7 @@ by reason, which shows where the next bottleneck is:
 | no definition evidence | definition windows that cover the export |
 | below proof grade | catalog coverage, or constructs the core does not model |
 
-## What an experimental match does and does not say
+### What an experimental match does and does not say
 
 It is not a conclusion while positive verdicts are suspended. It says that, on the tree
 sqlglot parsed, the query matched an authoritative definition exactly, or matched one of

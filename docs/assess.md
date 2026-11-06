@@ -1,5 +1,11 @@
 # Advisory drift assessment (first delivery)
 
+> **Historical.** This page records the first assessment deliveries (criteria v1 to v5)
+> and the legacy path they ran on: `touchstone monitor --export-comparisons`, then
+> `touchstone assess run`. The supported path is `touchstone check` (see the
+> [README](../README.md)), which writes its own `comparisons.jsonl` and chooses
+> definitions differently; do not use the monitor export to feed it.
+
 touchstone's own reading of SQL is fallible evidence. While positive verdicts are
 suspended (`docs/proof-policy.md`), the monitor reports matches as experimental and
 differences as suspected. This package is a separate **advisory** second opinion, built
@@ -16,7 +22,7 @@ triage only. They never change a finding, a funnel bucket or an exit code.
 
 | part | where | what it does |
 |---|---|---|
-| Evidence record `touchstone-comparison/1` | `src/touchstone/assess/schema.json`, `record.py` | One record per distinct judgment of a candidate metric use, produced by `touchstone monitor --export-comparisons out.jsonl` (see "From query history to verdicts" below). It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, the session statements before it, and the executions it covers. touchstone's reading follows **last**, as `unverified_observations`, when the rules read the use; it can be removed for the ablation. |
+| Evidence record `touchstone-comparison/1` | `src/touchstone/assess/schema.json`, `record.py` | One record per distinct judgment of a candidate metric use, produced here by the legacy `touchstone monitor --export-comparisons out.jsonl` (see "From query history to verdicts" below). It holds the original statement as it ran, the authoritative definition with its raw snapshot and sha256, the schemas the statement reads, the session statements before it, and the executions it covers. touchstone's reading follows **last**, as `unverified_observations`, when the rules read the use; it can be removed for the ablation. |
 | Criteria v1 | `assess/criteria/v1.yaml` | One narrow question per component (identity, formula, population, grain, source), each answerable `unknown`. Fixed code turns the answers into `suspected_drift`, `insufficient_evidence` or `likely_permitted`; the model never chooses the label. |
 | Providers | `assess/providers/` | `assess(records, criteria) -> assessments`, a config model, `render_prompt` (the evidence order every model-backed provider uses), the deterministic `fake`, and four real backends: **Databricks** and **Snowflake** (the model runs inside your platform) and **Anthropic** and **OpenAI-compatible** APIs (see Backends below). |
 | Labeled metric uses | `src/touchstone/benchmark/metric_uses/` | 60 synthetic items in 9 query families. Labels are written from the business definitions and policy in its README, never from touchstone output. They are model-authored and model-reviewed (a blind model pass, adjudicated in `adjudication.yaml`), and have not yet been reviewed by a human. The split is by family: tune on `dev`, report `test`. |

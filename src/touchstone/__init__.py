@@ -6,4 +6,4 @@ presented as a governed metric but computed differently, with the evidence
 parked under `touchstone experimental`.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

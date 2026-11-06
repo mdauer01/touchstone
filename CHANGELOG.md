@@ -1,10 +1,13 @@
 # Changelog
 
-## 0.1.1 — unreleased
+## 0.1.1 — 2026-11-06
 
 Input integrity and coverage for `touchstone check`, from an outside review of 0.1.0.
 No change to the classifier: the 26 prompts of the 0.1.0 fresh test are byte for byte
-the same, and replaying its sealed answers gives the same states and evidence.
+the same, and replaying its sealed answers gives the same states and evidence. That
+preserves the 0.1.0 result for those 26 cases; it does not measure the paths new here
+(the session section of the prompt, the coverage gaps), which are tested end to end
+but not by a model run.
 
 - **The right definition.** `check` builds its own comparison records from the
   snapshots: every named measure of every listed view, including ones the parked SQL
@@ -23,6 +26,9 @@ the same, and replaying its sealed answers gives the same states and evidence.
 - `check` refuses criteria other than v6 (with `--criteria 4` it rendered zero in every
   state).
 - CI runs the parked benchmark and oracle as `touchstone experimental bench|oracle`.
+- `touchstone monitor` and its `--export-comparisons` are marked legacy: they choose
+  definitions by the older SQL rules. `assess run` takes the `comparisons.jsonl` that
+  `check` writes.
 - The fresh test's sealed findings and a sample report are published in
   `src/touchstone/benchmark/v6_fresh`; [examples/minimal](examples/minimal) is a complete
   minimal input. The parked product's documentation moved to `docs/experimental.md`.

@@ -6,8 +6,8 @@
         names, assesses every distinct use of a governed metric, and writes report.html:
         review needed (with the clauses), could not assess (and why), no issue flagged.
 
-    touchstone monitor --pilot <dir> [--export-comparisons f.jsonl]   # rules + records
-    touchstone assess  run --comparisons f.jsonl --out v.jsonl          # assessment alone
+    touchstone assess  run --comparisons f.jsonl --out v.jsonl   # re-assess check's records
+    touchstone monitor --pilot <dir>                              # legacy SQL rules
     touchstone catalog --warehouse duckdb:///wh.db --out catalog.yml
 
 Parked features (estate scan and reconciliation, the bitemporal store, signed receipts
@@ -293,9 +293,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_mon = sub.add_parser(
         "monitor",
-        help="compare executed SQL with authoritative metric definitions: suspected "
-             "differences, candidates, and what could not be judged (matches are "
-             "experimental comparisons while positive verdicts are suspended)")
+        help="legacy: the older deterministic SQL rules (needs a scan); use `check` "
+             "for drift detection. Suspected differences, candidates, and what could "
+             "not be judged (matches are experimental comparisons while positive "
+             "verdicts are suspended)")
     p_mon.add_argument("--pilot", dest="pilot_dir",
                        help="pilot package directory (pilot.yml): approved metric "
                             "views with definition snapshots and windows, the "
@@ -346,10 +347,10 @@ def main(argv: list[str] | None = None) -> int:
                             "a definition in use (default 2)")
     p_mon.add_argument("--json", dest="json_out", help="write full findings JSON here")
     p_mon.add_argument("--export-comparisons", dest="export_comparisons",
-                       help="write one touchstone-comparison/1 evidence record per metric use "
-                            "here (JSON lines) for the advisory classifier: the statement "
-                            "and the definition first, touchstone's reading as unverified "
-                            "observations")
+                       help="legacy: write one touchstone-comparison/1 evidence record per "
+                            "metric use here (JSON lines), with the definition chosen by "
+                            "the SQL rules, not by check's definition selection; `check` "
+                            "writes its own comparisons.jsonl")
     p_mon.add_argument("--fail-on-alt", dest="fail_on_alt", action="store_true",
                        help="exit 1 when a suspected difference from an authoritative "
                             "definition is found (a triage gate: the difference is "
@@ -441,12 +442,13 @@ def main(argv: list[str] | None = None) -> int:
     p_ab.add_argument("--json", dest="json_out", help="write the full report JSON here")
     p_ar = assess_sub.add_parser(
         "run",
-        help="advisory verdicts for exported comparison records (monitor "
-             "--export-comparisons): one call per distinct judgment, cached by judgment, "
-             "prompt, model and criteria version; never a finding or an exit code")
+        help="advisory verdicts for comparison records (the comparisons.jsonl check "
+             "wrote): one call per distinct judgment, cached by judgment, prompt, model "
+             "and criteria version; never a finding or an exit code")
     provider_args(p_ar)
     p_ar.add_argument("--comparisons", required=True,
-                      help="the JSON-lines file monitor --export-comparisons wrote")
+                      help="the comparisons.jsonl check wrote (or the legacy monitor "
+                           "--export-comparisons file)")
     p_ar.add_argument("--out", required=True, help="write one verdict per record here "
                                                    "(JSON lines)")
     p_ar.add_argument("--cache", help="verdict cache (JSON lines): answered judgments are "
