@@ -127,6 +127,14 @@ one counts as a miss), precision of review-needed answers, and abstention.
   model, not reviewed by an independent person. The sealed findings are published
   beside the test; rescore them with
   `python src/touchstone/benchmark/harness.py score src/touchstone/benchmark/v6_fresh/findings.jsonl src/touchstone/benchmark/v6_fresh`.
+- On a **second frozen test, of non-additive metrics** (205 cases: six measures over
+  TPC-H, including distinct counts, ratios and weighted averages, from two Genie spaces
+  and the real query history; [docs/results-complex-metrics.md](docs/results-complex-metrics.md)),
+  it caught 13 of 18 expected drifts and passed none as clean (the other 5 were could
+  not assess); 13 of 17 review-needed answers were right, with 4 false alarms in 181
+  cases without drift. That does not meet the 0.1.0 bar. All 5 misses came from the
+  code's name check, which does not accept abbreviated names such as `avg_order_value`;
+  the model's own answer was "departs" on all 18.
 
 Historical comparison, not like for like: on the dev set the earlier five-question
 classifier (criteria v4) raised 42 alerts to catch the same 13. It received owner rules
