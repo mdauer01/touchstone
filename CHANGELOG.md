@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 — unreleased
+## 0.1.2 — 2026-11-10
 
 Correctness fixes from the second frozen test (non-additive metrics) and an outside
 review. Measured only on benchmarks already seen; see

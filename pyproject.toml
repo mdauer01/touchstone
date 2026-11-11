@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "touchstone"
-version = "0.1.1"
+version = "0.1.2"
 description = "Advisory metric drift detection: flags SQL presented as a governed metric but computed differently from its approved definition, with the evidence."
 readme = "README.md"
 requires-python = ">=3.10"
