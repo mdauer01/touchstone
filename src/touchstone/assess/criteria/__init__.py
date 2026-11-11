@@ -260,8 +260,9 @@ def decide_single(answers: dict, criteria: Criteria, record: dict | None = None)
 def excerpts_found(answers: dict, record: dict) -> dict[str, bool | None]:
     """Whether each quoted excerpt occurs in the text it quotes — the
     statement, or the definition's snapshot — ignoring whitespace, case and
-    identifier quoting; parts around an ellipsis must occur in order. None:
-    no excerpt was given."""
+    identifier quoting. A quote of several parts (on separate lines, or
+    joined by "; " or an ellipsis) is found when every part occurs, in any
+    order: each piece the model cites exists. None: no excerpt was given."""
     import re
 
     def norm(text: str) -> str:
@@ -281,31 +282,34 @@ def excerpts_found(answers: dict, record: dict) -> dict[str, bool | None]:
         if not quoted:
             out[key] = None
             continue
-        haystack, at = norm(source), 0
-        # Parts quoted together ("…" or "; " between them) must occur in order.
-        for part in filter(None, (norm(p) for p in re.split(r"\.\.\.|…|;\s", quoted))):
-            at = haystack.find(part, at)
-            if at < 0:
-                break
-            at += len(part)
-        out[key] = at >= 0
+        haystack = norm(source)
+        # A line break in the quote is a line break in the JSON-encoded text
+        # (\n) or a real one; either may join parts quoted from apart.
+        parts = re.split(r"\.\.\.|…|;\s|\\n|\n", quoted)
+        out[key] = all(norm(p) in haystack for p in parts if norm(p))
     return out
+
+
+def _presentation(record: dict) -> list:
+    """What the statement's final output presents (`presented`, from records
+    that carry it); otherwise, and when the final output cannot be read, every
+    name the statement gives a metric anywhere."""
+    if record.get("presented") is not None:
+        return list(record["presented"])
+    return [e.get("value") for e in (record.get("claimed_metric") or {})
+            .get("identity_evidence") or [] if e.get("source") not in (None, "none")]
 
 
 def presented_by_name(answers: dict, record: dict) -> bool:
     """Whether the output the model reads as this metric is named as it: the
-    metric's name occurs in the output's name (revenue, eu_revenue,
-    revenue_1996), or a query tag or asset names the metric."""
-    import re
+    metric's words occur in the output's name (revenue, eu_revenue,
+    revenue_1996, avg_order_value for average_order_value; touchstone.naming),
+    or a query tag or asset names the metric."""
+    from touchstone.naming import names_metric
 
-    def norm(text) -> str:
-        return "_" + re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_") + "_"
-
-    metric = norm(record["definition"]["name"])
-    names = [_text(answers, "presented_as")] + [
-        e.get("value") for e in (record.get("claimed_metric") or {}).get("identity_evidence") or []
-        if e.get("source") not in (None, "none")]
-    return metric != "__" and any(metric in norm(n) for n in names if n)
+    metric = record["definition"]["name"]
+    names = [_text(answers, "presented_as"), *_presentation(record)]
+    return any(names_metric(n, metric) for n in names if n)
 
 
 def evidence(answers: dict, record: dict) -> dict:
@@ -324,11 +328,11 @@ def _text(answers: dict, key: str) -> str:
 
 
 def _named_exactly(record: dict) -> bool:
-    import re
+    """Whether the statement presents a result under exactly the metric's name.
+    From the final output when the record says what it presents: a metric
+    referenced only inside the statement does not set aside the reading that
+    no output presents it."""
+    from touchstone.naming import words
 
-    def norm(text: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
-
-    metric = norm(str(record["definition"]["name"]))
-    return any(e.get("source") != "none" and norm(str(e.get("value") or "")) == metric
-               for e in record["claimed_metric"]["identity_evidence"])
+    metric = words(record["definition"]["name"])
+    return bool(metric) and any(words(n) == metric for n in _presentation(record) if n)

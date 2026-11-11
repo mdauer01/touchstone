@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import sqlglot
 from sqlglot import exp
 
@@ -399,51 +401,98 @@ def statement_chunks(text: str, dialect: str) -> list[tuple[str, exp.Expression 
     A comment on the SAME line after a statement's semicolon belongs to that
     statement (`SELECT …; -- touchstone: metric=gross_revenue`): attached to the
     next one, it named the wrong query.
+
+    A dollar-quoted body (`CREATE VIEW … WITH METRICS LANGUAGE YAML AS $$ … $$`,
+    a SQL function's body) is one string to the engine: its semicolons, quotes
+    and dashes do not end or start anything. It is masked before the semicolons
+    are found, and the statement keeps its original text. A body that is never
+    closed is one statement that cannot be read.
     """
     from sqlglot.tokens import TokenType
 
+    masked, unclosed = _mask_dollar_bodies(text)
     try:
-        tokens = sqlglot.tokenize(text, read=dialect)
+        tokens = sqlglot.tokenize(masked, read=dialect)
     except Exception:  # noqa: BLE001 — a blob the tokenizer rejects outright
         whole, bad = _parse_whole(text, dialect)
         return [(t.meta.get("source_text") or text.strip(), t) for t in whole] + \
             [(text.strip(), None)] * bad
-    chunks: list[str] = []
+    # (as it ran, as parsed): the same statement, its dollar-quoted body blanked
+    # for the parser, which would otherwise read the body's quotes as SQL.
+    chunks: list[tuple[str, str]] = []
     start = 0
     for tok in tokens:
         if tok.token_type == TokenType.SEMICOLON:
             if tok.start < start:
                 continue   # consumed with a trailing comment
-            chunk = text[start:tok.start]
+            chunk, shown = text[start:tok.start], masked[start:tok.start]
             after = tok.end + 1
             eol = text.find("\n", after)
             line = text[after: eol if eol >= 0 else len(text)]
             tail = line.strip()
             if tail and (tail.startswith("--") or (tail.startswith("/*") and tail.endswith("*/")
                                                   and "*/" not in tail[2:-2])):
-                chunk = f"{chunk} {tail}"
+                chunk, shown = f"{chunk} {tail}", f"{shown} {tail}"
                 after = eol if eol >= 0 else len(text)
-            chunks.append(chunk)
+            chunks.append((chunk, shown))
             start = after
-    chunks.append(text[start:])
+    chunks.append((text[start:], masked[start:]))
 
     statements: list[tuple[str, exp.Expression | None]] = []
-    for chunk in chunks:
-        if not _has_code(chunk, dialect):
+    for n, (chunk, shown) in enumerate(chunks):
+        if unclosed is not None and n == len(chunks) - 1:
+            statements.append((chunk.strip(), None))   # a body that is never closed
+            continue
+        if not _has_code(shown, dialect):
             continue  # whitespace or comments only — nothing was executed
         try:
-            parsed = sqlglot.parse_one(chunk, read=dialect)
+            parsed = sqlglot.parse_one(shown, read=dialect)
         except Exception:  # noqa: BLE001
             statements.append((chunk.strip(), None))
             continue
         if parsed is None or isinstance(parsed, exp.Semicolon):
             continue
-        annotate_truncations(parsed, chunk, dialect)
+        annotate_truncations(parsed, shown, dialect)
         # The text as it ran, for evidence records (assess.record): the tree
         # is qualified in place later, and a re-render is not always faithful.
         parsed.meta["source_text"] = chunk.strip()
         statements.append((chunk.strip(), parsed))
     return statements
+
+
+_DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _mask_dollar_bodies(text: str) -> tuple[str, int | None]:
+    """`text` with every dollar-quoted body blanked (newlines kept, so offsets
+    and lines do not move), and the offset of a body that is never closed.
+    A `$$` inside a quoted string or a comment opens nothing."""
+    out, i, n = list(text), 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"`":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c == "$" and (m := _DOLLAR.match(text, i)):
+            close = text.find(m.group(0), m.end())
+            end = n if close < 0 else close
+            for k in range(m.end(), end):
+                if out[k] != "\n":
+                    out[k] = " "
+            if close < 0:
+                return "".join(out), i
+            i = close + len(m.group(0))
+        else:
+            i += 1
+    return "".join(out), None
 
 
 def _has_code(chunk: str, dialect: str) -> bool:

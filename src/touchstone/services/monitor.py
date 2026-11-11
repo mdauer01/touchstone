@@ -101,6 +101,7 @@ from touchstone.services.history import (
 # One statement splitter for every history consumer, not two drifting ones.
 from touchstone.extraction.sqlutil import statement_chunks
 from touchstone.models import utcnow
+from touchstone.naming import names_metric
 from touchstone.services.resolution import normalize_name
 from touchstone.services.session import classify, resolve, written_relations
 from touchstone.toolchain import toolchain_status
@@ -705,10 +706,8 @@ def _candidate(stmt: exp.Expression, explicit, by_name: dict, by_source: dict,
             named |= by_name[normalize_name(arg.name)]
             names.add(arg.name)
     for proj in getattr(stmt, "selects", []):
-        alias = normalize_name(proj.alias_or_name or "")
         for metric, concepts in by_name.items():
-            if alias and (alias == metric or alias.startswith(metric + "_")
-                          or alias.endswith("_" + metric) or f"_{metric}_" in alias):
+            if names_metric(proj.alias_or_name, metric):
                 named |= concepts
                 names.add(proj.alias_or_name)
     concepts = named or set().union(*(by_source.get(r.lower(), set()) for r in reads))

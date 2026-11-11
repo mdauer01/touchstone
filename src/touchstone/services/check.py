@@ -3,8 +3,8 @@
 One pass, no scan and no store. A pilot package (pilot.yml) names the approved
 metric-view snapshots, the query history and the window; this module finds
 the statements that use a governed metric, sends each distinct one to the
-advisory assessment (criteria v6: one question, evidence, three review
-states) and returns everything the report shows.
+advisory assessment (criteria v7 by default, v6 with its rules for ratios and
+safe division made explicit: one question, evidence, three review states) and returns everything the report shows.
 
 The definitions come straight from the snapshots: every named measure of
 every listed view is a definition, whatever the SQL rules can or cannot
@@ -45,6 +45,8 @@ from touchstone.assess.criteria import Criteria
 from touchstone.assess.record import FORMAT, validate
 from touchstone.assess.runner import ADVISORY_NOTE, assess_records, priority
 from touchstone.extraction.sqlutil import statement_chunks
+from touchstone.naming import names_metric
+from touchstone.services.conformance import measure_calls, measure_ref
 from touchstone.services.history import qualify_tables, read_history
 from touchstone.services.monitor import (
     _IDENTITY_KIND,
@@ -145,6 +147,34 @@ def _narrow(keys, reads, defs) -> list[tuple[str, list]]:
     return sorted(by_measure.items())
 
 
+def _window(d: Definition, short: bool = False) -> str:
+    span = f"from {d.view.applies_from}" + (f" until {d.view.applies_to}" if d.view.applies_to
+                                             else "")
+    return span if short else f"the approved definition did not apply (it applies {span})"
+
+
+def _presented(stmt, explicit, by_name) -> list[str] | None:
+    """The names under which the statement's FINAL output presents a governed
+    metric: an explicit tag or asset, and the outermost outputs whose names
+    name one. A metric referenced only inside (a CTE's MEASURE(revenue) under
+    an outer revenue_share) nominates the definition; it is not what the
+    statement presents. None when the final output cannot be read (a star)."""
+    out = set()
+    if explicit and explicit[0] in ("tag", "query_tag", "asset") and explicit[1]:
+        out.add(str(explicit[1]))
+    for proj in getattr(stmt, "selects", None) or []:
+        if isinstance(proj, exp.Star) or (isinstance(proj, exp.Column)
+                                          and isinstance(proj.this, exp.Star)):
+            return None
+        name = proj.alias_or_name
+        if not proj.alias and measure_calls(proj) and proj is measure_calls(proj)[0]:
+            _, arg = measure_ref(proj)
+            name = arg.name if isinstance(arg, exp.Column) else name
+        if name and any(names_metric(name, metric) for metric in by_name):
+            out.add(name)
+    return sorted(out)
+
+
 def _mentions(defs) -> re.Pattern | None:
     """Whole-word mentions of a governed view, source or metric name: an
     unparseable statement that mentions one may be a use nobody read."""
@@ -169,8 +199,11 @@ def export_records(pilot_dir: str | Path, dialect: str = "databricks") -> tuple:
     context = {"default_database": pilot.context_catalog,
                "default_schema": pilot.context_schema}
     registry = build_registry(catalog, [], dialect, context)
+    # The governed views' own names fix how many parts a full name has; the
+    # optional column catalog supplies types, not whether short names resolve.
+    registry.set_estate_depth([v.name for v in pilot.views])
     lookup = registry.without_context()     # history rows resolve by their own session
-    depth = registry.estate_depth()
+    depth = lookup.estate_depth()
     defs = definitions(pilot, lookup)
     by_name: dict[str, set] = {}
     by_source: dict[str, set] = {}
@@ -180,6 +213,10 @@ def export_records(pilot_dir: str | Path, dialect: str = "databricks") -> tuple:
             if rel:
                 by_source.setdefault(rel.lower(), set()).add(d.key)
     mentions = _mentions(defs)
+    # Compared against `current` definitions, a listed view that is no longer
+    # current is left out; a statement that reads it is not compared with another.
+    past = ({v.name for v in pilot.views if not v.current}
+            if pilot.compare_against == "current" else set())
     asserted = ((pilot.context_catalog, pilot.context_schema) if pilot.context_asserted
                 else (None, None))
     as_of = pilot.compare_against == "as_of_execution"
@@ -213,7 +250,7 @@ def export_records(pilot_dir: str | Path, dialect: str = "databricks") -> tuple:
         entry["runs"].setdefault(ex.statement_id or f"run:{len(entry['runs'])}",
                                  where(ex))
 
-    def add(run, d: Definition, reads, names, source, ex, ts):
+    def add(run, d: Definition, reads, names, source, ex, ts, presented):
         key = hashlib.sha256(json.dumps([
             _normalized_text(run["execution"]["statement"]), run["execution"]["dialect"],
             run["session_evidence"], d.label, d.view.applies_from, d.view.sha256,
@@ -236,6 +273,7 @@ def export_records(pilot_dir: str | Path, dialect: str = "databricks") -> tuple:
                 {"source": evidence, "value": n} for n in names]
                 or [{"source": "none", "value": None}]},
             "comparison": pilot.comparison_label(),
+            "presented": presented,
             "definition": {
                 "system": "uc_metrics", "view": d.view.name, "name": d.name, "expr": d.expr,
                 "source": d.source, "required_filters": list(d.filters),
@@ -286,24 +324,38 @@ def export_records(pilot_dir: str | Path, dialect: str = "databricks") -> tuple:
             counts["candidates"] += 1
             keys, reads, names, source = found
             statement = run["execution"]["statement"]
+            stale = sorted({r.lower() for r in reads} & past)
+            if stale:
+                gap(statement, ex, ts, f"it reads {', '.join(stale)}, an approved definition "
+                    "that is no longer current", None, stale)
+                continue
+            presented = _presented(stmt, _statement_tag(stmt) or row_identity, by_name)
+            # The order matters: the view the statement reads, then the time it ran,
+            # then the name. A version that did not apply then is not a rival.
             for measure, options in _narrow(keys, reads, defs):
                 views = sorted(defs[k].view.name for k in options)
+                if as_of:
+                    if ts is None:
+                        gap(statement, ex, ts, f"its start time is {time_state}, so which "
+                            f"definition applied when it ran is not known", measure, views)
+                        continue
+                    applying = [k for k in options if defs[k].view.applies_at(ts)]
+                    if not applying:
+                        gap(statement, ex, ts, f"it ran at {ts}, when "
+                            + (_window(defs[options[0]]) if len(options) == 1 else
+                               f"no approved definition named {measure} applied ("
+                               + "; ".join(f"{defs[k].view.name}: " + _window(defs[k], short=True)
+                                           for k in options) + ")"),
+                            measure, views)
+                        continue
+                    options = applying
+                    views = sorted(defs[k].view.name for k in options)
                 if len(options) > 1:
                     gap(statement, ex, ts, f"more than one approved definition is named "
                         f"{measure} ({', '.join(views)}) and the statement does not say "
                         f"which it uses", measure, views)
                     continue
-                d = defs[options[0]]
-                if as_of and ts is None:
-                    gap(statement, ex, ts, f"its start time is {time_state}, so which "
-                        f"definition applied when it ran is not known", d.name, views)
-                elif as_of and not d.view.applies_at(ts):
-                    gap(statement, ex, ts, f"it ran at {ts}, when the approved definition "
-                        f"did not apply (it applies from {d.view.applies_from}"
-                        + (f" until {d.view.applies_to}" if d.view.applies_to else "")
-                        + ")", d.name, views)
-                else:
-                    add(run, d, reads, names, source, ex, ts)
+                add(run, defs[options[0]], reads, names, source, ex, ts, presented)
 
     out = []
     for key, record in records.items():
@@ -344,7 +396,7 @@ def run_check(pilot_dir: str | Path, provider, criteria: Criteria, *,
               dialect: str = "databricks", cache: dict | None = None) -> dict:
     if criteria.mode != "single":
         raise ValueError(f"check reports three review states, and criteria "
-                         f"v{criteria.version} does not produce them; use criteria 6, "
+                         f"v{criteria.version} does not produce them; use criteria 7 or 6, "
                          f"or `touchstone assess run` for older criteria")
     pilot, history, records, not_assessed = export_records(pilot_dir, dialect)
 

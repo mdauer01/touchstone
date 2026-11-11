@@ -401,13 +401,14 @@ def main(argv: list[str] | None = None) -> int:
                             "Ollama (or OPENAI_BASE_URL; default: OpenAI's API)")
         p.add_argument("--service-tier", dest="service_tier", choices=["auto", "default", "flex"],
                        help="openai: processing tier; flex is half price and slower")
-        p.add_argument("--criteria", type=int, choices=[1, 2, 3, 4, 5, 6],
+        p.add_argument("--criteria", type=int, choices=[1, 2, 3, 4, 5, 6, 7],
                        help="criteria version (default: the latest released, 3); 4 records "
                             "facts and owner-rule citations and decides by treatment "
                             "(alert, informational, unresolved, none); 5 adds the metric "
                             "view's join semantics and decides prohibited variations first; "
                             "6 asks one question with evidence and gives three review states "
-                            "(review needed, no issue flagged, could not assess)")
+                            "(review needed, no issue flagged, could not assess); 7 is 6 with "
+                            "its rules for ratios and safe division made explicit")
         p.add_argument("--votes", type=int, default=1,
                        help="ask every statement flagged as drift this many times in all, "
                             "and keep the flag when at least half the answers agree "
@@ -1319,10 +1320,10 @@ def _cmd_check(args: argparse.Namespace) -> int:
     from touchstone.services.check import run_check
 
     try:
-        criteria = load_criteria(args.criteria or 6)
+        criteria = load_criteria(args.criteria or 7)
         if criteria.mode != "single":
             raise ValueError(f"criteria v{criteria.version} does not produce the three "
-                             f"review states check reports; use --criteria 6, or "
+                             f"review states check reports; use --criteria 7 (or 6), or "
                              f"`touchstone assess run` for older criteria")
         provider = _provider_from(args)
     except (NotImplementedError, ValueError) as e:

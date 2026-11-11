@@ -54,6 +54,19 @@ def test_excerpts_must_occur_in_the_text_they_quote():
                     record(), V6)[0] == "could_not_assess"
 
 
+def test_a_quote_of_parts_from_apart_is_found_part_by_part():
+    from touchstone.assess.criteria import excerpts_found
+
+    # Lines and "; "-joined parts quoted together, in another order than the text.
+    apart = reply("departs", statement_clause="DATE('1995-01-01')\nsum(l_extendedprice*(1-l_discount))",
+                  definition_clause="l_returnflag <> 'R'; SUM(l_extendedprice * (1 - l_discount))",
+                  explanation="x")
+    assert excerpts_found(apart, record()) == {"statement_clause": True, "definition_clause": True}
+    one_invented = reply("departs", statement_clause="DATE('1995-01-01')\nl_tax > 0",
+                         explanation="x")
+    assert excerpts_found(one_invented, record())["statement_clause"] is False
+
+
 @pytest.mark.parametrize("answers, state", [
     (reply("preserved"), "no_issue_flagged"),
     (reply("undetermined", explanation="no fact says each part key is unique"),
@@ -128,3 +141,21 @@ def test_an_output_read_as_the_metric_must_be_named_as_it():
     tagged = {**unnamed, "claimed_metric": {"identity_evidence": [{"source": "tag",
                                                                    "value": "revenue"}]}}
     assert finalize("x", departs, tagged, V6)[0] == "review_needed"
+
+
+def test_v7_states_the_ratio_and_safe_division_rules_and_decides_as_v6():
+    from touchstone.assess.criteria import decide_single
+
+    v6, v7 = load(6), load(7)
+    assert (v7.version, v7.mode, v7.labels) == (7, "single", v6.labels)
+    assert "common input population" in v7.policy
+    assert "COUNT(delivery_date)" in v7.policy and "try_divide" in v7.policy
+    assert "common input population" not in v6.policy and "try_divide" not in v6.policy
+    # Everything else in the policy is v6's, word for word.
+    extra = [line for line in v7.policy.splitlines() if line not in v6.policy.splitlines()]
+    assert len(extra) == 10
+    for answers in ({"comparison": "departs", "presented_as": "rate", "explanation": "x",
+                     "definition_clause": "y"},
+                    {"comparison": "preserved", "presented_as": "rate"},
+                    {"comparison": "undetermined", "presented_as": "rate"}):
+        assert decide_single(answers, v7) == decide_single(answers, v6)

@@ -172,6 +172,11 @@
         }
       }
     },
+    "presented": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "description": "the names under which the statement's final output presents a governed metric: an explicit tag or asset, and the outermost outputs whose names name one (a metric referenced only inside, such as a CTE's MEASURE(m), is not presented); null when the final output cannot be read (a star). Absent from records made before it existed"
+    },
     "claimed_metric": {
       "type": "object",
       "required": [
