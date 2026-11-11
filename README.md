@@ -133,8 +133,10 @@ one counts as a miss), precision of review-needed answers, and abstention.
   it caught 13 of 18 expected drifts and passed none as clean (the other 5 were could
   not assess); 13 of 17 review-needed answers were right, with 4 false alarms in 181
   cases without drift. That does not meet the 0.1.0 bar. All 5 misses came from the
-  code's name check, which does not accept abbreviated names such as `avg_order_value`;
-  the model's own answer was "departs" on all 18.
+  code's name check, which did not accept abbreviated names such as `avg_order_value`.
+  After the fixes in 0.1.2, on this now-known benchmark (not a fresh test): 18 of 18
+  drifts caught, 18 of 23 review-needed answers right, 4 false alarms in 129 cases
+  without drift, all of one kind (a NULL check on a weighted average's input).
 
 Historical comparison, not like for like: on the dev set the earlier five-question
 classifier (criteria v4) raised 42 alerts to catch the same 13. It received owner rules

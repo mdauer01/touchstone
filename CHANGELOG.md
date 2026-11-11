@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.1.2 — unreleased
+
+Correctness fixes from the second frozen test (non-additive metrics) and an outside
+review. Measured only on benchmarks already seen; see
+[docs/results-complex-metrics.md](docs/results-complex-metrics.md).
+
+- **Names.** One rule decides whether an output names a metric, for candidate selection
+  and for the check on a verdict (`touchstone.naming`): the metric's words occur in the
+  name, in order; `avg` counts as `average`; every other word is kept (`gross_revenue`
+  does not name `net_revenue`). `avg_order_value` was not read as `average_order_value`,
+  so drifts presented under it were held as could not assess.
+- **What the statement presents.** Records carry `presented`: the names the final output
+  exposes, and an explicit tag or asset. A metric referenced only inside (a CTE's
+  MEASURE(revenue) under an outer `average_monthly_revenue`) nominates the definition
+  but no longer overrides the reading that no output presents it. A final `SELECT *`
+  keeps the uncertainty.
+- **Full names.** The governed views' names fix how many parts a full name has, so a
+  short name resolves from its row's catalog and schema with or without a column
+  catalog file.
+- **Applicability before ambiguity.** Under `as_of_execution` a definition that did not
+  apply when the statement ran is no longer a rival: two versions with separate windows
+  are not ambiguous. A statement that names a view that did not apply, or (under
+  `current`) a past view, is not compared with another view.
+- **Metric-view DDL.** A dollar-quoted body (`CREATE VIEW … WITH METRICS … AS $$ … $$`)
+  is one statement: its semicolons, quotes and dashes no longer split it into fragments
+  reported as uses not assessed. A body never closed is one statement that cannot be
+  read.
+- **Quoted excerpts.** A quote of several parts (separate lines, `; `, an ellipsis) is
+  found when every part occurs in the text; order and adjacency are no longer required.
+  Two correct answers had been rejected.
+- **Criteria v7, the default for `check`**: v6 with two rules made explicit. A filter on
+  the rows all parts of a ratio are computed from is a slice; changing one part only is a
+  departure. Safe division (`try_divide`) is compared with what the definition says a
+  zero denominator gives, not by its spelling. v6 stays available (`--criteria 6`).
+
 ## 0.1.1 — 2026-11-06
 
 Input integrity and coverage for `touchstone check`, from an outside review of 0.1.0.
